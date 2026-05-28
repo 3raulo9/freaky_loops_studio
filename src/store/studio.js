@@ -2,17 +2,16 @@ import { ref, reactive, computed } from 'vue'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
 import { playMelodicNote } from '../audio/melodic.js'
 
-// ─── Piano / note constants ────────────────────────────────────────────────────
+// ─── Constants ─────────────────────────────────────────────────────────────────
 export const PIANO_LOW   = 36
 export const PIANO_HIGH  = 84
 export const NOTE_NAMES  = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 export const PIANO_KEYS  = Array.from({ length: PIANO_HIGH - PIANO_LOW + 1 }, (_, i) => PIANO_HIGH - i)
-export const PLAYLIST_BARS = 32
+export const PLAYLIST_CELLS = 32   // number of cells on the playlist timeline
 
 export function midiToLabel(m) { return NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1) }
 export function isBlackKey(m)  { return [1, 3, 6, 8, 10].includes(m % 12) }
 
-// ─── PC keyboard → semitone offset ────────────────────────────────────────────
 const KB_SEMITONES = {
   KeyZ:0, KeyS:1, KeyX:2, KeyD:3, KeyC:4, KeyV:5, KeyG:6, KeyB:7, KeyH:8, KeyN:9, KeyJ:10, KeyM:11,
   KeyQ:12, Digit2:13, KeyW:14, Digit3:15, KeyE:16, KeyR:17, Digit5:18, KeyT:19, Digit6:20, KeyY:21, Digit7:22, KeyU:23, KeyI:24,
@@ -28,14 +27,12 @@ function makeChannel(overrides = {}) {
     name:  'SYNTH',
     color: '#4ecdc4',
     type:  'melodic',
-    mode:  'piano',     // 'steps' | 'piano'  (drums always 'steps')
+    mode:  'piano',
     volume:     0.8,
-    pan:        0,      // -1 (left) to 1 (right)
+    pan:        0,
     mixerTrack: 0,
     muted:      false,
     _soloed:    false,
-    pattern:    Array(32).fill(false),
-    pianoNotes: [],
     params: { pitch: 60, decay: 0.4, attack: 0.01, wave: 'sawtooth' },
     knobs: [
       { key: 'pitch',  label: 'NOTE',  min: 24,   max: 96,  decimals: 0 },
@@ -53,7 +50,7 @@ let _store = null
 export function useStudio() {
   if (_store) return _store
 
-  // ── Initial channels ────────────────────────────────────────────────────────
+  // ── Channels (instrument definitions, no step data here) ─────────────────────
   const channels = reactive([
     makeChannel({
       name: 'KICK', color: '#e74c3c', type: 'drum', mode: 'steps', volume: 0.9,
@@ -97,23 +94,148 @@ export function useStudio() {
     }),
   ])
 
+  // ── Pattern system ─────────────────────────────────────────────────────────────
+  // patterns[]: metadata (id, name, color)
+  // patternData[patternId][channelId] = { steps: bool[], pianoNotes: Note[] }
+  let _pid = 0
+  const patterns = reactive([
+    { id: 'p1', name: 'Pattern 1', color: '#4ecdc4' },
+  ])
+  const patternData = reactive({ p1: {} })
+  const currentPatternId = ref('p1')
+  const pickerPatternId  = ref('p1')   // selected in playlist picker
+
+  function getPatData(channelId, patternId = currentPatternId.value) {
+    if (!patternData[patternId]) patternData[patternId] = {}
+    if (!patternData[patternId][channelId]) {
+      patternData[patternId][channelId] = reactive({
+        steps:      Array(32).fill(false),
+        pianoNotes: [],
+      })
+    }
+    return patternData[patternId][channelId]
+  }
+
+  // Expose helpers for templates/components
+  function getSteps(channelId, patternId)      { return getPatData(channelId, patternId).steps }
+  function getPianoNotes(channelId, patternId) { return getPatData(channelId, patternId).pianoNotes }
+
+  function addPattern() {
+    const id    = 'p' + (++_pid + 1)
+    const num   = patterns.length + 1
+    const color = COLORS[patterns.length % COLORS.length]
+    patterns.push({ id, name: 'Pattern ' + num, color })
+    patternData[id] = {}
+    currentPatternId.value = id
+  }
+
+  function removePattern(id) {
+    if (patterns.length <= 1) return
+    const idx = patterns.findIndex(p => p.id === id)
+    if (idx < 0) return
+    patterns.splice(idx, 1)
+    delete patternData[id]
+    if (currentPatternId.value === id) currentPatternId.value = patterns[0].id
+    if (pickerPatternId.value === id)  pickerPatternId.value  = patterns[0].id
+    // Remove all playlist clips that used this pattern
+    for (let i = playlistClips.length - 1; i >= 0; i--) {
+      if (playlistClips[i].patternId === id) playlistClips.splice(i, 1)
+    }
+  }
+
+  function duplicatePattern(id) {
+    const src = patterns.find(p => p.id === id)
+    if (!src) return
+    const newId  = 'p' + (++_pid + 1)
+    const newPat = { id: newId, name: src.name + ' (copy)', color: src.color }
+    patterns.push(newPat)
+    patternData[newId] = {}
+    if (patternData[id]) {
+      Object.keys(patternData[id]).forEach(cid => {
+        patternData[newId][cid] = reactive({
+          steps:      [...(patternData[id][cid].steps || Array(32).fill(false))],
+          pianoNotes: (patternData[id][cid].pianoNotes || []).map(n => ({ ...n })),
+        })
+      })
+    }
+    currentPatternId.value = newId
+  }
+
+  // ── Playlist tracks & clips ────────────────────────────────────────────────────
+  const playlistTracks = reactive([
+    { id: 'pt1', name: 'Track 1', color: '#e74c3c', muted: false, _soloed: false },
+    { id: 'pt2', name: 'Track 2', color: '#3498db', muted: false, _soloed: false },
+  ])
+  let _clipId = 0
+  const playlistClips = reactive([])
+
+  // Time markers on the ruler
+  const timeMarkers = reactive([])   // { id, cell, label, color }
+  let _markerId = 0
+
+  const usePlaylist = ref(false)
+  const playlistTool = ref('draw')   // 'draw' | 'paint' | 'erase'
+  const cellWidth = ref(80)          // px per cell (zoom)
+
+  function addPlaylistTrack() {
+    const idx   = playlistTracks.length + 1
+    const color = COLORS[idx % COLORS.length]
+    playlistTracks.push({ id: 'pt' + idx + Date.now(), name: 'Track ' + idx, color, muted: false, _soloed: false })
+  }
+
+  function removePlaylistTrack(id) {
+    const idx = playlistTracks.findIndex(t => t.id === id)
+    if (idx < 0 || playlistTracks.length <= 1) return
+    playlistTracks.splice(idx, 1)
+    for (let i = playlistClips.length - 1; i >= 0; i--) {
+      if (playlistClips[i].trackId === id) playlistClips.splice(i, 1)
+    }
+  }
+
+  function soloPlaylistTrack(id) {
+    const already = playlistTracks.find(t => t.id === id)?._soloed
+    if (already) {
+      playlistTracks.forEach(t => { t.muted = false; t._soloed = false })
+    } else {
+      playlistTracks.forEach(t => { t._soloed = false; t.muted = t.id !== id })
+      const t = playlistTracks.find(t => t.id === id)
+      if (t) { t.muted = false; t._soloed = true }
+    }
+  }
+
+  function placeClip(trackId, cell, patternId) {
+    const existing = playlistClips.find(c => c.trackId === trackId && c.cell === cell)
+    if (existing) return
+    playlistClips.push({ id: 'c' + (++_clipId), trackId, cell, patternId: patternId ?? pickerPatternId.value })
+  }
+
+  function removeClip(clipId) {
+    const idx = playlistClips.findIndex(c => c.id === clipId)
+    if (idx >= 0) playlistClips.splice(idx, 1)
+  }
+
+  function addTimeMarker(cell, label = 'Marker') {
+    timeMarkers.push({ id: 'm' + (++_markerId), cell, label })
+  }
+
+  function removeTimeMarker(id) {
+    const idx = timeMarkers.findIndex(m => m.id === id)
+    if (idx >= 0) timeMarkers.splice(idx, 1)
+  }
+
   // ── UI state ─────────────────────────────────────────────────────────────────
   const selectedChannelId = ref(channels[0].id)
   const selectedChannel   = computed(() => channels.find(c => c.id === selectedChannelId.value) ?? channels[0])
-  const mainView          = ref('sequencer')   // 'sequencer' | 'playlist'
+  const mainView          = ref('sequencer')
   const pianoRollOpen     = ref(false)
   const renderModalOpen   = ref(false)
   const kbOctave          = ref(4)
-
-  // ── Sequencer state ───────────────────────────────────────────────────────────
-  const bpm         = ref(120)
-  const totalSteps  = ref(16)
-  const swing       = ref(0)
-  const isPlaying   = ref(false)
-  const displayStep = ref(-1)
-  // ── Playlist ──────────────────────────────────────────────────────────────────
-  const playlist    = reactive(Array.from({ length: PLAYLIST_BARS }, () => reactive({})))
-  const usePlaylist = ref(false)
+  const bpm               = ref(120)
+  const totalSteps        = ref(16)
+  const swing             = ref(0)
+  const isPlaying         = ref(false)
+  const displayStep       = ref(-1)
+  const displayCell       = ref(-1)   // current cell in playlist
 
   // ── Audio engine ──────────────────────────────────────────────────────────────
   let audioCtx    = null
@@ -128,17 +250,12 @@ export function useStudio() {
 
   function rebuildGains() {
     if (!audioCtx) return
-    trackGains   = []
-    trackPanners = []
+    trackGains = []; trackPanners = []
     channels.forEach(ch => {
-      const g = audioCtx.createGain()
-      g.gain.value = ch.volume
-      const p = audioCtx.createStereoPanner()
-      p.pan.value = ch.pan
-      g.connect(p)
-      p.connect(audioCtx.destination)
-      trackGains.push(g)
-      trackPanners.push(p)
+      const g = audioCtx.createGain(); g.gain.value = ch.volume
+      const p = audioCtx.createStereoPanner(); p.pan.value = ch.pan
+      g.connect(p); p.connect(audioCtx.destination)
+      trackGains.push(g); trackPanners.push(p)
     })
   }
 
@@ -149,33 +266,41 @@ export function useStudio() {
     })
   }
 
-  // ── Lookahead scheduler ───────────────────────────────────────────────────────
+  // ── Scheduler ─────────────────────────────────────────────────────────────────
   const LOOK_AHEAD = 0.12
   const TICK_MS    = 25
   let schedulerTimer = null
   let nextNoteTime   = 0
   let schedStep      = 0
-  let currentBar     = 0
+  let schedCell      = 0
   const noteQueue    = []
 
-  function isActiveInBar(ch, bar) {
-    if (!usePlaylist.value) return true
-    return !!playlist[bar % PLAYLIST_BARS]?.[ch.id]
+  function getPatternsForCell(cell) {
+    if (!usePlaylist.value) return [currentPatternId.value]
+    const playingTrackIds = new Set(playlistTracks.filter(t => !t.muted).map(t => t.id))
+    return playlistClips
+      .filter(c => c.cell === cell % PLAYLIST_CELLS && playingTrackIds.has(c.trackId))
+      .map(c => c.patternId)
   }
 
-  function scheduleStep(step, when) {
+  function scheduleStep(step, when, cell) {
     noteQueue.push({ step, time: when })
     syncVolumes()
+    const pids = getPatternsForCell(cell)
+
     channels.forEach((ch, ci) => {
-      if (ch.muted || !isActiveInBar(ch, currentBar)) return
+      if (ch.muted) return
       const dest = trackGains[ci] ?? audioCtx.destination
-      if (ch.mode === 'steps') {
-        if (ch.pattern[step]) ch.fn(audioCtx, when, { ...ch.params }, dest)
-      } else {
-        ch.pianoNotes.filter(n => n.step === step).forEach(note => {
-          ch.fn(audioCtx, when, { ...ch.params, pitch: note.pitch, velocity: note.velocity ?? 1 }, dest)
-        })
-      }
+      pids.forEach(pid => {
+        const d = getPatData(ch.id, pid)
+        if (ch.mode === 'steps') {
+          if (d.steps[step]) ch.fn(audioCtx, when, { ...ch.params }, dest)
+        } else {
+          d.pianoNotes.filter(n => n.step === step).forEach(note => {
+            ch.fn(audioCtx, when, { ...ch.params, pitch: note.pitch, velocity: note.velocity ?? 1 }, dest)
+          })
+        }
+      })
     })
   }
 
@@ -186,10 +311,10 @@ export function useStudio() {
     const steps = totalSteps.value
     while (nextNoteTime < audioCtx.currentTime + LOOK_AHEAD) {
       const swingOff = schedStep % 2 === 1 ? swing.value * secPerBeat * 0.5 : 0
-      scheduleStep(schedStep % steps, nextNoteTime + swingOff)
+      scheduleStep(schedStep % steps, nextNoteTime + swingOff, schedCell)
       nextNoteTime += secPerStep
       schedStep++
-      if (schedStep % steps === 0) currentBar++
+      if (schedStep % steps === 0) schedCell++
     }
   }
 
@@ -206,20 +331,17 @@ export function useStudio() {
   function startPlay() {
     initAudio()
     isPlaying.value = true
-    schedStep = 0; currentBar = 0
+    schedStep = 0; schedCell = 0
     nextNoteTime = audioCtx.currentTime + 0.05
-    noteQueue.length = 0
-    displayStep.value = -1
+    noteQueue.length = 0; displayStep.value = -1; displayCell.value = 0
     schedulerTimer = setInterval(tick, TICK_MS)
     requestAnimationFrame(drawLoop)
   }
 
   function stopPlay() {
     isPlaying.value = false
-    clearInterval(schedulerTimer)
-    schedulerTimer = null
-    noteQueue.length = 0
-    displayStep.value = -1
+    clearInterval(schedulerTimer); schedulerTimer = null
+    noteQueue.length = 0; displayStep.value = -1; displayCell.value = -1
   }
 
   function togglePlay() { isPlaying.value ? stopPlay() : startPlay() }
@@ -232,16 +354,12 @@ export function useStudio() {
     const ci   = channels.indexOf(ch)
     const dest = (ci >= 0 && trackGains[ci]) ? trackGains[ci] : audioCtx.destination
     const when = audioCtx.currentTime + 0.005
-    if (ch.type === 'drum') {
-      ch.fn(audioCtx, when, { ...ch.params }, dest)
-    } else {
-      ch.fn(audioCtx, when, { ...ch.params, pitch, velocity: 1 }, dest)
-    }
+    if (ch.type === 'drum') ch.fn(audioCtx, when, { ...ch.params }, dest)
+    else ch.fn(audioCtx, when, { ...ch.params, pitch, velocity: 1 }, dest)
   }
 
   function handleKeyDown(e) {
-    if (e.repeat) return
-    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(e.target.tagName)) return
+    if (e.repeat || ['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return
     if (e.code === 'BracketLeft')  { kbOctave.value = Math.max(0, kbOctave.value - 1); return }
     if (e.code === 'BracketRight') { kbOctave.value = Math.min(8, kbOctave.value + 1); return }
     const semi = KB_SEMITONES[e.code]
@@ -254,32 +372,31 @@ export function useStudio() {
 
   // ── Pattern editing ───────────────────────────────────────────────────────────
   function toggleStep(channelId, step) {
-    const ch = channels.find(c => c.id === channelId)
-    if (ch) ch.pattern[step] = !ch.pattern[step]
+    const d = getPatData(channelId); d.steps[step] = !d.steps[step]
   }
 
   function togglePianoNote(channelId, step, pitch) {
-    const ch = channels.find(c => c.id === channelId)
-    if (!ch) return
-    const idx = ch.pianoNotes.findIndex(n => n.step === step && n.pitch === pitch)
-    if (idx >= 0) ch.pianoNotes.splice(idx, 1)
-    else          ch.pianoNotes.push({ step, pitch, velocity: 1 })
+    const d   = getPatData(channelId)
+    const idx = d.pianoNotes.findIndex(n => n.step === step && n.pitch === pitch)
+    if (idx >= 0) d.pianoNotes.splice(idx, 1)
+    else          d.pianoNotes.push({ step, pitch, velocity: 1 })
   }
 
   function hasNote(channelId, step, pitch) {
-    return channels.find(c => c.id === channelId)?.pianoNotes.some(n => n.step === step && n.pitch === pitch) ?? false
+    return getPatData(channelId).pianoNotes.some(n => n.step === step && n.pitch === pitch)
   }
 
   function clearChannel(channelId) {
-    const ch = channels.find(c => c.id === channelId)
-    if (ch) { ch.pattern.fill(false); ch.pianoNotes.length = 0 }
+    const d = getPatData(channelId); d.steps.fill(false); d.pianoNotes.length = 0
   }
 
   function clearAll() {
-    channels.forEach(ch => { ch.pattern.fill(false); ch.pianoNotes.length = 0 })
+    channels.forEach(ch => {
+      const d = getPatData(ch.id); d.steps.fill(false); d.pianoNotes.length = 0
+    })
   }
 
-  // ── Solo ──────────────────────────────────────────────────────────────────────
+  // ── Channel solo ──────────────────────────────────────────────────────────────
   function soloChannel(id) {
     const already = channels.find(c => c.id === id)?._soloed
     if (already) {
@@ -289,11 +406,6 @@ export function useStudio() {
       const ch = channels.find(c => c.id === id)
       if (ch) { ch.muted = false; ch._soloed = true }
     }
-  }
-
-  // ── Playlist ──────────────────────────────────────────────────────────────────
-  function togglePlaylistBlock(bar, channelId) {
-    playlist[bar][channelId] = !playlist[bar][channelId]
   }
 
   // ── Channel management ────────────────────────────────────────────────────────
@@ -320,22 +432,36 @@ export function useStudio() {
 
   function moveChannel(id, dir) {
     const idx = channels.findIndex(c => c.id === id)
-    const target = idx + dir
-    if (target < 0 || target >= channels.length) return
+    const t   = idx + dir
+    if (t < 0 || t >= channels.length) return
     const [ch] = channels.splice(idx, 1)
-    channels.splice(target, 0, ch)
+    channels.splice(t, 0, ch)
   }
 
   // ── Public API ────────────────────────────────────────────────────────────────
   _store = {
-    channels, selectedChannelId, selectedChannel, mainView, kbOctave,
-    pianoRollOpen, renderModalOpen,
-    bpm, totalSteps, swing, isPlaying, displayStep,
-    playlist, usePlaylist, PLAYLIST_BARS,
-    togglePlay, startPlay, stopPlay,
+    // Channels
+    channels, selectedChannelId, selectedChannel,
+    soloChannel, addChannel, removeChannel, moveChannel,
+    // Patterns
+    patterns, currentPatternId, pickerPatternId, patternData,
+    getPatData, getSteps, getPianoNotes,
+    addPattern, removePattern, duplicatePattern,
+    // Pattern editing
     toggleStep, togglePianoNote, hasNote, clearChannel, clearAll,
-    soloChannel, togglePlaylistBlock,
-    addChannel, removeChannel, moveChannel,
+    // Playlist
+    playlistTracks, playlistClips, timeMarkers, usePlaylist,
+    playlistTool, cellWidth, displayCell,
+    addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
+    placeClip, removeClip,
+    addTimeMarker, removeTimeMarker,
+    PLAYLIST_CELLS,
+    // UI state
+    mainView, pianoRollOpen, renderModalOpen, kbOctave,
+    // Sequencer
+    bpm, totalSteps, swing, isPlaying, displayStep,
+    togglePlay, startPlay, stopPlay,
+    // Keyboard
     playNote, handleKeyDown, handleKeyUp,
   }
   return _store

@@ -227,7 +227,16 @@ import {
 
 defineEmits(['close'])
 
-const { channels, bpm, totalSteps, swing } = useStudio()
+const { channels, bpm, totalSteps, swing, getPatData, currentPatternId } = useStudio()
+
+// Resolve current pattern's step/note data into each channel before passing to
+// the encoder — export.js still expects track.pattern[] and track.pianoNotes[].
+function resolvedTracks() {
+  return channels.map(ch => {
+    const d = getPatData(ch.id, currentPatternId.value)
+    return { ...ch, pattern: d.steps, pianoNotes: d.pianoNotes }
+  })
+}
 
 // ── Format definitions ────────────────────────────────────────────────────────
 const oggMime = typeof window !== 'undefined' ? getOggMimeType() : null
@@ -383,7 +392,7 @@ async function startRender() {
     let result
     if (format.value === 'wav') {
       progressLabel.value = `Rendering WAV — ${wav.value.sampleRate/1000}kHz · ${wav.value.bitDepth}-bit…`
-      result = await renderLoopToWav(channels, {
+      result = await renderLoopToWav(resolvedTracks(), {
         ...shared,
         sampleRate: wav.value.sampleRate,
         bitDepth:   wav.value.bitDepth,
@@ -393,7 +402,7 @@ async function startRender() {
       })
     } else if (format.value === 'mp3') {
       progressLabel.value = `Rendering audio, then encoding MP3 at ${mp3.value.bitrate} kbps…`
-      result = await renderLoopToMp3(channels, {
+      result = await renderLoopToMp3(resolvedTracks(), {
         ...shared,
         bitrate:   mp3.value.bitrate,
         channels:  mp3.value.channels,
@@ -402,7 +411,7 @@ async function startRender() {
       })
     } else if (format.value === 'ogg') {
       progressLabel.value = `Encoding OGG/Opus at ${ogg.value.bitrate} kbps — playing back in real time…`
-      result = await renderLoopToOgg(channels, {
+      result = await renderLoopToOgg(resolvedTracks(), {
         ...shared,
         bitrate:   ogg.value.bitrate,
         channels:  ogg.value.channels,
