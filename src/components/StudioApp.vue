@@ -54,6 +54,9 @@
 
     </div>
 
+    <!-- ── Render modal ──────────────────────────────────────────────── -->
+    <RenderModal v-if="renderModalOpen" @close="renderModalOpen = false" />
+
     <!-- ── Bottom: Piano Roll panel ──────────────────────────────────── -->
     <div
       v-if="pianoRollOpen && mainView === 'sequencer'"
@@ -99,9 +102,10 @@ import Playlist    from './Playlist.vue'
 import PianoRoll   from './PianoRoll.vue'
 import StepGrid    from './StepGrid.vue'
 import Knob        from './Knob.vue'
+import RenderModal from './RenderModal.vue'
 
 const {
-  mainView, selectedChannel, kbOctave, pianoRollOpen,
+  mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen,
   clearChannel, handleKeyDown, handleKeyUp,
 } = useStudio()
 
