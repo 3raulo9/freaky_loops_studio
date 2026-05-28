@@ -5,8 +5,8 @@ function writeString(view, offset, str) {
 }
 
 function encodeWav(samples, numChannels, sampleRate) {
-  const bytesPerSample = 2   // 16-bit PCM
-  const dataSize  = samples.length * bytesPerSample
+  const bytesPerSample = 2
+  const dataSize = samples.length * bytesPerSample
   const buf  = new ArrayBuffer(44 + dataSize)
   const view = new DataView(buf)
 
@@ -15,12 +15,12 @@ function encodeWav(samples, numChannels, sampleRate) {
   writeString(view, 8, 'WAVE')
   writeString(view, 12, 'fmt ')
   view.setUint32(16, 16, true)
-  view.setUint16(20, 1,  true)                               // PCM
+  view.setUint16(20, 1,  true)
   view.setUint16(22, numChannels, true)
   view.setUint32(24, sampleRate, true)
   view.setUint32(28, sampleRate * numChannels * bytesPerSample, true)
   view.setUint16(32, numChannels * bytesPerSample, true)
-  view.setUint16(34, 16, true)                               // bits per sample
+  view.setUint16(34, 16, true)
   writeString(view, 36, 'data')
   view.setUint32(40, dataSize, true)
 
@@ -34,8 +34,8 @@ function encodeWav(samples, numChannels, sampleRate) {
 }
 
 function bufferToWavBlob(audioBuffer) {
-  const numCh  = audioBuffer.numberOfChannels
-  const len    = audioBuffer.length
+  const numCh = audioBuffer.numberOfChannels
+  const len   = audioBuffer.length
   const interleaved = new Float32Array(len * numCh)
 
   if (numCh === 2) {
@@ -48,28 +48,19 @@ function bufferToWavBlob(audioBuffer) {
   } else {
     interleaved.set(audioBuffer.getChannelData(0))
   }
-
   return encodeWav(interleaved, numCh, audioBuffer.sampleRate)
 }
 
-/**
- * @param {object[]}  tracks     - reactive track array (same shape as DrumMachine)
- * @param {number}    bpm
- * @param {number}    totalSteps
- * @param {number}    swing      - 0–0.25 fractional swing offset
- * @param {number}    bars       - how many loop repetitions to render
- */
 export async function renderLoopToWav(tracks, bpm, totalSteps, swing, bars = 1) {
   const SAMPLE_RATE  = 44100
   const secPerBeat   = 60 / bpm
-  const secPerStep   = secPerBeat / 4          // 16th-note grid
+  const secPerStep   = secPerBeat / 4
   const loopDuration = totalSteps * secPerStep * bars
-  const tail         = 3.5                     // silence tail for long decays (clash)
+  const tail         = 3.5
   const totalSec     = loopDuration + tail
 
   const offCtx = new OfflineAudioContext(2, Math.ceil(SAMPLE_RATE * totalSec), SAMPLE_RATE)
 
-  // Schedule every bar
   for (let bar = 0; bar < bars; bar++) {
     const barOffset = bar * totalSteps * secPerStep
     for (let step = 0; step < totalSteps; step++) {
@@ -77,11 +68,21 @@ export async function renderLoopToWav(tracks, bpm, totalSteps, swing, bars = 1) 
       const when = 0.01 + barOffset + step * secPerStep + swingOffset
 
       tracks.forEach(track => {
-        if (!track.pattern[step] || track.muted) return
+        if (track.muted) return
         const vol = offCtx.createGain()
         vol.gain.value = track.volume
         vol.connect(offCtx.destination)
-        track.fn(offCtx, when, { ...track.params }, vol)
+
+        if (track.mode === 'piano') {
+          const notesAtStep = (track.pianoNotes || []).filter(n => n.step === step)
+          notesAtStep.forEach(note => {
+            track.fn(offCtx, when, { ...track.params, pitch: note.pitch, velocity: note.velocity ?? 1 }, vol)
+          })
+        } else {
+          if (track.pattern[step]) {
+            track.fn(offCtx, when, { ...track.params }, vol)
+          }
+        }
       })
     }
   }
