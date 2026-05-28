@@ -2,18 +2,21 @@ import { ref, reactive, computed } from 'vue'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
 import { playMelodicNote } from '../audio/melodic.js'
 
-// ─── Piano / note constants ────────────────────────────────────────────────────
+// ─── Constants ─────────────────────────────────────────────────────────────────
 export const PIANO_LOW   = 36
 export const PIANO_HIGH  = 84
 export const NOTE_NAMES  = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 export const PIANO_KEYS  = Array.from({ length: PIANO_HIGH - PIANO_LOW + 1 }, (_, i) => PIANO_HIGH - i)
+<<<<<<< HEAD
 export const PLAYLIST_BARS  = 32
 export const PLAYLIST_CELLS = 32
+=======
+export const PLAYLIST_CELLS = 32   // number of cells on the playlist timeline
+>>>>>>> c365a8b23b5942bd29ae02edd52e2c5e03b54779
 
 export function midiToLabel(m) { return NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1) }
 export function isBlackKey(m)  { return [1, 3, 6, 8, 10].includes(m % 12) }
 
-// ─── PC keyboard → semitone offset ────────────────────────────────────────────
 const KB_SEMITONES = {
   KeyZ:0, KeyS:1, KeyX:2, KeyD:3, KeyC:4, KeyV:5, KeyG:6, KeyB:7, KeyH:8, KeyN:9, KeyJ:10, KeyM:11,
   KeyQ:12, Digit2:13, KeyW:14, Digit3:15, KeyE:16, KeyR:17, Digit5:18, KeyT:19, Digit6:20, KeyY:21, Digit7:22, KeyU:23, KeyI:24,
@@ -29,14 +32,12 @@ function makeChannel(overrides = {}) {
     name:  'SYNTH',
     color: '#4ecdc4',
     type:  'melodic',
-    mode:  'piano',     // 'steps' | 'piano'  (drums always 'steps')
+    mode:  'piano',
     volume:     0.8,
-    pan:        0,      // -1 (left) to 1 (right)
+    pan:        0,
     mixerTrack: 0,
     muted:      false,
     _soloed:    false,
-    pattern:    Array(32).fill(false),
-    pianoNotes: [],
     params: { pitch: 60, decay: 0.4, attack: 0.01, wave: 'sawtooth' },
     knobs: [
       { key: 'pitch',  label: 'NOTE',  min: 24,   max: 96,  decimals: 0 },
@@ -54,7 +55,7 @@ let _store = null
 export function useStudio() {
   if (_store) return _store
 
-  // ── Initial channels ────────────────────────────────────────────────────────
+  // ── Channels (instrument definitions, no step data here) ─────────────────────
   const channels = reactive([
     makeChannel({
       name: 'KICK', color: '#e74c3c', type: 'drum', mode: 'steps', volume: 0.9,
@@ -167,8 +168,13 @@ export function useStudio() {
 
   // ── Playlist tracks & clips ────────────────────────────────────────────────────
   const playlistTracks = reactive([
+<<<<<<< HEAD
     { id: 'pt1', name: 'Track 1', color: '#e74c3c', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null },
     { id: 'pt2', name: 'Track 2', color: '#3498db', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null },
+=======
+    { id: 'pt1', name: 'Track 1', color: '#e74c3c', muted: false, _soloed: false },
+    { id: 'pt2', name: 'Track 2', color: '#3498db', muted: false, _soloed: false },
+>>>>>>> c365a8b23b5942bd29ae02edd52e2c5e03b54779
   ])
   let _clipId = 0
   const playlistClips = reactive([])
@@ -177,16 +183,26 @@ export function useStudio() {
   const timeMarkers = reactive([])   // { id, cell, label, color }
   let _markerId = 0
 
+<<<<<<< HEAD
   const usePlaylist    = ref(false)
   const playlistTool   = ref('draw')    // 'draw' | 'paint' | 'erase' | 'select'
   const cellWidth      = ref(80)        // px per cell (zoom)
   const trackHeight    = ref(52)        // px per track (vertical zoom)
   const clipFocusMode  = ref('pattern') // 'pattern' | 'automation'
+=======
+  const usePlaylist = ref(false)
+  const playlistTool = ref('draw')   // 'draw' | 'paint' | 'erase'
+  const cellWidth = ref(80)          // px per cell (zoom)
+>>>>>>> c365a8b23b5942bd29ae02edd52e2c5e03b54779
 
   function addPlaylistTrack() {
     const idx   = playlistTracks.length + 1
     const color = COLORS[idx % COLORS.length]
+<<<<<<< HEAD
     playlistTracks.push({ id: 'pt' + idx + Date.now(), name: 'Track ' + idx, color, muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null })
+=======
+    playlistTracks.push({ id: 'pt' + idx + Date.now(), name: 'Track ' + idx, color, muted: false, _soloed: false })
+>>>>>>> c365a8b23b5942bd29ae02edd52e2c5e03b54779
   }
 
   function removePlaylistTrack(id) {
@@ -209,6 +225,7 @@ export function useStudio() {
     }
   }
 
+<<<<<<< HEAD
   function placeClip(trackId, cell, patternId, width = 1) {
     const w = Math.max(1, width)
     const collision = playlistClips.find(c =>
@@ -237,6 +254,12 @@ export function useStudio() {
     const clip = playlistClips.find(c => c.id === clipId)
     if (!clip) return
     clip.width = Math.max(1, Math.min(PLAYLIST_CELLS - clip.cell, newWidth))
+=======
+  function placeClip(trackId, cell, patternId) {
+    const existing = playlistClips.find(c => c.trackId === trackId && c.cell === cell)
+    if (existing) return
+    playlistClips.push({ id: 'c' + (++_clipId), trackId, cell, patternId: patternId ?? pickerPatternId.value })
+>>>>>>> c365a8b23b5942bd29ae02edd52e2c5e03b54779
   }
 
   function removeClip(clipId) {
@@ -253,6 +276,7 @@ export function useStudio() {
     if (idx >= 0) timeMarkers.splice(idx, 1)
   }
 
+<<<<<<< HEAD
   // ── Track grouping / locking ───────────────────────────────────────────────────
   function groupTrackWithAbove(trackId) {
     const idx = playlistTracks.findIndex(t => t.id === trackId)
@@ -324,13 +348,16 @@ export function useStudio() {
     return patterns.filter(p => !used.has(p.id)).map(p => p.id)
   }
 
+=======
+>>>>>>> c365a8b23b5942bd29ae02edd52e2c5e03b54779
   // ── UI state ─────────────────────────────────────────────────────────────────
   const selectedChannelId = ref(channels[0].id)
   const selectedChannel   = computed(() => channels.find(c => c.id === selectedChannelId.value) ?? channels[0])
-  const mainView          = ref('sequencer')   // 'sequencer' | 'playlist'
+  const mainView          = ref('sequencer')
   const pianoRollOpen     = ref(false)
   const renderModalOpen   = ref(false)
   const kbOctave          = ref(4)
+<<<<<<< HEAD
 
   // ── Sequencer state ───────────────────────────────────────────────────────────
   const bpm         = ref(120)
@@ -339,6 +366,15 @@ export function useStudio() {
   const isPlaying   = ref(false)
   const displayStep = ref(-1)
   const displayCell = ref(-1)
+=======
+  const bpm               = ref(120)
+  const totalSteps        = ref(16)
+  const swing             = ref(0)
+  const isPlaying         = ref(false)
+  const displayStep       = ref(-1)
+  const displayCell       = ref(-1)   // current cell in playlist
+
+>>>>>>> c365a8b23b5942bd29ae02edd52e2c5e03b54779
   // ── Audio engine ──────────────────────────────────────────────────────────────
   let audioCtx    = null
   let trackGains  = []
@@ -381,11 +417,15 @@ export function useStudio() {
     if (!usePlaylist.value) return [currentPatternId.value]
     const playingTrackIds = new Set(playlistTracks.filter(t => !t.muted).map(t => t.id))
     return playlistClips
+<<<<<<< HEAD
       .filter(c => {
         const w = c.width || 1
         const cellMod = cell % PLAYLIST_CELLS
         return cellMod >= c.cell && cellMod < c.cell + w && playingTrackIds.has(c.trackId)
       })
+=======
+      .filter(c => c.cell === cell % PLAYLIST_CELLS && playingTrackIds.has(c.trackId))
+>>>>>>> c365a8b23b5942bd29ae02edd52e2c5e03b54779
       .map(c => c.patternId)
   }
 
@@ -393,6 +433,10 @@ export function useStudio() {
     noteQueue.push({ step, time: when })
     syncVolumes()
     const pids = getPatternsForCell(cell)
+<<<<<<< HEAD
+=======
+
+>>>>>>> c365a8b23b5942bd29ae02edd52e2c5e03b54779
     channels.forEach((ch, ci) => {
       if (ch.muted) return
       const dest = trackGains[ci] ?? audioCtx.destination
@@ -556,6 +600,7 @@ export function useStudio() {
     toggleStep, togglePianoNote, hasNote, clearChannel, clearAll,
     // Playlist
     playlistTracks, playlistClips, timeMarkers, usePlaylist,
+<<<<<<< HEAD
     playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell,
     addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
     placeClip, removeClip, moveClip, resizeClip,
@@ -568,6 +613,13 @@ export function useStudio() {
     addAutoNode, removeAutoNode, resizeAutomationClip,
     // Utilities
     getUnusedPatternIds,
+=======
+    playlistTool, cellWidth, displayCell,
+    addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
+    placeClip, removeClip,
+    addTimeMarker, removeTimeMarker,
+    PLAYLIST_CELLS,
+>>>>>>> c365a8b23b5942bd29ae02edd52e2c5e03b54779
     // UI state
     mainView, pianoRollOpen, renderModalOpen, kbOctave,
     // Sequencer
