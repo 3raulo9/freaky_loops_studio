@@ -36,3 +36,28 @@ html, body {
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg-base); }
 ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+
+/* ── Force landscape on portrait mobile ────────────────────────────────────
+   Rotates the entire app 90° CW so the wider drum-machine layout is always
+   visible without needing the user to physically rotate their phone.        */
+@media screen and (max-width: 768px) and (orientation: portrait) {
+  html, body {
+    overflow: hidden;
+    height: 100%;
+    width: 100%;
+  }
+
+  #app {
+    position: fixed;
+    top: 0;
+    left: 100vw;          /* shift to right edge — rotation pivot is here   */
+    width: 100vh;         /* rotated: visual width  = portrait screen height */
+    height: 100vw;        /* rotated: visual height = portrait screen width  */
+    min-height: unset;
+    transform: rotate(90deg);
+    transform-origin: top left;
+    overflow-y: auto;     /* allow scrolling in the rotated (visual) Y axis  */
+    padding: 16px;
+    align-items: flex-start;
+  }
+}
