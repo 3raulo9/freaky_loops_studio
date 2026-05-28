@@ -102,6 +102,7 @@ export function useStudio() {
   const selectedChannel   = computed(() => channels.find(c => c.id === selectedChannelId.value) ?? channels[0])
   const mainView          = ref('sequencer')   // 'sequencer' | 'playlist'
   const pianoRollOpen     = ref(false)
+  const renderModalOpen   = ref(false)
   const kbOctave          = ref(4)
 
   // ── Sequencer state ───────────────────────────────────────────────────────────
@@ -110,9 +111,6 @@ export function useStudio() {
   const swing       = ref(0)
   const isPlaying   = ref(false)
   const displayStep = ref(-1)
-  const exportBars  = ref(2)
-  const isRendering = ref(false)
-
   // ── Playlist ──────────────────────────────────────────────────────────────────
   const playlist    = reactive(Array.from({ length: PLAYLIST_BARS }, () => reactive({})))
   const usePlaylist = ref(false)
@@ -328,36 +326,17 @@ export function useStudio() {
     channels.splice(target, 0, ch)
   }
 
-  // ── WAV export ────────────────────────────────────────────────────────────────
-  async function exportWav() {
-    if (isRendering.value) return
-    isRendering.value = true
-    try {
-      const { renderLoopToWav } = await import('../audio/export.js')
-      const blob = await renderLoopToWav(channels, bpm.value, totalSteps.value, swing.value, exportBars.value)
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `freaky-loop-${bpm.value}bpm-${exportBars.value}bar.wav`
-      a.click()
-      URL.revokeObjectURL(url)
-    } finally {
-      isRendering.value = false
-    }
-  }
-
   // ── Public API ────────────────────────────────────────────────────────────────
   _store = {
     channels, selectedChannelId, selectedChannel, mainView, kbOctave,
-    pianoRollOpen,
-    bpm, totalSteps, swing, isPlaying, displayStep, exportBars, isRendering,
+    pianoRollOpen, renderModalOpen,
+    bpm, totalSteps, swing, isPlaying, displayStep,
     playlist, usePlaylist, PLAYLIST_BARS,
     togglePlay, startPlay, stopPlay,
     toggleStep, togglePianoNote, hasNote, clearChannel, clearAll,
     soloChannel, togglePlaylistBlock,
     addChannel, removeChannel, moveChannel,
     playNote, handleKeyDown, handleKeyUp,
-    exportWav,
   }
   return _store
 }

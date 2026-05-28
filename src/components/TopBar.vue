@@ -37,19 +37,8 @@
 
       <div class="divider" />
 
-      <div class="ctrl-group">
-        <span class="ctrl-label">BARS</span>
-        <select v-model.number="exportBars" class="steps-select">
-          <option :value="1">1</option>
-          <option :value="2">2</option>
-          <option :value="4">4</option>
-          <option :value="8">8</option>
-        </select>
-      </div>
-
-      <button class="btn btn-export" :class="{ rendering: isRendering }" :disabled="isRendering" @click="exportWav">
-        <span v-if="isRendering">⏳ RENDERING…</span>
-        <span v-else>⬇ WAV</span>
+      <button class="btn btn-render" @click="renderModalOpen = true">
+        ⬡ RENDER
       </button>
     </div>
 
@@ -64,8 +53,8 @@
 <script setup>
 import { useStudio } from '../store/studio.js'
 
-const { bpm, swing, totalSteps, isPlaying, exportBars, isRendering, mainView,
-        togglePlay, clearAll, exportWav } = useStudio()
+const { bpm, swing, totalSteps, isPlaying, mainView, renderModalOpen,
+        togglePlay, clearAll } = useStudio()
 </script>
 
 <style scoped>
@@ -118,15 +107,10 @@ const { bpm, swing, totalSteps, isPlaying, exportBars, isRendering, mainView,
 .btn-play:hover  { filter: brightness(1.15); }
 .btn-clear { background: #1a0e28; border-color: #4a3060; color: #8060a0; padding: 7px 12px; }
 .btn-clear:hover { border-color: #9b59b6; color: #c084e0; }
-.btn-export { background: #0e1e2e; border-color: #3a8abd; color: #5aacdf; white-space: nowrap; }
-.btn-export:hover:not(:disabled) { border-color: #5aacdf; color: #88ccff; }
-.btn-export:disabled { opacity: 0.55; cursor: not-allowed; }
-.btn-export.rendering { border-color: #f39c12; color: #f39c12; animation: pulse-border 0.8s ease-in-out infinite alternate; }
-
-@keyframes pulse-border {
-  from { box-shadow: 0 0 0px #f39c1200; }
-  to   { box-shadow: 0 0 8px #f39c1266; }
+.btn-render {
+  background: #1a0808; border-color: #e74c3c; color: #e74c3c; letter-spacing: 0.12em;
 }
+.btn-render:hover { background: #e74c3c; color: #fff; box-shadow: 0 0 14px #e74c3c44; }
 
 .divider { width: 1px; height: 30px; background: #252535; }
 
