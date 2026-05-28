@@ -1,4 +1,4 @@
-import lamejs from 'lamejs'
+import { Mp3Encoder } from '@breezystack/lamejs'
 
 // ─── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -147,7 +147,7 @@ export async function renderLoopToMp3(tracks, options = {}) {
   const leftF32 = buffer.getChannelData(0)
   const rightF32 = numCh > 1 ? buffer.getChannelData(1) : leftF32
 
-  const mp3enc  = new lamejs.Mp3Encoder(numCh, buffer.sampleRate, bitrate)
+  const mp3enc  = new Mp3Encoder(numCh, buffer.sampleRate, bitrate)
   const BLOCK   = 1152
   const chunks  = []
 

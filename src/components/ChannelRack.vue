@@ -1,6 +1,51 @@
 <template>
   <div class="channel-rack">
 
+    <!-- ── Pattern navigator ─────────────────────────────────────────── -->
+    <div class="pattern-nav">
+      <button
+        class="pat-nav-btn"
+        :disabled="patternIndex === 0"
+        @click="currentPatternId = patterns[patternIndex - 1].id"
+        title="Previous pattern"
+      >‹</button>
+
+      <div class="pat-name-wrap" @contextmenu.prevent="showPatCtx($event)">
+        <span class="pat-dot" :style="{ background: currentPattern.color }" />
+        <span class="pat-name">{{ currentPattern.name }}</span>
+      </div>
+
+      <button
+        class="pat-nav-btn"
+        :disabled="patternIndex === patterns.length - 1"
+        @click="currentPatternId = patterns[patternIndex + 1].id"
+        title="Next pattern"
+      >›</button>
+
+      <button class="pat-add-btn" @click="addPattern" title="New pattern">+ PAT</button>
+    </div>
+
+    <!-- Pattern context menu -->
+    <div v-if="patCtx.open" class="ctx-menu" :style="{ top: patCtx.y+'px', left: patCtx.x+'px' }" @mouseleave="patCtx.open=false">
+      <div class="ctx-item" @click="startPatRename">Rename</div>
+      <div class="ctx-item" @click="duplicatePattern(currentPatternId); patCtx.open=false">Duplicate</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item danger" @click="removePattern(currentPatternId); patCtx.open=false">Delete Pattern</div>
+    </div>
+
+    <!-- Rename pattern overlay -->
+    <div v-if="patRenaming" class="rename-overlay" @click.self="patRenaming=false">
+      <div class="rename-box">
+        <span class="rename-label">Rename pattern</span>
+        <input ref="patRenameInput" v-model="patRenameName" class="rename-input"
+               @keydown.enter="commitPatRename" @keydown.esc="patRenaming=false" maxlength="24" />
+        <div class="rename-btns">
+          <button class="rename-ok" @click="commitPatRename">OK</button>
+          <button class="rename-cancel" @click="patRenaming=false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Rack toolbar ──────────────────────────────────────────────── -->
     <div class="rack-toolbar">
       <span class="rack-title">CHANNEL RACK</span>
@@ -99,12 +144,12 @@
                 :key="s - 1"
                 class="istep"
                 :class="{
-                  lit:     ch.pattern[s - 1],
+                  lit:     getSteps(ch.id)[s - 1],
                   playing: isPlaying && displayStep === s - 1,
                   beat:    (s - 1) % 4 === 0,
                 }"
                 @click="toggleStep(ch.id, s - 1)"
-                @contextmenu.prevent="ch.pattern[s - 1] = false"
+                @contextmenu.prevent="getSteps(ch.id)[s - 1] = false"
               />
             </div>
           </template>
@@ -195,8 +240,33 @@ import Knob from './Knob.vue'
 const {
   channels, selectedChannelId, totalSteps, isPlaying, displayStep,
   pianoRollOpen, kbOctave,
+  patterns, currentPatternId, getSteps,
+  addPattern, removePattern, duplicatePattern,
   toggleStep, soloChannel, clearChannel, addChannel, removeChannel, moveChannel,
 } = useStudio()
+
+// Pattern navigator helpers
+const patternIndex  = computed(() => patterns.findIndex(p => p.id === currentPatternId.value))
+const currentPattern = computed(() => patterns.find(p => p.id === currentPatternId.value) ?? patterns[0])
+
+// Pattern context + rename
+const patCtx = reactive({ open: false, x: 0, y: 0 })
+function showPatCtx(e) { patCtx.open = true; patCtx.x = e.clientX; patCtx.y = e.clientY }
+
+const patRenaming    = ref(false)
+const patRenameName  = ref('')
+const patRenameInput = ref(null)
+
+function startPatRename() {
+  patCtx.open      = false
+  patRenameName.value = currentPattern.value.name
+  patRenaming.value   = true
+  nextTick(() => patRenameInput.value?.select())
+}
+function commitPatRename() {
+  if (patRenameName.value.trim()) currentPattern.value.name = patRenameName.value.trim()
+  patRenaming.value = false
+}
 
 const filterType = ref('all')
 const visibleChannels = computed(() =>
@@ -213,11 +283,13 @@ function openOrSelectChannel(ch) {
 
 // ── Mini piano-roll preview helpers ──────────────────────────────────────────
 function notesAtStep(ch, step) {
-  return ch.pianoNotes.filter(n => n.step === step)
+  return getSteps ? getPianoNotes(ch.id).filter(n => n.step === step) : []
 }
 function channelHasNotesAtStep(ch, step) {
-  return ch.pianoNotes.some(n => n.step === step)
+  return getPianoNotes(ch.id).some(n => n.step === step)
 }
+
+const { getPianoNotes } = useStudio()
 // Map MIDI pitch to vertical % (PIANO_LOW=36 bottom, PIANO_HIGH=84 top)
 function noteBottom(pitch) {
   return ((pitch - 36) / (84 - 36)) * 100
@@ -266,6 +338,39 @@ function commitRename() {
 </script>
 
 <style scoped>
+/* ── Pattern navigator ───────────────────────────────────────────── */
+.pattern-nav {
+  display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+  background: #080810; border-bottom: 1px solid #1a1a28; flex-shrink: 0;
+}
+.pat-nav-btn {
+  width: 22px; height: 22px; border-radius: 4px; border: 1px solid #252535;
+  background: transparent; color: #60608a; font-size: 16px; line-height: 1;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: all 0.1s; padding: 0;
+}
+.pat-nav-btn:hover:not(:disabled) { border-color: #4a4a6a; color: #a0a0c0; }
+.pat-nav-btn:disabled { opacity: 0.25; cursor: default; }
+.pat-name-wrap {
+  flex: 1; display: flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border: 1px solid #1e1e2c; border-radius: 4px;
+  cursor: pointer; transition: border-color 0.1s;
+}
+.pat-name-wrap:hover { border-color: #3a3a5a; }
+.pat-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.pat-name {
+  font-family: 'Rajdhani', sans-serif; font-size: 12px; font-weight: 700;
+  letter-spacing: 0.1em; color: #b0b0d0; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.pat-add-btn {
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em; padding: 3px 8px; border: 1px dashed #252535;
+  border-radius: 4px; background: transparent; color: #404058; cursor: pointer;
+  white-space: nowrap; transition: all 0.12s;
+}
+.pat-add-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
+
 .channel-rack {
   display: flex;
   flex-direction: column;
