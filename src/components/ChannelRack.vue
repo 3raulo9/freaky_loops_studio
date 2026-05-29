@@ -1,32 +1,25 @@
 <template>
-  <div class="channel-rack">
+  <div class="channel-rack" @click="closeAllMenus">
 
     <!-- ── Pattern navigator ─────────────────────────────────────────── -->
     <div class="pattern-nav">
-      <button
-        class="pat-nav-btn"
-        :disabled="patternIndex === 0"
-        @click="currentPatternId = patterns[patternIndex - 1].id"
-        title="Previous pattern"
-      >‹</button>
+      <button class="pat-nav-btn" :disabled="patternIndex === 0"
+        @click="currentPatternId = patterns[patternIndex - 1].id" title="Previous pattern">‹</button>
 
       <div class="pat-name-wrap" @contextmenu.prevent="showPatCtx($event)">
         <span class="pat-dot" :style="{ background: currentPattern.color }" />
         <span class="pat-name">{{ currentPattern.name }}</span>
       </div>
 
-      <button
-        class="pat-nav-btn"
-        :disabled="patternIndex === patterns.length - 1"
-        @click="currentPatternId = patterns[patternIndex + 1].id"
-        title="Next pattern"
-      >›</button>
+      <button class="pat-nav-btn" :disabled="patternIndex === patterns.length - 1"
+        @click="currentPatternId = patterns[patternIndex + 1].id" title="Next pattern">›</button>
 
       <button class="pat-add-btn" @click="addPattern" title="New pattern">+ PAT</button>
     </div>
 
     <!-- Pattern context menu -->
-    <div v-if="patCtx.open" class="ctx-menu" :style="{ top: patCtx.y+'px', left: patCtx.x+'px' }" @mouseleave="patCtx.open=false">
+    <div v-if="patCtx.open" class="ctx-menu"
+      :style="{ top: patCtx.y+'px', left: patCtx.x+'px' }" @mouseleave="patCtx.open=false">
       <div class="ctx-item" @click="startPatRename">Rename</div>
       <div class="ctx-item" @click="duplicatePattern(currentPatternId); patCtx.open=false">Duplicate</div>
       <div class="ctx-sep" />
@@ -38,7 +31,7 @@
       <div class="rename-box">
         <span class="rename-label">Rename pattern</span>
         <input ref="patRenameInput" v-model="patRenameName" class="rename-input"
-               @keydown.enter="commitPatRename" @keydown.esc="patRenaming=false" maxlength="24" />
+          @keydown.enter="commitPatRename" @keydown.esc="patRenaming=false" maxlength="24" />
         <div class="rename-btns">
           <button class="rename-ok" @click="commitPatRename">OK</button>
           <button class="rename-cancel" @click="patRenaming=false">Cancel</button>
@@ -46,47 +39,148 @@
       </div>
     </div>
 
+    <!-- ── Options panel (floating) ─────────────────────────────────── -->
+    <div v-if="optionsOpen" class="options-panel" @click.stop
+      :style="{ top: optionsPos.top + 'px', left: optionsPos.left + 'px' }">
+
+      <!-- Add section -->
+      <div class="op-section">Add one</div>
+      <div class="op-item" @click="addChannel(); closeAllMenus()">
+        <span class="op-dot" style="background:#4ecdc4"/>SYNTH (SAW)
+      </div>
+      <div class="op-sub-trigger" @mouseenter="activeSub='fm'" @mouseleave="activeSub=null">
+        FM Synths ▶
+        <div v-if="activeSub==='fm'" class="op-submenu">
+          <div v-for="(preset, key) in FM_PRESETS" :key="key" class="op-item"
+            @click="addFMChannel(key); closeAllMenus()">
+            <span class="op-dot" :style="{ background: preset.color }"/>{{ preset.name }}
+          </div>
+        </div>
+      </div>
+
+      <div class="op-sep"/>
+
+      <!-- Channel operations -->
+      <div class="op-item" @click="selectUnused(); closeAllMenus()">Select unused channels</div>
+      <div class="op-item" @click="cloneSelectedOp(); closeAllMenus()">Clone selected <span class="op-kb">Alt+C</span></div>
+      <div class="op-item danger" @click="deleteSelectedOp(); closeAllMenus()">Delete selected <span class="op-kb">Alt+Del</span></div>
+
+      <div class="op-sep"/>
+
+      <div class="op-item" @click="moveSelectedOp(-1); closeAllMenus()">Move selected up <span class="op-kb">Alt+↑</span></div>
+      <div class="op-item" @click="moveSelectedOp(1); closeAllMenus()">Move selected down <span class="op-kb">Alt+↓</span></div>
+
+      <div class="op-sep"/>
+
+      <!-- Sort submenu -->
+      <div class="op-sub-trigger" @mouseenter="activeSub='sort'" @mouseleave="activeSub=null">
+        Sort by ▶
+        <div v-if="activeSub==='sort'" class="op-submenu">
+          <div class="op-item" @click="sortChannelsBy('color'); closeAllMenus()">Color</div>
+          <div class="op-item" @click="sortChannelsBy('name'); closeAllMenus()">Name</div>
+          <div class="op-item" @click="sortChannelsBy('track'); closeAllMenus()">Track number</div>
+        </div>
+      </div>
+
+      <div class="op-sep"/>
+
+      <div class="op-item" @click="startGroupSelected(); closeAllMenus()">Group selected <span class="op-kb">Alt+G</span></div>
+
+      <div class="op-sep"/>
+
+      <!-- Color submenu -->
+      <div class="op-sub-trigger" @mouseenter="activeSub='color'" @mouseleave="activeSub=null">
+        Color selected ▶
+        <div v-if="activeSub==='color'" class="op-submenu">
+          <div class="op-item" @click="doColorRandom(); closeAllMenus()">Random</div>
+          <div class="op-item" @click="showGradientDialog = true; closeAllMenus()">Gradient...</div>
+        </div>
+      </div>
+
+      <div class="op-sep"/>
+
+      <div class="op-item" @click="muteSelectedOp(true); closeAllMenus()">Mute selected</div>
+      <div class="op-item" @click="muteSelectedOp(false); closeAllMenus()">Unmute selected</div>
+
+      <div class="op-sep"/>
+
+      <!-- Fill steps -->
+      <div class="op-item" @click="doFillSteps(2); closeAllMenus()">Fill each 2 steps</div>
+      <div class="op-item" @click="doFillSteps(4); closeAllMenus()">Fill each 4 steps</div>
+      <div class="op-item" @click="doFillSteps(8); closeAllMenus()">Fill each 8 steps</div>
+
+      <div class="op-sep"/>
+
+      <div class="op-item" @click="zipSelectedOp(); closeAllMenus()">Zip selected <span class="op-kb">Alt+Z</span></div>
+      <div class="op-item" @click="unzipAll(); closeAllMenus()">Unzip all <span class="op-kb">Alt+U</span></div>
+    </div>
+
     <!-- ── Rack toolbar ──────────────────────────────────────────────── -->
     <div class="rack-toolbar">
+      <!-- Options menu trigger -->
+      <button class="options-btn" @click.stop="toggleOptions" title="Channel Rack options">≡</button>
       <span class="rack-title">CHANNEL RACK</span>
 
-      <select v-model="filterType" class="filter-select">
-        <option value="all">All</option>
-        <option value="drum">Drums</option>
-        <option value="melodic">Synths</option>
-      </select>
+      <!-- Display filter -->
+      <div class="df-wrap" ref="dfRef">
+        <button class="df-btn" @click.stop="dfOpen = !dfOpen">
+          {{ filterLabel }} ▾
+        </button>
+        <div v-if="dfOpen" class="df-dropdown" @click.stop>
+          <div class="df-item" :class="{ active: activeFilter === 'all' }" @click="setFilter('all')">All Channels</div>
+          <div class="df-item" :class="{ active: activeFilter === 'unsorted' }" @click="setFilter('unsorted')">Unsorted</div>
+          <template v-if="channelGroups.length">
+            <div class="df-sep"/>
+            <div v-for="g in channelGroups" :key="g.id"
+              class="df-item df-group"
+              :class="{ active: activeFilter === g.id }"
+              @click="setFilter(g.id)"
+              @contextmenu.prevent="showGroupCtx($event, g)"
+            >{{ g.name }}</div>
+          </template>
+          <div class="df-sep"/>
+          <div class="df-item df-add" @click="startAddGroup">+ Add Group</div>
+        </div>
+      </div>
+
+      <!-- Graph editor toggle -->
+      <button class="ge-toggle-btn" :class="{ active: graphEditorOpen }"
+        @click="graphEditorOpen = !graphEditorOpen" title="Graph Editor (Ctrl+K)">GE</button>
 
       <div class="rack-right">
         <span class="kb-badge">⌨ Z–M · {{ kbOctave }}</span>
         <div class="add-synth-wrap" ref="synthPickerRef">
-          <button class="add-ch-btn" @click="showSynthPicker = !showSynthPicker" title="Add synth channel">
+          <button class="add-ch-btn" @click.stop="showSynthPicker = !showSynthPicker" title="Add synth channel">
             + SYNTH ▾
           </button>
           <div v-if="showSynthPicker" class="synth-picker">
             <div class="synth-pick-section">BASIC</div>
             <div class="synth-pick-item" @click="addChannel(); showSynthPicker = false">
-              <span class="synth-pick-dot" style="background:#4ecdc4" />SYNTH (SAW)
+              <span class="synth-pick-dot" style="background:#4ecdc4"/>SYNTH (SAW)
             </div>
             <div class="synth-pick-section">FM SYNTHS</div>
-            <div
-              v-for="(preset, key) in FM_PRESETS"
-              :key="key"
-              class="synth-pick-item"
-              @click="addFMChannel(key); showSynthPicker = false"
-            >
-              <span class="synth-pick-dot" :style="{ background: preset.color }" />{{ preset.name }}
+            <div v-for="(preset, key) in FM_PRESETS" :key="key" class="synth-pick-item"
+              @click="addFMChannel(key); showSynthPicker = false">
+              <span class="synth-pick-dot" :style="{ background: preset.color }"/>{{ preset.name }}
             </div>
           </div>
         </div>
       </div>
     </div>
 
+    <!-- ── Group display filter context menu ────────────────────────── -->
+    <div v-if="groupCtx.open" class="ctx-menu"
+      :style="{ top: groupCtx.y+'px', left: groupCtx.x+'px' }" @mouseleave="groupCtx.open=false">
+      <div class="ctx-item" @click="startRenameGroup(groupCtx.group)">Rename group</div>
+      <div class="ctx-item danger" @click="removeGroup(groupCtx.group.id); groupCtx.open=false">Delete group</div>
+    </div>
+
     <!-- ── Column header labels ──────────────────────────────────────── -->
     <div class="col-headers">
-      <div class="col-led"  title="Mute (L-click) / Solo (R-click)">●</div>
-      <div class="col-pan"  title="Pan">PAN</div>
-      <div class="col-vol"  title="Volume">VOL</div>
-      <div class="col-mix"  title="Mixer track">MX</div>
+      <div class="col-led" title="Mute (L-click) / Solo (R-click)">●</div>
+      <div class="col-pan" title="Pan">PAN</div>
+      <div class="col-vol" title="Volume">VOL</div>
+      <div class="col-mix" title="Mixer track">MX</div>
       <div class="col-name">INSTRUMENT</div>
       <div class="col-seq">PATTERN — <span class="steps-label">{{ totalSteps }} steps</span></div>
     </div>
@@ -97,113 +191,143 @@
         v-for="ch in visibleChannels"
         :key="ch.id"
         class="channel-row"
-        :class="{ selected: ch.id === selectedChannelId, muted: ch.muted, soloed: ch._soloed }"
+        :class="{
+          selected:       ch.id === selectedChannelId,
+          'multi-sel':    selectedIds.has(ch.id),
+          muted:          ch.muted,
+          soloed:         ch._soloed,
+          zipped:         ch.zipped,
+          'ge-expanded':  graphEditorOpen && ch.id === selectedChannelId && !ch.zipped && ch.mode === 'steps',
+        }"
         :style="{ '--accent': ch.color }"
-        @click="selectedChannelId = ch.id"
+        @click.exact="selectChannel(ch)"
+        @click.ctrl.exact.stop="toggleMultiSelect(ch)"
       >
-        <!-- Green LED: left-click mute, right-click solo -->
-        <div
-          class="led"
-          :class="{ active: !ch.muted, solo: ch._soloed }"
+        <!-- ── Mute LED ──────────────────────────────────────────── -->
+        <div class="led" :class="{ active: !ch.muted, solo: ch._soloed }"
           @click.stop="ch.muted = !ch.muted"
           @contextmenu.prevent="soloChannel(ch.id)"
-          title="L-click: mute / R-click: solo"
-        />
+          title="L-click: mute / R-click: solo" />
 
-        <!-- Pan knob (hides label via CSS) -->
-        <div class="rack-knob-wrap" :title="`Pan: ${Math.round(ch.pan * 100)}%`">
-          <Knob
-            v-model="ch.pan"
-            :min="-1" :max="1" :decimals="2"
-            label="" :color="ch.color" :size="24"
-          />
-        </div>
+        <!-- ── ZIPPED compact view ───────────────────────────────── -->
+        <template v-if="ch.zipped">
+          <div class="zip-name" style="grid-column: 2 / -1">
+            <button class="ch-name-btn zip-ch-btn"
+              :style="{ background: ch.color }"
+              @click.stop="openOrSelectChannel(ch)"
+              @contextmenu.prevent="showContextMenu($event, ch)"
+            >{{ ch.name }}</button>
+            <button class="unzip-btn" @click.stop="ch.zipped = false" title="Unzip (Right-click channel for options)">▲</button>
+          </div>
+        </template>
 
-        <!-- Vol knob -->
-        <div class="rack-knob-wrap" :title="`Volume: ${Math.round(ch.volume * 100)}%`">
-          <Knob
-            v-model="ch.volume"
-            :min="0" :max="1.25" :decimals="2"
-            label="" :color="ch.color" :size="24"
-          />
-        </div>
+        <!-- ── Normal view ───────────────────────────────────────── -->
+        <template v-else>
+          <!-- Pan knob -->
+          <div class="rack-knob-wrap" :title="`Pan: ${Math.round(ch.pan * 100)}%`">
+            <Knob v-model="ch.pan" :min="-1" :max="1" :decimals="2"
+              label="" :color="ch.color" :size="24" />
+          </div>
 
-        <!-- Mixer track number -->
-        <div
-          class="mix-num"
-          :title="`Mixer track ${ch.mixerTrack}`"
-          @click.stop
-        >
-          <input
-            type="number" v-model.number="ch.mixerTrack"
-            min="0" max="99" class="mix-input"
-          />
-        </div>
+          <!-- Vol knob -->
+          <div class="rack-knob-wrap" :title="`Volume: ${Math.round(ch.volume * 100)}%`">
+            <Knob v-model="ch.volume" :min="0" :max="1.25" :decimals="2"
+              label="" :color="ch.color" :size="24" />
+          </div>
 
-        <!-- Channel name button -->
-        <button
-          class="ch-name-btn"
-          :class="{ 'piano-active': ch.type === 'melodic' && pianoRollOpen && selectedChannelId === ch.id }"
-          :style="{ background: ch.color }"
-          @click.stop="openOrSelectChannel(ch)"
-          @contextmenu.prevent="showContextMenu($event, ch)"
-          :title="ch.type === 'melodic' ? 'Click to open Piano Roll' : ch.name"
-        >
-          {{ ch.name }}
-        </button>
+          <!-- Mixer track number -->
+          <div class="mix-num" @click.stop>
+            <input type="number" v-model.number="ch.mixerTrack"
+              min="0" max="99" class="mix-input" :title="`Mixer track ${ch.mixerTrack}`" />
+          </div>
 
-        <!-- ── Sequencer area ─────────────────────────────────────── -->
-        <div class="ch-seq" @click.stop>
+          <!-- Channel name button -->
+          <button class="ch-name-btn"
+            :class="{ 'piano-active': ch.type === 'melodic' && pianoRollOpen && selectedChannelId === ch.id }"
+            :style="{ background: ch.color }"
+            @click.stop="openOrSelectChannel(ch)"
+            @contextmenu.prevent="showContextMenu($event, ch)"
+            :title="ch.type === 'melodic' ? 'Click to open Piano Roll' : ch.name">
+            {{ ch.name }}
+          </button>
 
-          <!-- Step buttons (drum or melodic in step mode) -->
-          <template v-if="ch.mode === 'steps'">
-            <div class="inline-steps" :style="{ '--cols': totalSteps }">
-              <button
-                v-for="s in totalSteps"
-                :key="s - 1"
-                class="istep"
-                :class="{
-                  lit:     getSteps(ch.id)[s - 1],
-                  playing: isPlaying && displayStep === s - 1,
-                  beat:    (s - 1) % 4 === 0,
-                }"
-                @click="toggleStep(ch.id, s - 1)"
-                @contextmenu.prevent="getSteps(ch.id)[s - 1] = false"
-              />
-            </div>
-          </template>
-
-          <!-- Mini piano-roll preview (melodic in piano mode) -->
-          <template v-else>
-            <div
-              class="mini-pr"
-              :style="{ '--cols': totalSteps }"
-              @click="openOrSelectChannel(ch)"
-              title="Click to open Piano Roll"
-            >
-              <!-- Note dots: one column per step -->
-              <div
-                v-for="s in totalSteps"
-                :key="s - 1"
-                class="mini-pr-col"
-                :class="{
-                  has:     channelHasNotesAtStep(ch, s - 1),
-                  playing: isPlaying && displayStep === s - 1,
-                  beat:    (s - 1) % 4 === 0,
-                }"
-              >
-                <div
-                  v-for="note in notesAtStep(ch, s - 1)"
-                  :key="`${note.step}-${note.pitch}`"
-                  class="mini-note"
-                  :style="{ bottom: noteBottom(note.pitch) + '%' }"
+          <!-- ── Sequencer area ──────────────────────────────────── -->
+          <div class="ch-seq" @click.stop>
+            <!-- Step buttons -->
+            <template v-if="ch.mode === 'steps'">
+              <div class="inline-steps" :style="{ '--cols': totalSteps }">
+                <button v-for="s in totalSteps" :key="s-1" class="istep"
+                  :class="{
+                    lit:     getSteps(ch.id)[s-1],
+                    playing: isPlaying && displayStep === s-1,
+                    beat:    (s-1) % 4 === 0,
+                  }"
+                  @click="toggleStep(ch.id, s-1)"
+                  @contextmenu.prevent="getSteps(ch.id)[s-1] = false"
                 />
               </div>
-              <span class="mini-pr-hint">PIANO ROLL</span>
-            </div>
-          </template>
+            </template>
 
-        </div>
+            <!-- Mini piano-roll preview -->
+            <template v-else>
+              <div class="mini-pr" :style="{ '--cols': totalSteps }"
+                @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
+                <div v-for="s in totalSteps" :key="s-1" class="mini-pr-col"
+                  :class="{
+                    has:     channelHasNotesAtStep(ch, s-1),
+                    playing: isPlaying && displayStep === s-1,
+                    beat:    (s-1) % 4 === 0,
+                  }">
+                  <div v-for="note in notesAtStep(ch, s-1)" :key="`${note.step}-${note.pitch}`"
+                    class="mini-note" :style="{ bottom: noteBottom(note.pitch) + '%' }" />
+                </div>
+                <span class="mini-pr-hint">PIANO ROLL</span>
+              </div>
+            </template>
+
+            <!-- Loop toggle (overlaid on seq area) -->
+            <button class="loop-btn" :class="{ active: ch.loopEnabled }"
+              @click.stop="ch.loopEnabled = !ch.loopEnabled"
+              :title="ch.loopEnabled ? 'Loop ON — click to disable' : 'Loop OFF — click to enable'">∞</button>
+          </div>
+
+          <!-- ── Graph Editor strip ──────────────────────────────── -->
+          <div v-if="graphEditorOpen && ch.id === selectedChannelId && ch.mode === 'steps'"
+            class="ge-strip" @click.stop
+            :style="{ '--cols': totalSteps, '--accent': ch.color }">
+
+            <!-- Tabs -->
+            <div class="ge-tabs">
+              <button v-for="tab in GE_TABS" :key="tab.key"
+                class="ge-tab" :class="{ active: graphParam === tab.key }"
+                @click.stop="graphParam = tab.key">{{ tab.label }}</button>
+              <div class="ge-tabs-right">
+                <span class="ge-hint">drag to paint · alt+click reset · ctrl+drag scale</span>
+              </div>
+            </div>
+
+            <!-- Bar chart -->
+            <div class="ge-chart" @mousedown.prevent="startGeDrag($event, ch)">
+              <div v-for="s in totalSteps" :key="s-1" class="ge-col"
+                :class="{
+                  beat:    (s-1) % 4 === 0,
+                  lit:     getSteps(ch.id)[s-1],
+                  playing: isPlaying && displayStep === s-1,
+                }">
+                <div class="ge-bar-bg"/>
+                <!-- Center line for pan and pitch -->
+                <div v-if="graphParam === 'pan' || graphParam === 'pitch'" class="ge-center-line"/>
+                <div class="ge-bar"
+                  :style="{
+                    height: getGeBarHeight(ch.id, s-1) + '%',
+                    bottom: getGeBarBottom(ch.id, s-1) + '%',
+                  }" />
+              </div>
+            </div>
+
+          </div>
+        </template>
+
       </div>
 
       <!-- Empty state -->
@@ -212,38 +336,77 @@
       </div>
     </div>
 
-    <!-- Context menu -->
-    <div
-      v-if="ctxMenu.open"
-      class="ctx-menu"
-      :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }"
-      @mouseleave="ctxMenu.open = false"
-    >
+    <!-- ── Context menu ──────────────────────────────────────────────── -->
+    <div v-if="ctxMenu.open" class="ctx-menu"
+      :style="{ top: ctxMenu.y+'px', left: ctxMenu.x+'px' }"
+      @mouseleave="ctxMenu.open=false">
       <div class="ctx-item" @click="ctxAction('piano-roll')">Open Piano Roll</div>
       <div class="ctx-item" @click="ctxAction('rename')">Rename</div>
+      <div class="ctx-item" @click="ctxAction('clone')">Clone</div>
       <div class="ctx-item" @click="ctxAction('clear')">Clear Pattern</div>
-      <div class="ctx-sep" />
+      <div class="ctx-sep"/>
+      <!-- Fill steps submenu -->
+      <div class="ctx-sub-trigger"
+        @mouseenter="ctxSubOpen = 'fill'"
+        @mouseleave="ctxSubOpen = null">
+        Fill steps ▶
+        <div v-if="ctxSubOpen === 'fill'" class="ctx-submenu">
+          <div class="ctx-item" @click="ctxFill(2)">Every 2 steps</div>
+          <div class="ctx-item" @click="ctxFill(4)">Every 4 steps</div>
+          <div class="ctx-item" @click="ctxFill(8)">Every 8 steps</div>
+        </div>
+      </div>
+      <div class="ctx-sep"/>
+      <div class="ctx-item" @click="ctxAction('zip')">
+        {{ ctxMenu.channel?.zipped ? 'Unzip' : 'Zip' }}
+      </div>
+      <div class="ctx-item" @click="ctxAction('color-random')">Random color</div>
+      <div class="ctx-sep"/>
       <div class="ctx-item" @click="ctxAction('move-up')">Move Up</div>
       <div class="ctx-item" @click="ctxAction('move-down')">Move Down</div>
-      <div class="ctx-sep" />
+      <div class="ctx-sep"/>
       <div class="ctx-item danger" @click="ctxAction('delete')">Delete</div>
     </div>
 
-    <!-- Rename inline prompt -->
-    <div v-if="renaming" class="rename-overlay" @click.self="renaming = false">
+    <!-- ── Rename inline prompt ──────────────────────────────────────── -->
+    <div v-if="renaming" class="rename-overlay" @click.self="renaming=false">
       <div class="rename-box">
         <span class="rename-label">Rename "{{ renameTarget?.name }}"</span>
-        <input
-          ref="renameInput"
-          v-model="renameName"
-          class="rename-input"
-          @keydown.enter="commitRename"
-          @keydown.esc="renaming = false"
-          maxlength="16"
-        />
+        <input ref="renameInput" v-model="renameName" class="rename-input"
+          @keydown.enter="commitRename" @keydown.esc="renaming=false" maxlength="16" />
         <div class="rename-btns">
-          <button class="rename-ok"  @click="commitRename">OK</button>
-          <button class="rename-cancel" @click="renaming = false">Cancel</button>
+          <button class="rename-ok" @click="commitRename">OK</button>
+          <button class="rename-cancel" @click="renaming=false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Group name prompt ─────────────────────────────────────────── -->
+    <div v-if="groupPrompt.open" class="rename-overlay" @click.self="groupPrompt.open=false">
+      <div class="rename-box">
+        <span class="rename-label">{{ groupPrompt.label }}</span>
+        <input ref="groupNameInput" v-model="groupPrompt.name" class="rename-input"
+          @keydown.enter="commitGroupPrompt" @keydown.esc="groupPrompt.open=false" maxlength="24" />
+        <div class="rename-btns">
+          <button class="rename-ok" @click="commitGroupPrompt">OK</button>
+          <button class="rename-cancel" @click="groupPrompt.open=false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Gradient color dialog ─────────────────────────────────────── -->
+    <div v-if="showGradientDialog" class="rename-overlay" @click.self="showGradientDialog=false">
+      <div class="rename-box gradient-box">
+        <span class="rename-label">Gradient color selected channels</span>
+        <div class="gradient-row">
+          <label class="grad-label">From</label>
+          <input type="color" v-model="gradFrom" class="grad-color-input" />
+          <label class="grad-label">To</label>
+          <input type="color" v-model="gradTo" class="grad-color-input" />
+        </div>
+        <div class="rename-btns">
+          <button class="rename-ok" @click="applyGradient">Apply</button>
+          <button class="rename-cancel" @click="showGradientDialog=false">Cancel</button>
         </div>
       </div>
     </div>
@@ -259,25 +422,58 @@ import Knob from './Knob.vue'
 const {
   channels, selectedChannelId, totalSteps, isPlaying, displayStep,
   pianoRollOpen, kbOctave,
-  patterns, currentPatternId, getSteps,
+  patterns, currentPatternId, getSteps, getPianoNotes,
   addPattern, removePattern, duplicatePattern,
   toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, removeChannel, moveChannel,
+  channelGroups, addGroup, removeGroup, renameGroup, assignChannelsToGroup,
+  graphEditorOpen, graphParam,
+  getStepVelocities, setStepVelocity, getStepPans, setStepPan, getStepPitches, setStepPitch,
+  fillSteps, cloneChannel, sortChannelsBy, colorChannelsRandom, colorChannelsGradient,
 } = useStudio()
 
-// ── Synth picker popup ────────────────────────────────────────────────────────
+// ── Graph editor tabs ─────────────────────────────────────────────────────────
+const GE_TABS = [
+  { key: 'velocity', label: 'VEL' },
+  { key: 'pan',      label: 'PAN' },
+  { key: 'pitch',    label: 'PCH' },
+  { key: 'release',  label: 'REL' },
+]
+
+// ── Multi-select ──────────────────────────────────────────────────────────────
+const selectedIds = ref(new Set())
+
+function selectChannel(ch) {
+  selectedChannelId.value = ch.id
+  selectedIds.value = new Set([ch.id])
+}
+function toggleMultiSelect(ch) {
+  const s = new Set(selectedIds.value)
+  if (s.has(ch.id)) s.delete(ch.id)
+  else s.add(ch.id)
+  selectedIds.value = s
+  if (!s.has(selectedChannelId.value) && s.size > 0) {
+    selectedChannelId.value = [...s][0]
+  }
+}
+function getOpTargets() {
+  if (selectedIds.value.size > 1) return [...selectedIds.value]
+  return [selectedChannelId.value]
+}
+
+// ── Synth picker ──────────────────────────────────────────────────────────────
 const showSynthPicker = ref(false)
 const synthPickerRef  = ref(null)
 
-function onDocClick(e) {
-  if (showSynthPicker.value && synthPickerRef.value && !synthPickerRef.value.contains(e.target)) {
-    showSynthPicker.value = false
-  }
+function onDocClick() {
+  showSynthPicker.value = false
+  optionsOpen.value = false
+  dfOpen.value = false
 }
-onMounted(()  => document.addEventListener('click', onDocClick, true))
+onMounted(() => document.addEventListener('click', onDocClick, true))
 onUnmounted(() => document.removeEventListener('click', onDocClick, true))
 
-// Pattern navigator helpers
-const patternIndex  = computed(() => patterns.findIndex(p => p.id === currentPatternId.value))
+// ── Pattern navigator helpers ─────────────────────────────────────────────────
+const patternIndex   = computed(() => patterns.findIndex(p => p.id === currentPatternId.value))
 const currentPattern = computed(() => patterns.find(p => p.id === currentPatternId.value) ?? patterns[0])
 
 // Pattern context + rename
@@ -289,9 +485,9 @@ const patRenameName  = ref('')
 const patRenameInput = ref(null)
 
 function startPatRename() {
-  patCtx.open      = false
+  patCtx.open = false
   patRenameName.value = currentPattern.value.name
-  patRenaming.value   = true
+  patRenaming.value = true
   nextTick(() => patRenameInput.value?.select())
 }
 function commitPatRename() {
@@ -299,35 +495,233 @@ function commitPatRename() {
   patRenaming.value = false
 }
 
-const filterType = ref('all')
-const visibleChannels = computed(() =>
-  filterType.value === 'all' ? channels : channels.filter(c => c.type === filterType.value)
-)
+// ── Display filter ────────────────────────────────────────────────────────────
+const activeFilter = ref('all')
+const dfOpen = ref(false)
+const dfRef  = ref(null)
+
+const filterLabel = computed(() => {
+  if (activeFilter.value === 'all') return 'ALL CHANNELS'
+  if (activeFilter.value === 'unsorted') return 'UNSORTED'
+  const g = channelGroups.find(g => g.id === activeFilter.value)
+  return g ? g.name.toUpperCase() : 'ALL CHANNELS'
+})
+
+function setFilter(val) {
+  activeFilter.value = val
+  dfOpen.value = false
+}
+
+const visibleChannels = computed(() => {
+  if (activeFilter.value === 'all') return channels
+  if (activeFilter.value === 'unsorted') return channels.filter(c => !c.groupId)
+  return channels.filter(c => c.groupId === activeFilter.value)
+})
+
+// Group context menu
+const groupCtx = reactive({ open: false, x: 0, y: 0, group: null })
+function showGroupCtx(e, g) {
+  dfOpen.value = false
+  groupCtx.open = true; groupCtx.x = e.clientX; groupCtx.y = e.clientY; groupCtx.group = g
+}
+
+// Group prompt (add or rename)
+const groupPrompt = reactive({ open: false, label: '', name: '', mode: 'add', groupId: null })
+const groupNameInput = ref(null)
+
+function startAddGroup() {
+  dfOpen.value = false
+  groupPrompt.mode = 'add'
+  groupPrompt.label = 'New group name'
+  groupPrompt.name = ''
+  groupPrompt.open = true
+  nextTick(() => groupNameInput.value?.focus())
+}
+
+function startGroupSelected() {
+  groupPrompt.mode = 'assign'
+  groupPrompt.label = 'Group selected channels (enter name)'
+  groupPrompt.name = ''
+  groupPrompt.open = true
+  nextTick(() => groupNameInput.value?.focus())
+}
+
+function startRenameGroup(g) {
+  groupCtx.open = false
+  groupPrompt.mode = 'rename'
+  groupPrompt.label = `Rename group "${g.name}"`
+  groupPrompt.name = g.name
+  groupPrompt.groupId = g.id
+  groupPrompt.open = true
+  nextTick(() => groupNameInput.value?.select())
+}
+
+function commitGroupPrompt() {
+  const name = groupPrompt.name.trim()
+  if (!name) return
+  if (groupPrompt.mode === 'add') {
+    addGroup(name)
+  } else if (groupPrompt.mode === 'rename') {
+    renameGroup(groupPrompt.groupId, name)
+  } else if (groupPrompt.mode === 'assign') {
+    // Find or create group with this name
+    let g = channelGroups.find(g => g.name.toLowerCase() === name.toLowerCase())
+    const gid = g ? g.id : addGroup(name)
+    assignChannelsToGroup(getOpTargets(), gid)
+  }
+  groupPrompt.open = false
+}
+
+// ── Options menu ──────────────────────────────────────────────────────────────
+const optionsOpen = ref(false)
+const optionsPos  = reactive({ top: 0, left: 0 })
+const activeSub   = ref(null)
+
+function toggleOptions(e) {
+  const rect = e.currentTarget.getBoundingClientRect()
+  optionsPos.top  = rect.bottom + 4
+  optionsPos.left = rect.left
+  optionsOpen.value = !optionsOpen.value
+}
+
+function closeAllMenus() {
+  optionsOpen.value   = false
+  dfOpen.value        = false
+  showSynthPicker.value = false
+  ctxMenu.open        = false
+  patCtx.open         = false
+  groupCtx.open       = false
+  ctxSubOpen.value    = null
+  activeSub.value     = null
+}
+
+// ── Channel operations ────────────────────────────────────────────────────────
+function cloneSelectedOp() {
+  getOpTargets().forEach(id => cloneChannel(id))
+}
+function deleteSelectedOp() {
+  getOpTargets().forEach(id => removeChannel(id))
+}
+function moveSelectedOp(dir) {
+  getOpTargets().forEach(id => moveChannel(id, dir))
+}
+function muteSelectedOp(muted) {
+  getOpTargets().forEach(id => {
+    const ch = channels.find(c => c.id === id)
+    if (ch) ch.muted = muted
+  })
+}
+function zipSelectedOp() {
+  getOpTargets().forEach(id => {
+    const ch = channels.find(c => c.id === id)
+    if (ch) ch.zipped = true
+  })
+}
+function unzipAll() {
+  channels.forEach(ch => { ch.zipped = false })
+}
+function selectUnused() {
+  const usedIds = new Set()
+  channels.forEach(ch => {
+    patterns.forEach(p => {
+      const steps = getSteps(ch.id, p.id)
+      const notes = getPianoNotes(ch.id, p.id)
+      if (steps.some(Boolean) || notes.length > 0) usedIds.add(ch.id)
+    })
+  })
+  selectedIds.value = new Set(channels.filter(c => !usedIds.has(c.id)).map(c => c.id))
+}
+function doFillSteps(every) {
+  getOpTargets().forEach(id => fillSteps(id, every))
+}
+
+// ── Gradient color ────────────────────────────────────────────────────────────
+const showGradientDialog = ref(false)
+const gradFrom = ref('#e74c3c')
+const gradTo   = ref('#4ecdc4')
+
+function doColorRandom() {
+  colorChannelsRandom(getOpTargets())
+}
+function applyGradient() {
+  colorChannelsGradient(getOpTargets(), gradFrom.value, gradTo.value)
+  showGradientDialog.value = false
+}
 
 // ── Piano roll open/select ────────────────────────────────────────────────────
 function openOrSelectChannel(ch) {
   selectedChannelId.value = ch.id
-  if (ch.type === 'melodic') {
-    pianoRollOpen.value = true
-  }
+  if (ch.type === 'melodic') pianoRollOpen.value = true
 }
 
 // ── Mini piano-roll preview helpers ──────────────────────────────────────────
 function notesAtStep(ch, step) {
-  return getSteps ? getPianoNotes(ch.id).filter(n => n.step === step) : []
+  return getPianoNotes(ch.id).filter(n => n.step === step)
 }
 function channelHasNotesAtStep(ch, step) {
   return getPianoNotes(ch.id).some(n => n.step === step)
 }
-
-const { getPianoNotes } = useStudio()
-// Map MIDI pitch to vertical % (PIANO_LOW=36 bottom, PIANO_HIGH=84 top)
 function noteBottom(pitch) {
   return ((pitch - 36) / (84 - 36)) * 100
 }
 
+// ── Graph Editor ──────────────────────────────────────────────────────────────
+function getGeBarHeight(chId, step) {
+  switch (graphParam.value) {
+    case 'velocity': return (getStepVelocities(chId)[step] ?? 0.8) * 100
+    case 'release':  return (getStepVelocities(chId)[step] ?? 0.8) * 100
+    case 'pan':      return Math.abs(getStepPans(chId)[step] ?? 0) * 50
+    case 'pitch':    return Math.abs(getStepPitches(chId)[step] ?? 0) / 12 * 50
+    default:         return (getStepVelocities(chId)[step] ?? 0.8) * 100
+  }
+}
+function getGeBarBottom(chId, step) {
+  if (graphParam.value === 'pan') {
+    const v = getStepPans(chId)?.[step] ?? 0
+    return v < 0 ? 0 : 50
+  }
+  if (graphParam.value === 'pitch') {
+    const v = getStepPitches(chId)?.[step] ?? 0
+    return v < 0 ? 0 : 50
+  }
+  return 0
+}
+
+function startGeDrag(e, ch) {
+  const chart = e.currentTarget
+  const doUpdate = (me) => {
+    const rect = chart.getBoundingClientRect()
+    const step = Math.max(0, Math.min(totalSteps.value - 1,
+      Math.floor(((me.clientX - rect.left) / rect.width) * totalSteps.value)
+    ))
+    const relY = (me.clientY - rect.top) / rect.height
+    switch (graphParam.value) {
+      case 'velocity':
+      case 'release':
+        setStepVelocity(ch.id, step, Math.max(0, Math.min(1, 1 - relY)))
+        break
+      case 'pan':
+        setStepPan(ch.id, step, Math.max(-1, Math.min(1, (0.5 - relY) * 2)))
+        break
+      case 'pitch':
+        setStepPitch(ch.id, step, Math.round(Math.max(-12, Math.min(12, (0.5 - relY) * 24))))
+        break
+    }
+  }
+  doUpdate(e)
+  const onMove = (me) => doUpdate(me)
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+
 // ── Context menu ──────────────────────────────────────────────────────────────
 const ctxMenu = reactive({ open: false, x: 0, y: 0, channel: null })
+const ctxSubOpen = ref(null)
+
 function showContextMenu(e, ch) {
   selectedChannelId.value = ch.id
   ctxMenu.open = true
@@ -339,12 +733,20 @@ function ctxAction(action) {
   const ch = ctxMenu.channel
   ctxMenu.open = false
   if (!ch) return
-  if (action === 'piano-roll')  { openOrSelectChannel(ch) }
-  if (action === 'rename')      { startRename(ch) }
-  if (action === 'clear')       { clearChannel(ch.id) }
-  if (action === 'move-up')     { moveChannel(ch.id, -1) }
-  if (action === 'move-down')   { moveChannel(ch.id, +1) }
-  if (action === 'delete')      { removeChannel(ch.id) }
+  if (action === 'piano-roll')   openOrSelectChannel(ch)
+  if (action === 'rename')       startRename(ch)
+  if (action === 'clone')        cloneChannel(ch.id)
+  if (action === 'clear')        clearChannel(ch.id)
+  if (action === 'move-up')      moveChannel(ch.id, -1)
+  if (action === 'move-down')    moveChannel(ch.id, +1)
+  if (action === 'delete')       removeChannel(ch.id)
+  if (action === 'zip')          ch.zipped = !ch.zipped
+  if (action === 'color-random') colorChannelsRandom([ch.id])
+}
+function ctxFill(every) {
+  ctxSubOpen.value = null
+  ctxMenu.open = false
+  if (ctxMenu.channel) fillSteps(ctxMenu.channel.id, every)
 }
 
 // ── Rename ────────────────────────────────────────────────────────────────────
@@ -402,32 +804,120 @@ function commitRename() {
 }
 .pat-add-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
 
+/* ── Rack root ───────────────────────────────────────────────────── */
 .channel-rack {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  overflow: hidden;
-  background: #0e0e18;
-  position: relative;
+  display: flex; flex-direction: column; flex: 1;
+  overflow: hidden; background: #0e0e18; position: relative;
 }
 
-/* ── Toolbar ─────────────────────────────────────────────────────── */
+/* ── Options panel ───────────────────────────────────────────────── */
+.options-panel {
+  position: fixed; z-index: 3000;
+  background: #141422; border: 1px solid #2a2a3e; border-radius: 7px;
+  padding: 4px 0; min-width: 210px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.8);
+  max-height: 80vh; overflow-y: auto;
+}
+.op-section {
+  padding: 6px 14px 3px;
+  font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.18em; color: #303050; text-transform: uppercase;
+}
+.op-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 16px;
+  font-family: 'Rajdhani', sans-serif; font-size: 12px; font-weight: 600;
+  letter-spacing: 0.07em; color: #9090b8; cursor: pointer;
+  transition: background 0.07s, color 0.07s;
+  position: relative;
+}
+.op-item:hover { background: #1c1c30; color: #d0d0ee; }
+.op-item.danger { color: #7a3030; }
+.op-item.danger:hover { color: #e74c3c; background: #1a0a0a; }
+.op-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.op-kb {
+  margin-left: auto; font-family: 'Share Tech Mono', monospace;
+  font-size: 9px; color: #353548; letter-spacing: 0;
+}
+.op-sep { height: 1px; background: #1e1e30; margin: 3px 0; }
+
+.op-sub-trigger {
+  display: flex; align-items: center;
+  padding: 6px 16px;
+  font-family: 'Rajdhani', sans-serif; font-size: 12px; font-weight: 600;
+  letter-spacing: 0.07em; color: #9090b8; cursor: pointer;
+  transition: background 0.07s, color 0.07s;
+  position: relative;
+}
+.op-sub-trigger:hover { background: #1c1c30; color: #d0d0ee; }
+.op-submenu {
+  position: absolute; left: 100%; top: 0; z-index: 3100;
+  background: #141422; border: 1px solid #2a2a3e; border-radius: 6px;
+  min-width: 150px; padding: 4px 0;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.75);
+}
+
+/* ── Rack toolbar ────────────────────────────────────────────────── */
 .rack-toolbar {
-  display: flex; align-items: center; gap: 10px;
-  padding: 7px 12px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px;
   background: #0a0a12; border-bottom: 1px solid #1a1a28;
   flex-shrink: 0;
 }
+.options-btn {
+  width: 24px; height: 22px; border-radius: 4px;
+  border: 1px solid #252535; background: transparent; color: #50506a;
+  font-size: 15px; cursor: pointer; display: flex; align-items: center;
+  justify-content: center; transition: all 0.1s; flex-shrink: 0;
+}
+.options-btn:hover { border-color: #4a4a6a; color: #b0b0d0; }
 .rack-title {
   font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
   letter-spacing: 0.18em; color: #40405a; text-transform: uppercase;
+  flex-shrink: 0;
 }
-.filter-select {
-  background: #141420; border: 1px solid #252535; color: #8080a0;
-  padding: 3px 8px; border-radius: 4px; font-family: 'Rajdhani', sans-serif;
-  font-size: 11px; font-weight: 600; letter-spacing: 0.08em; cursor: pointer; outline: none;
+
+/* ── Display filter ──────────────────────────────────────────────── */
+.df-wrap { position: relative; }
+.df-btn {
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.1em; padding: 3px 8px;
+  border: 1px solid #252535; border-radius: 4px;
+  background: #0e0e1c; color: #60608a; cursor: pointer; white-space: nowrap;
+  transition: all 0.1s;
 }
-.filter-select:focus { border-color: #4a4a6a; }
+.df-btn:hover { border-color: #4a4a6a; color: #a0a0c0; }
+.df-dropdown {
+  position: absolute; top: calc(100% + 3px); left: 0; z-index: 2500;
+  background: #141422; border: 1px solid #2a2a3e; border-radius: 6px;
+  padding: 4px 0; min-width: 160px;
+  box-shadow: 0 10px 32px rgba(0,0,0,0.75);
+}
+.df-item {
+  padding: 6px 14px;
+  font-family: 'Rajdhani', sans-serif; font-size: 12px; font-weight: 600;
+  letter-spacing: 0.07em; color: #7070a0; cursor: pointer;
+  transition: background 0.07s, color 0.07s;
+}
+.df-item:hover { background: #1c1c30; color: #d0d0ee; }
+.df-item.active { color: #c0c0ee; }
+.df-item.df-group { padding-left: 20px; color: #5a5a80; }
+.df-item.df-group:hover { color: #d0d0ee; }
+.df-item.df-group.active { color: #4ecdc4; }
+.df-item.df-add { color: #3a3a5a; }
+.df-item.df-add:hover { color: #4ecdc4; }
+.df-sep { height: 1px; background: #1e1e2e; margin: 2px 0; }
+
+/* ── Graph editor toggle ─────────────────────────────────────────── */
+.ge-toggle-btn {
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.12em; padding: 3px 8px;
+  border: 1px solid #252535; border-radius: 4px;
+  background: transparent; color: #404058; cursor: pointer; transition: all 0.12s;
+}
+.ge-toggle-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
+.ge-toggle-btn.active { border-color: #4ecdc4; color: #4ecdc4; background: #041614; }
+
 .rack-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .kb-badge {
   font-family: 'Share Tech Mono', monospace; font-size: 10px; color: #30304a;
@@ -439,7 +929,6 @@ function commitRename() {
   border-radius: 5px; background: transparent; color: #404058; cursor: pointer; transition: all 0.15s;
 }
 .add-ch-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
-
 .synth-picker {
   position: absolute; right: 0; top: calc(100% + 5px); z-index: 2000;
   background: #141422; border: 1px solid #2a2a3c; border-radius: 7px;
@@ -453,16 +942,13 @@ function commitRename() {
   letter-spacing: 0.18em; color: #303048; text-transform: uppercase;
 }
 .synth-pick-item {
-  display: flex; align-items: center; gap: 8px;
-  padding: 6px 14px;
+  display: flex; align-items: center; gap: 8px; padding: 6px 14px;
   font-family: 'Rajdhani', sans-serif; font-size: 12px; font-weight: 600;
   letter-spacing: 0.08em; color: #8080a8; cursor: pointer;
   transition: background 0.08s, color 0.08s;
 }
 .synth-pick-item:hover { background: #1c1c2e; color: #d0d0ee; }
-.synth-pick-dot {
-  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-}
+.synth-pick-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
 /* ── Column headers ──────────────────────────────────────────────── */
 .col-headers {
@@ -498,32 +984,59 @@ function commitRename() {
 }
 .channel-row:hover    { background: #121220; }
 .channel-row.selected { background: #161626; }
+.channel-row.multi-sel { background: #141428; }
 .channel-row.muted    { opacity: 0.45; }
 .channel-row.selected::before {
   content: ''; position: absolute; left: 0; top: 0; bottom: 0;
   width: 3px; background: var(--accent);
 }
+.channel-row.multi-sel:not(.selected)::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0;
+  width: 2px; background: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+/* ── Zipped row ──────────────────────────────────────────────────── */
+.channel-row.zipped {
+  min-height: 22px;
+  grid-template-columns: 20px 1fr;
+}
+.zip-name {
+  display: flex; align-items: center; gap: 4px; padding: 2px 4px;
+}
+.zip-ch-btn {
+  flex: 1; height: 18px; font-size: 10px; letter-spacing: 0.1em;
+  font-family: 'Rajdhani', sans-serif; font-weight: 700; color: #fff;
+  border: none; border-radius: 3px; cursor: pointer;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 6px;
+  transition: filter 0.1s;
+}
+.zip-ch-btn:hover { filter: brightness(1.12); }
+.unzip-btn {
+  width: 16px; height: 16px; border-radius: 3px; border: 1px solid #252535;
+  background: transparent; color: #404058; font-size: 8px;
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; transition: all 0.1s;
+}
+.unzip-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
 
 /* ── LED ─────────────────────────────────────────────────────────── */
 .led {
   width: 10px; height: 10px; border-radius: 50%;
   background: #1a1a28; border: 1px solid #252535;
   cursor: pointer; transition: all 0.12s; justify-self: center;
-  box-shadow: none;
 }
 .led.active {
-  background: #2ecc71;
-  border-color: #2ecc71;
+  background: #2ecc71; border-color: #2ecc71;
   box-shadow: 0 0 6px #2ecc7188;
 }
 .led.solo {
-  background: #f39c12;
-  border-color: #f39c12;
+  background: #f39c12; border-color: #f39c12;
   box-shadow: 0 0 6px #f39c1288;
 }
 .led:hover { filter: brightness(1.3); }
 
-/* ── Knobs (hide label area) ─────────────────────────────────────── */
+/* ── Knobs ───────────────────────────────────────────────────────── */
 .rack-knob-wrap {
   display: flex; align-items: center; justify-content: center;
   height: 28px; overflow: hidden; cursor: pointer;
@@ -532,17 +1045,14 @@ function commitRename() {
 .rack-knob-wrap :deep(.knob-svg) { cursor: ns-resize; }
 
 /* ── Mixer track number ──────────────────────────────────────────── */
-.mix-num {
-  display: flex; align-items: center; justify-content: center; height: 100%;
-}
+.mix-num { display: flex; align-items: center; justify-content: center; height: 100%; }
 .mix-input {
   width: 28px; background: #141422; border: 1px solid #252535;
   color: #7070a0; font-family: 'Share Tech Mono', monospace; font-size: 10px;
   text-align: center; border-radius: 3px; outline: none; padding: 2px 0;
   -moz-appearance: textfield;
 }
-.mix-input::-webkit-inner-spin-button,
-.mix-input::-webkit-outer-spin-button { -webkit-appearance: none; }
+.mix-input::-webkit-inner-spin-button, .mix-input::-webkit-outer-spin-button { -webkit-appearance: none; }
 .mix-input:focus { border-color: #4a4a6a; color: #b0b0d0; }
 
 /* ── Channel name button ─────────────────────────────────────────── */
@@ -552,14 +1062,13 @@ function commitRename() {
   letter-spacing: 0.12em; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.6);
   border: none; border-radius: 4px; cursor: pointer;
   transition: filter 0.1s, box-shadow 0.1s;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  padding: 0 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 8px;
 }
 .ch-name-btn:hover     { filter: brightness(1.12); }
 .ch-name-btn.piano-active { box-shadow: 0 0 0 2px #fff4, 0 0 10px var(--accent); }
 
-/* ── Step grid ───────────────────────────────────────────────────── */
-.ch-seq { padding: 0 8px; }
+/* ── Sequencer area ──────────────────────────────────────────────── */
+.ch-seq { padding: 0 4px; position: relative; }
 
 .inline-steps {
   display: grid;
@@ -567,56 +1076,53 @@ function commitRename() {
   gap: 2px;
 }
 .istep {
-  height: 24px;
-  border: 1px solid #1e1e32;
-  border-radius: 3px;
-  background: #0e0e22;
-  cursor: pointer;
-  transition: background 0.07s, box-shadow 0.07s;
-  padding: 0;
+  height: 24px; border: 1px solid #1e1e32;
+  border-radius: 3px; background: #0e0e22;
+  cursor: pointer; transition: background 0.07s, box-shadow 0.07s; padding: 0;
 }
 .istep.beat    { background: #111128; border-color: #222238; }
 .istep.lit     {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--accent); border-color: var(--accent);
   box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, transparent);
 }
-.istep.playing {
-  border-color: #fff !important;
-  box-shadow: 0 0 8px #ffffffaa !important;
-}
+.istep.playing { border-color: #fff !important; box-shadow: 0 0 8px #ffffffaa !important; }
 .istep:hover:not(.lit) {
   background: color-mix(in srgb, var(--accent) 20%, #1a1a32);
+}
+
+/* ── Loop button ─────────────────────────────────────────────────── */
+.loop-btn {
+  position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
+  width: 18px; height: 18px; border-radius: 3px;
+  border: 1px solid #1e1e32; background: #09090f; color: #303048;
+  font-size: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: all 0.1s; z-index: 5; flex-shrink: 0;
+}
+.loop-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
+.loop-btn.active {
+  border-color: #4ecdc4; color: #4ecdc4; background: #041614;
+  box-shadow: 0 0 5px #4ecdc455;
 }
 
 /* ── Mini piano-roll preview ─────────────────────────────────────── */
 .mini-pr {
   display: grid;
   grid-template-columns: repeat(var(--cols), 1fr);
-  gap: 2px;
-  height: 28px;
-  background: #0a0a18;
-  border: 1px solid #1a1a2c;
-  border-radius: 3px;
-  cursor: pointer;
-  position: relative;
-  overflow: hidden;
-  transition: border-color 0.1s;
+  gap: 2px; height: 28px;
+  background: #0a0a18; border: 1px solid #1a1a2c;
+  border-radius: 3px; cursor: pointer; position: relative;
+  overflow: hidden; transition: border-color 0.1s;
 }
 .mini-pr:hover { border-color: #3a3a5a; }
 .mini-pr-col {
   height: 100%; position: relative;
-  border-right: 1px solid #0e0e1a;
-  transition: background 0.05s;
+  border-right: 1px solid #0e0e1a; transition: background 0.05s;
 }
 .mini-pr-col.beat    { border-left: 1px solid #141428; }
 .mini-pr-col.playing { background: rgba(255,255,255,0.08); }
 .mini-note {
-  position: absolute;
-  left: 1px; right: 1px;
-  height: 3px;
-  background: var(--accent);
-  border-radius: 1px;
+  position: absolute; left: 1px; right: 1px; height: 3px;
+  background: var(--accent); border-radius: 1px;
   box-shadow: 0 0 3px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 .mini-pr-hint {
@@ -626,6 +1132,64 @@ function commitRename() {
   letter-spacing: 0.15em; color: #252540; pointer-events: none;
 }
 .mini-pr:hover .mini-pr-hint { color: #4a4a6a; }
+
+/* ── Graph Editor strip ──────────────────────────────────────────── */
+.ge-strip {
+  grid-column: 1 / -1;
+  border-top: 1px solid #141428;
+  background: #09090f;
+}
+.ge-tabs {
+  display: flex; align-items: center; gap: 2px;
+  padding: 3px 6px; background: #080810;
+  border-bottom: 1px solid #141420;
+}
+.ge-tab {
+  font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.12em; padding: 2px 7px;
+  border: 1px solid #1e1e2e; border-radius: 3px;
+  background: transparent; color: #353548; cursor: pointer; transition: all 0.1s;
+}
+.ge-tab:hover { border-color: #3a3a5a; color: #7070a0; }
+.ge-tab.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.ge-tabs-right { margin-left: auto; }
+.ge-hint {
+  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #252540; letter-spacing: 0;
+}
+
+.ge-chart {
+  display: grid;
+  grid-template-columns: repeat(var(--cols), 1fr);
+  gap: 1px; height: 52px;
+  padding: 3px 4px; cursor: crosshair; user-select: none;
+  background: #0a0a14;
+}
+.ge-col {
+  position: relative; display: flex; align-items: flex-end;
+  border-right: 1px solid #0e0e18; transition: background 0.05s;
+}
+.ge-col.beat { border-left: 1px solid #141424; }
+.ge-col.playing { background: rgba(255,255,255,0.05); }
+.ge-col.lit .ge-bar { opacity: 1; }
+.ge-col:not(.lit) .ge-bar { opacity: 0.45; }
+
+.ge-bar-bg {
+  position: absolute; inset: 0;
+  background: #0c0c1a;
+}
+.ge-center-line {
+  position: absolute; left: 0; right: 0; top: 50%;
+  height: 1px; background: #1e1e30; z-index: 1;
+}
+.ge-bar {
+  position: absolute; left: 1px; right: 1px;
+  background: var(--accent);
+  border-radius: 2px 2px 0 0;
+  transition: height 0.05s, bottom 0.05s;
+  z-index: 2;
+  box-shadow: 0 0 4px color-mix(in srgb, var(--accent) 40%, transparent);
+  min-height: 2px;
+}
 
 /* ── Empty state ─────────────────────────────────────────────────── */
 .empty-state {
@@ -637,7 +1201,7 @@ function commitRename() {
 .ctx-menu {
   position: fixed; z-index: 1000;
   background: #181828; border: 1px solid #2a2a3c; border-radius: 6px;
-  padding: 4px 0; min-width: 160px;
+  padding: 4px 0; min-width: 170px;
   box-shadow: 0 8px 32px rgba(0,0,0,0.7);
 }
 .ctx-item {
@@ -650,6 +1214,21 @@ function commitRename() {
 .ctx-item.danger { color: #e74c3c44; }
 .ctx-item.danger:hover { color: #e74c3c; background: #1a0a0a; }
 .ctx-sep { height: 1px; background: #1e1e2c; margin: 3px 0; }
+
+.ctx-sub-trigger {
+  padding: 7px 16px;
+  font-family: 'Rajdhani', sans-serif; font-size: 13px; font-weight: 600;
+  letter-spacing: 0.08em; color: #a0a0c0; cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+  position: relative;
+}
+.ctx-sub-trigger:hover { background: #20203a; color: #e0e0ee; }
+.ctx-submenu {
+  position: absolute; left: 100%; top: 0; z-index: 1100;
+  background: #181828; border: 1px solid #2a2a3c; border-radius: 6px;
+  min-width: 150px; padding: 4px 0;
+  box-shadow: 0 8px 28px rgba(0,0,0,0.75);
+}
 
 /* ── Rename overlay ──────────────────────────────────────────────── */
 .rename-overlay {
@@ -671,17 +1250,31 @@ function commitRename() {
   padding: 7px 10px; border-radius: 5px; font-family: 'Rajdhani', sans-serif;
   font-size: 16px; font-weight: 700; letter-spacing: 0.1em; outline: none;
 }
-.rename-input:focus { border-color: #e74c3c; }
+.rename-input:focus { border-color: #4ecdc4; }
 .rename-btns { display: flex; gap: 8px; justify-content: flex-end; }
 .rename-ok {
-  padding: 6px 18px; background: #e74c3c22; border: 1px solid #e74c3c; color: #e74c3c;
+  padding: 6px 18px; background: #4ecdc422; border: 1px solid #4ecdc4; color: #4ecdc4;
   border-radius: 5px; cursor: pointer; font-family: 'Rajdhani', sans-serif;
   font-size: 13px; font-weight: 700; transition: all 0.1s;
 }
-.rename-ok:hover { background: #e74c3c; color: #fff; }
+.rename-ok:hover { background: #4ecdc4; color: #000; }
 .rename-cancel {
   padding: 6px 14px; background: transparent; border: 1px solid #252535; color: #606080;
   border-radius: 5px; cursor: pointer; font-family: 'Rajdhani', sans-serif; font-size: 13px;
 }
 .rename-cancel:hover { border-color: #4a4a6a; color: #a0a0c0; }
+
+/* ── Gradient dialog extra ───────────────────────────────────────── */
+.gradient-box { min-width: 300px; }
+.gradient-row {
+  display: flex; align-items: center; gap: 12px;
+}
+.grad-label {
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.1em; color: #606080; text-transform: uppercase;
+}
+.grad-color-input {
+  width: 40px; height: 28px; border: 1px solid #3a3a5a;
+  border-radius: 4px; background: transparent; cursor: pointer; padding: 1px;
+}
 </style>

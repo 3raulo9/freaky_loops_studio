@@ -152,6 +152,11 @@ function makeChannel(overrides = {}) {
     mixerTrack: 0,
     muted:      false,
     _soloed:    false,
+    selected:   false,
+    zipped:     false,
+    loopEnabled: false,
+    loopLength:  16,
+    groupId:    null,
     params: { pitch: 60, decay: 0.4, attack: 0.01, wave: 'sawtooth' },
     knobs: [
       { key: 'pitch',  label: 'NOTE',  min: 24,   max: 96,  decimals: 0 },
@@ -228,11 +233,18 @@ export function useStudio() {
     if (!patternData[patternId]) patternData[patternId] = {}
     if (!patternData[patternId][channelId]) {
       patternData[patternId][channelId] = reactive({
-        steps:      Array(32).fill(false),
-        pianoNotes: [],
+        steps:          Array(32).fill(false),
+        pianoNotes:     [],
+        stepVelocities: Array(32).fill(0.8),
+        stepPans:       Array(32).fill(0),
+        stepPitches:    Array(32).fill(0),
       })
     }
-    return patternData[patternId][channelId]
+    const d = patternData[patternId][channelId]
+    if (!d.stepVelocities) d.stepVelocities = Array(32).fill(0.8)
+    if (!d.stepPans)       d.stepPans       = Array(32).fill(0)
+    if (!d.stepPitches)    d.stepPitches    = Array(32).fill(0)
+    return d
   }
 
   // Expose helpers for templates/components
@@ -488,6 +500,14 @@ export function useStudio() {
   const gridSnap           = ref('1/4')
   const keyboardInputMode  = ref(false)
 
+  // ── Channel groups (named display filter groups) ───────────────────────────
+  const channelGroups = reactive([])
+  let _gid = 0
+
+  // ── Graph editor UI state ─────────────────────────────────────────────────
+  const graphEditorOpen = ref(false)
+  const graphParam      = ref('velocity') // 'velocity' | 'pan' | 'pitch'
+
   // ── Sequencer state ───────────────────────────────────────────────────────────
   const bpm         = ref(120)
   const totalSteps  = ref(16)
@@ -510,7 +530,13 @@ export function useStudio() {
       patSnap[pid] = {}
       Object.keys(patternData[pid]).forEach(cid => {
         const d = patternData[pid][cid]
-        patSnap[pid][cid] = { steps: [...d.steps], pianoNotes: d.pianoNotes.map(n => ({ ...n })) }
+        patSnap[pid][cid] = {
+          steps: [...d.steps],
+          pianoNotes: d.pianoNotes.map(n => ({ ...n })),
+          stepVelocities: [...(d.stepVelocities || Array(32).fill(0.8))],
+          stepPans: [...(d.stepPans || Array(32).fill(0))],
+          stepPitches: [...(d.stepPitches || Array(32).fill(0))],
+        }
       })
     })
     return { patSnap }
@@ -525,6 +551,9 @@ export function useStudio() {
         s.steps.forEach((v, i) => { d.steps[i] = v })
         d.pianoNotes.length = 0
         s.pianoNotes.forEach(n => d.pianoNotes.push({ ...n }))
+        if (s.stepVelocities) s.stepVelocities.forEach((v, i) => { d.stepVelocities[i] = v })
+        if (s.stepPans)       s.stepPans.forEach((v, i) => { d.stepPans[i] = v })
+        if (s.stepPitches)    s.stepPitches.forEach((v, i) => { d.stepPitches[i] = v })
       })
     })
   }
@@ -621,7 +650,10 @@ export function useStudio() {
       pids.forEach(pid => {
         const d = getPatData(ch.id, pid)
         if (ch.mode === 'steps') {
-          if (d.steps[step]) ch.fn(audioCtx, when, { ...ch.params }, dest)
+          if (d.steps[step]) {
+            const vel = d.stepVelocities?.[step] ?? 0.8
+            ch.fn(audioCtx, when, { ...ch.params, velocity: vel }, dest)
+          }
         } else {
           d.pianoNotes.filter(n => n.step === step).forEach(note => {
             ch.fn(audioCtx, when, { ...ch.params, pitch: note.pitch, velocity: note.velocity ?? 1 }, dest)
@@ -810,6 +842,121 @@ export function useStudio() {
     channels.splice(t, 0, ch)
   }
 
+  // ── Channel group management ───────────────────────────────────────────────
+  function addGroup(name) {
+    const id = 'g' + (++_gid)
+    channelGroups.push({ id, name })
+    return id
+  }
+  function removeGroup(id) {
+    const idx = channelGroups.findIndex(g => g.id === id)
+    if (idx >= 0) {
+      channels.forEach(ch => { if (ch.groupId === id) ch.groupId = null })
+      channelGroups.splice(idx, 1)
+    }
+  }
+  function renameGroup(id, name) {
+    const g = channelGroups.find(g => g.id === id)
+    if (g && name.trim()) g.name = name.trim()
+  }
+  function assignChannelsToGroup(channelIds, groupId) {
+    channelIds.forEach(id => {
+      const ch = channels.find(c => c.id === id)
+      if (ch) ch.groupId = groupId
+    })
+  }
+
+  // ── Step graph data ────────────────────────────────────────────────────────
+  function getStepVelocities(channelId, patternId) { return getPatData(channelId, patternId).stepVelocities }
+  function getStepPans(channelId, patternId)        { return getPatData(channelId, patternId).stepPans }
+  function getStepPitches(channelId, patternId)     { return getPatData(channelId, patternId).stepPitches }
+
+  function setStepVelocity(channelId, step, val, patternId) {
+    const d = getPatData(channelId, patternId)
+    d.stepVelocities[step] = Math.max(0, Math.min(1, val))
+  }
+  function setStepPan(channelId, step, val, patternId) {
+    const d = getPatData(channelId, patternId)
+    d.stepPans[step] = Math.max(-1, Math.min(1, val))
+  }
+  function setStepPitch(channelId, step, val, patternId) {
+    const d = getPatData(channelId, patternId)
+    d.stepPitches[step] = Math.max(-12, Math.min(12, Math.round(val)))
+  }
+
+  // ── Fill steps ─────────────────────────────────────────────────────────────
+  function fillSteps(channelId, every) {
+    pushUndo()
+    const d = getPatData(channelId)
+    for (let i = 0; i < totalSteps.value; i++) {
+      d.steps[i] = i % every === 0
+    }
+  }
+
+  // ── Clone channel ──────────────────────────────────────────────────────────
+  function cloneChannel(id) {
+    const src = channels.find(c => c.id === id)
+    if (!src) return null
+    const ch = makeChannel({
+      name:    src.name,
+      color:   src.color,
+      type:    src.type,
+      mode:    src.mode,
+      volume:  src.volume,
+      pan:     src.pan,
+      mixerTrack: src.mixerTrack,
+      params:  { ...src.params },
+      knobs:   src.knobs.map(k => ({ ...k })),
+      fn:      src.fn,
+      groupId: src.groupId,
+    })
+    const idx = channels.indexOf(src)
+    channels.splice(idx + 1, 0, ch)
+    if (audioCtx) rebuildGains()
+    return ch.id
+  }
+
+  // ── Sort channels ──────────────────────────────────────────────────────────
+  function _hexToHue(hex) {
+    if (!hex || hex.length < 7) return 0
+    const r = parseInt(hex.slice(1,3), 16) / 255
+    const g = parseInt(hex.slice(3,5), 16) / 255
+    const b = parseInt(hex.slice(5,7), 16) / 255
+    const max = Math.max(r,g,b), min = Math.min(r,g,b)
+    if (max === min) return 0
+    const d = max - min
+    let h
+    if (max === r)      h = ((g - b) / d + (g < b ? 6 : 0)) / 6
+    else if (max === g) h = ((b - r) / d + 2) / 6
+    else                h = ((r - g) / d + 4) / 6
+    return h
+  }
+  function sortChannelsBy(by) {
+    const arr = [...channels]
+    if      (by === 'name')  arr.sort((a, b) => a.name.localeCompare(b.name))
+    else if (by === 'track') arr.sort((a, b) => a.mixerTrack - b.mixerTrack)
+    else if (by === 'color') arr.sort((a, b) => _hexToHue(a.color) - _hexToHue(b.color))
+    channels.splice(0, channels.length, ...arr)
+  }
+
+  // ── Color channels ─────────────────────────────────────────────────────────
+  function colorChannelsRandom(channelIds) {
+    channelIds.forEach(id => {
+      const ch = channels.find(c => c.id === id)
+      if (ch) ch.color = COLORS[Math.floor(Math.random() * COLORS.length)]
+    })
+  }
+  function colorChannelsGradient(channelIds, fromColor, toColor) {
+    const hexToRgb = h => [parseInt(h.slice(1,3),16), parseInt(h.slice(3,5),16), parseInt(h.slice(5,7),16)]
+    const rgbToHex = (r,g,b) => '#' + [r,g,b].map(v => Math.round(v).toString(16).padStart(2,'0')).join('')
+    const from = hexToRgb(fromColor), to = hexToRgb(toColor)
+    channelIds.forEach((id, i) => {
+      const t = channelIds.length <= 1 ? 0 : i / (channelIds.length - 1)
+      const ch = channels.find(c => c.id === id)
+      if (ch) ch.color = rgbToHex(from[0] + t*(to[0]-from[0]), from[1] + t*(to[1]-from[1]), from[2] + t*(to[2]-from[2]))
+    })
+  }
+
   // ── Public API ────────────────────────────────────────────────────────────────
   _store = {
     // Channels
@@ -821,6 +968,17 @@ export function useStudio() {
     addPattern, removePattern, duplicatePattern,
     // Pattern editing
     toggleStep, togglePianoNote, hasNote, clearChannel, clearAll,
+    // Step graph
+    getStepVelocities, setStepVelocity,
+    getStepPans, setStepPan,
+    getStepPitches, setStepPitch,
+    fillSteps,
+    // Channel groups
+    channelGroups, addGroup, removeGroup, renameGroup, assignChannelsToGroup,
+    // Graph editor
+    graphEditorOpen, graphParam,
+    // Channel operations
+    cloneChannel, sortChannelsBy, colorChannelsRandom, colorChannelsGradient,
     // Playlist
     playlistTracks, playlistClips, timeMarkers, usePlaylist,
     playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell,
