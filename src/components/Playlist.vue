@@ -46,7 +46,12 @@
 
       <label class="use-pl-toggle">
         <input type="checkbox" v-model="usePlaylist" />
-        <span>FOLLOW</span>
+        <span>PLAYLIST</span>
+      </label>
+
+      <label class="use-pl-toggle">
+        <input type="checkbox" v-model="autoScroll" />
+        <span>▶▶ SCROLL</span>
       </label>
 
       <div class="tb-right">
@@ -136,19 +141,22 @@
         <!-- Ruler row -->
         <div class="pl-ruler-row">
           <div class="ruler-corner">PLAYLIST</div>
-          <div
-            v-for="c in PLAYLIST_CELLS" :key="c"
-            class="ruler-cell"
-            :class="{
-              beat4:   (c - 1) % 4 === 0,
-              playing: isPlaying && displayCell === c - 1,
-            }"
-            :style="{ width: cellWidth + 'px', minWidth: cellWidth + 'px' }"
-            @click.exact="addMarkerAt(c - 1)"
-            @contextmenu.prevent="removeMarkerAt(c - 1)"
-          >
-            <span class="ruler-num">{{ c }}</span>
-            <div v-if="markerAt(c - 1)" class="time-marker">{{ markerAt(c - 1).label }}</div>
+          <div class="ruler-cells-area" :style="{ width: PLAYLIST_CELLS * cellWidth + 'px' }">
+            <div
+              v-for="c in PLAYLIST_CELLS" :key="c"
+              class="ruler-cell"
+              :class="{
+                beat4:   (c - 1) % 4 === 0,
+                playing: isPlaying && displayCell === c - 1,
+              }"
+              :style="{ width: cellWidth + 'px', minWidth: cellWidth + 'px' }"
+              @mousedown.prevent="onRulerMouseDown($event, c - 1)"
+              @contextmenu.prevent="onRulerRightClick($event, c - 1)"
+            >
+              <span class="ruler-num">{{ c }}</span>
+              <div v-if="markerAt(c - 1)" class="time-marker">{{ markerAt(c - 1).label }}</div>
+            </div>
+            <!-- Playhead needle drawn by canvas overlay -->
           </div>
         </div>
 
@@ -190,6 +198,7 @@
             <!-- Clip cells area -->
             <div
               class="pl-track-cells"
+              :data-tool="playlistTool"
               :style="{ width: PLAYLIST_CELLS * cellWidth + 'px' }"
               @mousedown.prevent="onCellsMouseDown($event, track)"
               @mousemove="onCellsMouseMove($event, track)"
@@ -206,12 +215,7 @@
                 />
               </div>
 
-              <!-- Playhead -->
-              <div
-                v-if="isPlaying && displayCell >= 0"
-                class="playhead"
-                :style="{ left: displayCell * cellWidth + 'px' }"
-              />
+              <!-- Playhead drawn by canvas overlay -->
 
               <!-- Pattern clips -->
               <template v-if="clipFocusMode === 'pattern' || clipFocusMode === 'automation'">
@@ -222,6 +226,8 @@
                   :class="{
                     ghost:    clipFocusMode === 'automation',
                     dragging: draggingClip?.id === clip.id,
+                    selected: selectedClipIds.has(clip.id),
+                    'clip-muted': clip.muted,
                   }"
                   :style="patternClipStyle(clip)"
                   @mousedown.stop="onClipMouseDown($event, clip, track)"
@@ -304,6 +310,9 @@
         </div>
 
       </div>
+      <!-- ── Playhead canvas overlay ─────────────────────────────────────────── -->
+      <canvas ref="playheadCanvas" class="pl-playhead-canvas" />
+
     </div>
 
     <!-- ── Track context menu ─────────────────────────────────────────────────── -->
@@ -334,9 +343,22 @@
       @click.stop
     >
       <div class="ctx-item" @click="ctxDuplicateClip">Duplicate clip</div>
+      <div class="ctx-item" @click="ctxMakeUnique">Make Unique</div>
       <div class="ctx-sep" />
       <div class="ctx-item danger" @click="ctxRemoveClip">Remove clip</div>
     </div>
+
+    <!-- ── Select box overlay ───────────────────────────────────────────────────── -->
+    <div
+      v-if="selectBox"
+      class="select-box"
+      :style="{
+        left:   selectBox.left   + 'px',
+        top:    selectBox.top    + 'px',
+        width:  selectBox.width  + 'px',
+        height: selectBox.height + 'px',
+      }"
+    />
 
     <!-- ── Track rename overlay ───────────────────────────────────────────────── -->
     <div v-if="trackRenaming" class="rename-overlay" @click.self="trackRenaming = false">
@@ -369,16 +391,17 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../store/studio.js'
 
 const {
   patterns, currentPatternId, pickerPatternId,
   patternData, channels,
   playlistTracks, playlistClips, automationClips, timeMarkers, usePlaylist,
-  playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, isPlaying,
+  playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell, isPlaying,
+  bpm, totalSteps, getPlayheadTimeSeconds,
   addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
-  placeClip, removeClip, moveClip, resizeClip,
+  placeClip, removeClip, moveClip, resizeClip, splitClip, makeUniqueClip,
   addTimeMarker, removeTimeMarker,
   groupTrackWithAbove, ungroupTrack, toggleTrackCollapse, setTrackLocked,
   addAutomationClip, removeAutomationClip, addAutoNode, removeAutoNode, resizeAutomationClip,
@@ -388,11 +411,20 @@ const {
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 const tools = [
-  { id: 'draw',  icon: '✏',  tip: 'Draw — click to place/toggle clips (D)' },
-  { id: 'paint', icon: '🖌',  tip: 'Paint — drag to fill cells (P)' },
-  { id: 'erase', icon: '✕',  tip: 'Erase — click/drag to remove clips (E)' },
+  { id: 'draw',   icon: '✏',  tip: 'Draw — click to place/toggle clips (D)' },
+  { id: 'paint',  icon: '🖌',  tip: 'Paint — drag to fill cells (P)' },
+  { id: 'erase',  icon: '✕',  tip: 'Erase — click/drag to remove clips (X)' },
+  { id: 'slice',  icon: '✂',  tip: 'Slice — cut clip at cursor (C)' },
+  { id: 'mute',   icon: '⊘',  tip: 'Mute — toggle individual clip mute (T)' },
+  { id: 'select', icon: '⬚',  tip: 'Select — drag box to select clips (E)' },
 ]
 const snap = ref('cell')
+
+// ── Auto-scroll & selection ───────────────────────────────────────────────────
+const autoScroll      = ref(true)
+const selectedClipIds = ref(new Set())
+const selectBox       = ref(null)   // { left, top, width, height } viewport coords
+let selectStartX = 0, selectStartY = 0
 
 // ── Picker state ───────────────────────────────────────────────────────────────
 const pickerTab       = ref('patterns')
@@ -497,7 +529,6 @@ function addMarkerPrompt() {
   nextTick(() => markerInput.value?.select())
 }
 function addMarkerAt(cell) {
-  if (playlistTool.value !== 'draw') return
   if (markerAt(cell)) return
   pendingMarkerCell = cell; markerLabel.value = 'Section'; markerDialog.value = true
   nextTick(() => markerInput.value?.select())
@@ -533,13 +564,28 @@ const draggingClip  = ref(null)
 const dragGhost     = ref(null)
 let   isPainting    = false
 
+function clipAtCell(trackId, cell) {
+  return playlistClips.find(c => c.trackId === trackId && cell >= c.cell && cell < c.cell + (c.width || 1))
+}
+
 function onCellsMouseDown(e, track) {
   if (e.button !== 0) return
-  if (track.locked) return
   const rect    = e.currentTarget.getBoundingClientRect()
   const rawCell = cellFromX(e.clientX - rect.left)
   const cell    = Math.max(0, Math.min(PLAYLIST_CELLS - 1, Math.floor(rawCell)))
   const tool    = playlistTool.value
+
+  // Select tool: start drag box on empty area
+  if (tool === 'select') {
+    selectedClipIds.value = new Set()
+    selectStartX = e.clientX; selectStartY = e.clientY
+    selectBox.value = { left: e.clientX, top: e.clientY, width: 0, height: 0 }
+    window.addEventListener('mousemove', onSelectMove)
+    window.addEventListener('mouseup',   onSelectEnd, { once: true })
+    return
+  }
+
+  if (track.locked) return
 
   if (clipFocusMode.value === 'automation') {
     if (tool === 'draw' || tool === 'paint') {
@@ -557,12 +603,22 @@ function onCellsMouseDown(e, track) {
   }
 
   if (tool === 'erase') {
-    const clip = playlistClips.find(c => c.trackId === track.id && cell >= c.cell && cell < c.cell + (c.width || 1))
+    const clip = clipAtCell(track.id, cell)
     if (clip) removeClip(clip.id)
     return
   }
+  if (tool === 'slice') {
+    const clip = clipAtCell(track.id, cell)
+    if (clip && cell > clip.cell) splitClip(clip.id, cell)
+    return
+  }
+  if (tool === 'mute') {
+    const clip = clipAtCell(track.id, cell)
+    if (clip) clip.muted = !clip.muted
+    return
+  }
   if (tool === 'draw') {
-    const clip = playlistClips.find(c => c.trackId === track.id && cell >= c.cell && cell < c.cell + (c.width || 1))
+    const clip = clipAtCell(track.id, cell)
     if (clip) { removeClip(clip.id); return }
     placeClip(track.id, cell, pickerPatternId.value)
     return
@@ -574,9 +630,42 @@ function onCellsMouseDown(e, track) {
   }
 }
 
+// ── Select box drag ───────────────────────────────────────────────────────────
+function onSelectMove(e) {
+  const x = Math.min(e.clientX, selectStartX)
+  const y = Math.min(e.clientY, selectStartY)
+  selectBox.value = {
+    left:   x,
+    top:    y,
+    width:  Math.abs(e.clientX - selectStartX),
+    height: Math.abs(e.clientY - selectStartY),
+  }
+}
+
+function onSelectEnd(e) {
+  if (!selectBox.value || !timelineRef.value) { selectBox.value = null; return }
+  const box = selectBox.value
+  const tl  = timelineRef.value
+  const tlRect = tl.getBoundingClientRect()
+  const ids = new Set()
+  visibleTracks.value.forEach((track, tIdx) => {
+    const trackTop    = tlRect.top + 28 + tIdx * trackHeight.value - tl.scrollTop
+    const trackBottom = trackTop + trackHeight.value
+    if (trackBottom < box.top || trackTop > box.top + box.height) return
+    patternClipsForTrack(track.id).forEach(clip => {
+      const clipLeft  = tlRect.left + 140 + clip.cell * cellWidth.value - tl.scrollLeft
+      const clipRight = clipLeft + (clip.width || 1) * cellWidth.value
+      if (clipRight >= box.left && clipLeft <= box.left + box.width) ids.add(clip.id)
+    })
+  })
+  selectedClipIds.value = ids
+  selectBox.value = null
+}
+
 function onCellsMouseMove(e, track) {
   if (draggingClip.value) { onDragMove(e); return }
   if (!isPainting || playlistTool.value !== 'paint') return
+  if (track.locked) return
   const rect = e.currentTarget.getBoundingClientRect()
   const cell = Math.max(0, Math.min(PLAYLIST_CELLS - 1, Math.floor(cellFromX(e.clientX - rect.left))))
   placeClip(track.id, cell, pickerPatternId.value)
@@ -595,8 +684,27 @@ function onCellsRightClick(e, track) {
 
 // ── Clip drag (move) ──────────────────────────────────────────────────────────
 function onClipMouseDown(e, clip, track) {
-  if (playlistTool.value === 'erase') { removeClip(clip.id); return }
-  if (playlistTool.value !== 'draw') return
+  const tool = playlistTool.value
+  if (tool === 'erase') { removeClip(clip.id); return }
+  if (tool === 'mute')  { clip.muted = !clip.muted; return }
+  if (tool === 'slice') {
+    const rect = e.currentTarget.getBoundingClientRect()
+    const atCell = clip.cell + Math.floor((e.clientX - rect.left) / cellWidth.value)
+    if (atCell > clip.cell && atCell < clip.cell + (clip.width || 1)) splitClip(clip.id, atCell)
+    return
+  }
+  if (tool === 'select') {
+    if (e.shiftKey) {
+      const next = new Set(selectedClipIds.value)
+      next.has(clip.id) ? next.delete(clip.id) : next.add(clip.id)
+      selectedClipIds.value = next
+    } else {
+      selectedClipIds.value = new Set([clip.id])
+    }
+    return
+  }
+  if (tool !== 'draw') return
+  if (track.locked) return
   draggingClip.value = clip
   dragGhost.value = { trackId: track.id, cell: clip.cell, width: clip.width || 1, color: patternColor(clip.patternId) }
   window.addEventListener('mousemove', onDragMove)
@@ -722,6 +830,7 @@ function ctxDuplicateClip() {
   placeClip(c.trackId, c.cell + (c.width || 1), c.patternId, c.width || 1)
   clipMenu.value = null
 }
+function ctxMakeUnique() { makeUniqueClip(clipMenu.value.clip.id); clipMenu.value = null }
 function ctxRemoveClip() { removeClip(clipMenu.value.clip.id); clipMenu.value = null }
 function closeMenus()    { trackMenu.value = null; clipMenu.value = null }
 
@@ -739,6 +848,111 @@ function startTrackRename(track) {
 function commitTrackRename() {
   if (trackRenameTarget && trackRenameName.value.trim()) trackRenameTarget.name = trackRenameName.value.trim()
   trackRenaming.value = false
+}
+
+// ── Playhead canvas engine (Audio-time source of truth → 60fps canvas) ───────
+const playheadCanvas = ref(null)
+let   rafId = null
+
+const PICKER_W = 160   // .pl-picker width (matches CSS)
+const HEADER_W = 140   // track header / ruler-corner width (matches CSS)
+const RULER_H  = 28    // ruler row height (matches CSS)
+
+function renderPlayheadLoop() {
+  rafId = requestAnimationFrame(renderPlayheadLoop)
+
+  const canvas = playheadCanvas.value
+  const tl     = timelineRef.value
+  if (!canvas || !tl) return
+
+  const dpr = window.devicePixelRatio || 1
+  const w   = canvas.clientWidth
+  const h   = canvas.clientHeight
+  if (w === 0 || h === 0) return
+
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width  = Math.round(w * dpr)
+    canvas.height = Math.round(h * dpr)
+  }
+
+  const ctx = canvas.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, w, h)
+
+  // Compute exact absolute pixel position from audio clock (source of truth)
+  const secPerCell = totalSteps.value * (60 / bpm.value) / 4
+  const pxPerSec   = cellWidth.value / secPerCell
+  const xAbsolute  = getPlayheadTimeSeconds() * pxPerSec
+
+  // Page-flip auto-scroll: shift one screen when playhead hits 95% of track view
+  if (isPlaying.value && autoScroll.value) {
+    const trackViewW = tl.clientWidth - HEADER_W
+    if (trackViewW > 0 && xAbsolute >= tl.scrollLeft + trackViewW * 0.95) {
+      tl.scrollLeft += trackViewW
+    }
+  }
+
+  // Translate absolute px → viewport canvas coordinate
+  const xCanvas = PICKER_W + HEADER_W + xAbsolute - tl.scrollLeft
+
+  // Cull: don't draw outside the track-cells viewport
+  if (xCanvas < PICKER_W + HEADER_W || xCanvas > w) return
+
+  const playing = isPlaying.value
+
+  // Vertical line through track area (from ruler bottom to canvas bottom)
+  ctx.beginPath()
+  ctx.moveTo(xCanvas, RULER_H)
+  ctx.lineTo(xCanvas, h)
+  ctx.strokeStyle   = playing ? 'rgba(255,255,255,0.65)' : 'rgba(255,255,255,0.35)'
+  ctx.lineWidth     = playing ? 2 : 1.5
+  ctx.shadowColor   = playing ? 'rgba(255,255,255,0.35)' : 'transparent'
+  ctx.shadowBlur    = playing ? 6 : 0
+  ctx.stroke()
+  ctx.shadowBlur = 0
+
+  // Ruler needle triangle (inside ruler row)
+  ctx.beginPath()
+  ctx.moveTo(xCanvas,     RULER_H - 1)
+  ctx.lineTo(xCanvas - 5, 3)
+  ctx.lineTo(xCanvas + 5, 3)
+  ctx.closePath()
+  ctx.fillStyle = playing ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.5)'
+  ctx.fill()
+}
+
+// ── Ruler scrubbing ───────────────────────────────────────────────────────────
+let isScrubbing = false
+
+function onRulerMouseDown(e, cell) {
+  if (e.button !== 0) return
+  isScrubbing = true
+  setPlayheadCell(cell)
+  window.addEventListener('mousemove', onRulerScrubMove)
+  window.addEventListener('mouseup',   onRulerScrubEnd, { once: true })
+}
+
+function setPlayheadCell(cell) {
+  const c = Math.max(0, Math.min(PLAYLIST_CELLS - 1, cell))
+  displayCell.value      = c
+  playbackStartCell.value = c
+}
+
+function onRulerScrubMove(e) {
+  if (!isScrubbing || !timelineRef.value) return
+  const tl   = timelineRef.value
+  const relX = e.clientX - tl.getBoundingClientRect().left + tl.scrollLeft - 140
+  setPlayheadCell(Math.floor(relX / cellWidth.value))
+}
+
+function onRulerScrubEnd() {
+  isScrubbing = false
+  window.removeEventListener('mousemove', onRulerScrubMove)
+}
+
+function onRulerRightClick(e, cell) {
+  if (markerAt(cell)) removeMarkerAt(cell)
+  else { addMarkerAt(cell) }
 }
 
 // ── Scroll wheel shortcuts ────────────────────────────────────────────────────
@@ -809,11 +1023,25 @@ function onKeyDown(e) {
   if (['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return
   if (e.key === 'd' || e.key === 'D') playlistTool.value = 'draw'
   if (e.key === 'p' || e.key === 'P') playlistTool.value = 'paint'
-  if (e.key === 'e' || e.key === 'E') playlistTool.value = 'erase'
-  if (e.key === 'Escape') closeMenus()
+  if (e.key === 'x' || e.key === 'X') playlistTool.value = 'erase'
+  if (e.key === 'e' || e.key === 'E') playlistTool.value = 'select'
+  if (e.key === 'c' || e.key === 'C') playlistTool.value = 'slice'
+  if (e.key === 't' || e.key === 'T') playlistTool.value = 'mute'
+  if (e.key === 'Escape') { closeMenus(); selectedClipIds.value = new Set() }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipIds.value.size > 0) {
+    selectedClipIds.value.forEach(id => removeClip(id))
+    selectedClipIds.value = new Set()
+  }
 }
-onMounted(()        => window.addEventListener('keydown', onKeyDown))
-onBeforeUnmount(()  => window.removeEventListener('keydown', onKeyDown))
+onMounted(() => {
+  window.addEventListener('keydown', onKeyDown)
+  rafId = requestAnimationFrame(renderPlayheadLoop)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeyDown)
+  if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
+})
 </script>
 
 <style scoped>
@@ -883,7 +1111,16 @@ onBeforeUnmount(()  => window.removeEventListener('keydown', onKeyDown))
 }
 
 /* ── Main body ───────────────────────────────────────────────────────────────── */
-.pl-main { display: flex; flex: 1; overflow: hidden; }
+.pl-main { display: flex; flex: 1; overflow: hidden; position: relative; }
+
+/* ── Playhead canvas overlay ─────────────────────────────────────────────────── */
+.pl-playhead-canvas {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  pointer-events: none;
+  z-index: 50;
+  width: 100%; height: 100%;
+}
 
 /* ── Picker panel ────────────────────────────────────────────────────────────── */
 .pl-picker {
@@ -990,12 +1227,20 @@ onBeforeUnmount(()  => window.removeEventListener('keydown', onKeyDown))
 .track-remove { font-size: 13px; background: transparent; border: none; color: #2a2a3c; cursor: pointer; padding: 1px 3px; border-radius: 3px; flex-shrink: 0; transition: color 0.1s; }
 .track-remove:hover { color: #e74c3c; }
 
+/* ── Ruler cells area ────────────────────────────────────────────────────────── */
+.ruler-cells-area { position: relative; display: flex; flex: 1; }
+
 /* ── Clip cells area ─────────────────────────────────────────────────────────── */
 .pl-track-cells { position: relative; flex-shrink: 0; cursor: crosshair; overflow: visible; }
+.pl-track-cells[data-tool="draw"]   { cursor: crosshair; }
+.pl-track-cells[data-tool="paint"]  { cursor: cell; }
+.pl-track-cells[data-tool="erase"]  { cursor: not-allowed; }
+.pl-track-cells[data-tool="slice"]  { cursor: col-resize; }
+.pl-track-cells[data-tool="mute"]   { cursor: pointer; }
+.pl-track-cells[data-tool="select"] { cursor: default; }
 .grid-lines { position: absolute; inset: 0; pointer-events: none; }
 .grid-line  { position: absolute; top: 0; bottom: 0; border-left: 1px solid #0e0e1a; pointer-events: none; }
 .grid-line.beat4 { border-left-color: #151525; }
-.playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: rgba(255,255,255,0.55); pointer-events: none; z-index: 6; box-shadow: 0 0 6px rgba(255,255,255,0.3); }
 
 /* ── Pattern clip ────────────────────────────────────────────────────────────── */
 .pl-clip {
@@ -1005,8 +1250,11 @@ onBeforeUnmount(()  => window.removeEventListener('keydown', onKeyDown))
   border-radius: 4px; overflow: hidden; cursor: grab; z-index: 2; transition: filter 0.08s;
 }
 .pl-clip:hover  { filter: brightness(1.2); }
-.pl-clip.ghost  { opacity: 0.2; pointer-events: none; }
+.pl-clip.ghost    { opacity: 0.2; pointer-events: none; }
 .pl-clip.dragging { opacity: 0.3; pointer-events: none; }
+.pl-clip.selected { outline: 2px solid #e74c3c; outline-offset: -1px; filter: brightness(1.3); }
+.pl-clip.clip-muted { opacity: 0.3; filter: saturate(0.2); }
+.pl-clip.clip-muted .clip-label { text-decoration: line-through; }
 .clip-label {
   position: absolute; top: 2px; left: 4px; right: 10px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
@@ -1092,5 +1340,13 @@ onBeforeUnmount(()  => window.removeEventListener('keydown', onKeyDown))
 .rename-cancel {
   padding: 6px 14px; background: transparent; border: 1px solid #252535; color: #606080;
   border-radius: 5px; cursor: pointer; font-family: 'Rajdhani', sans-serif; font-size: 13px;
+}
+
+/* ── Select box ──────────────────────────────────────────────────────────────── */
+.select-box {
+  position: fixed; pointer-events: none; z-index: 9999;
+  background: rgba(231, 76, 60, 0.1);
+  border: 1px solid rgba(231, 76, 60, 0.7);
+  border-radius: 2px;
 }
 </style>
