@@ -58,7 +58,26 @@
 
       <div class="rack-right">
         <span class="kb-badge">⌨ Z–M · {{ kbOctave }}</span>
-        <button class="add-ch-btn" @click="addChannel" title="Add synth channel">+ SYNTH</button>
+        <div class="add-synth-wrap" ref="synthPickerRef">
+          <button class="add-ch-btn" @click="showSynthPicker = !showSynthPicker" title="Add synth channel">
+            + SYNTH ▾
+          </button>
+          <div v-if="showSynthPicker" class="synth-picker">
+            <div class="synth-pick-section">BASIC</div>
+            <div class="synth-pick-item" @click="addChannel(); showSynthPicker = false">
+              <span class="synth-pick-dot" style="background:#4ecdc4" />SYNTH (SAW)
+            </div>
+            <div class="synth-pick-section">FM SYNTHS</div>
+            <div
+              v-for="(preset, key) in FM_PRESETS"
+              :key="key"
+              class="synth-pick-item"
+              @click="addFMChannel(key); showSynthPicker = false"
+            >
+              <span class="synth-pick-dot" :style="{ background: preset.color }" />{{ preset.name }}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -233,8 +252,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick } from 'vue'
-import { useStudio } from '../store/studio.js'
+import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { useStudio, FM_PRESETS } from '../store/studio.js'
 import Knob from './Knob.vue'
 
 const {
@@ -242,8 +261,20 @@ const {
   pianoRollOpen, kbOctave,
   patterns, currentPatternId, getSteps,
   addPattern, removePattern, duplicatePattern,
-  toggleStep, soloChannel, clearChannel, addChannel, removeChannel, moveChannel,
+  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, removeChannel, moveChannel,
 } = useStudio()
+
+// ── Synth picker popup ────────────────────────────────────────────────────────
+const showSynthPicker = ref(false)
+const synthPickerRef  = ref(null)
+
+function onDocClick(e) {
+  if (showSynthPicker.value && synthPickerRef.value && !synthPickerRef.value.contains(e.target)) {
+    showSynthPicker.value = false
+  }
+}
+onMounted(()  => document.addEventListener('click', onDocClick, true))
+onUnmounted(() => document.removeEventListener('click', onDocClick, true))
 
 // Pattern navigator helpers
 const patternIndex  = computed(() => patterns.findIndex(p => p.id === currentPatternId.value))
@@ -401,12 +432,37 @@ function commitRename() {
 .kb-badge {
   font-family: 'Share Tech Mono', monospace; font-size: 10px; color: #30304a;
 }
+.add-synth-wrap { position: relative; }
 .add-ch-btn {
   font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
   letter-spacing: 0.1em; padding: 4px 10px; border: 1px dashed #252535;
   border-radius: 5px; background: transparent; color: #404058; cursor: pointer; transition: all 0.15s;
 }
 .add-ch-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
+
+.synth-picker {
+  position: absolute; right: 0; top: calc(100% + 5px); z-index: 2000;
+  background: #141422; border: 1px solid #2a2a3c; border-radius: 7px;
+  padding: 5px 0; min-width: 170px;
+  box-shadow: 0 10px 36px rgba(0,0,0,0.75);
+  max-height: 340px; overflow-y: auto;
+}
+.synth-pick-section {
+  padding: 5px 14px 3px;
+  font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.18em; color: #303048; text-transform: uppercase;
+}
+.synth-pick-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 14px;
+  font-family: 'Rajdhani', sans-serif; font-size: 12px; font-weight: 600;
+  letter-spacing: 0.08em; color: #8080a8; cursor: pointer;
+  transition: background 0.08s, color 0.08s;
+}
+.synth-pick-item:hover { background: #1c1c2e; color: #d0d0ee; }
+.synth-pick-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
 
 /* ── Column headers ──────────────────────────────────────────────── */
 .col-headers {

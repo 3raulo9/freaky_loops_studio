@@ -1,6 +1,124 @@
 import { ref, reactive, computed } from 'vue'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
 import { playMelodicNote } from '../audio/melodic.js'
+import {
+  playFMBell, playFMRhodes, playFMBass, playFMOrgan, playFMBrass,
+  playFMMarimba, playFMClav, playFMPad, playFMPluck, playFMFlute, playFMMetal,
+} from '../audio/fm.js'
+
+// ─── FM channel presets ────────────────────────────────────────────────────────
+export const FM_PRESETS = {
+  bell: {
+    name: 'FM BELL', color: '#4ecdc4',
+    params: { pitch: 72, decay: 1.8, mod: 6 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 96,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.3, max: 4.0, decimals: 2 },
+      { key: 'mod',   label: 'MOD',   min: 0.5, max: 14,  decimals: 1 },
+    ],
+    fn: playFMBell,
+  },
+  rhodes: {
+    name: 'FM RHODES', color: '#f39c12',
+    params: { pitch: 60, decay: 1.0, bite: 0.6 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 96,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.2, max: 3.0, decimals: 2 },
+      { key: 'bite',  label: 'BITE',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMRhodes,
+  },
+  bass: {
+    name: 'FM BASS', color: '#e74c3c',
+    params: { pitch: 36, decay: 0.5, drive: 0.5 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 72,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.1, max: 1.5, decimals: 2 },
+      { key: 'drive', label: 'DRIVE', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMBass,
+  },
+  organ: {
+    name: 'FM ORGAN', color: '#9b59b6',
+    params: { pitch: 60, decay: 0.6, draw: 0.5 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 96,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.05, max: 2.0, decimals: 2 },
+      { key: 'draw',  label: 'DRAW',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMOrgan,
+  },
+  brass: {
+    name: 'FM BRASS', color: '#e67e22',
+    params: { pitch: 60, decay: 0.7, bright: 0.7 },
+    knobs: [
+      { key: 'pitch',  label: 'NOTE',   min: 24,  max: 96,  decimals: 0 },
+      { key: 'decay',  label: 'DECAY',  min: 0.1, max: 2.0, decimals: 2 },
+      { key: 'bright', label: 'BRITE',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMBrass,
+  },
+  marimba: {
+    name: 'FM MARIMBA', color: '#2ecc71',
+    params: { pitch: 60, decay: 0.35, hardness: 0.5 },
+    knobs: [
+      { key: 'pitch',    label: 'NOTE',  min: 36,  max: 96,  decimals: 0 },
+      { key: 'decay',    label: 'DECAY', min: 0.08, max: 1.2, decimals: 2 },
+      { key: 'hardness', label: 'HARD',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMMarimba,
+  },
+  clav: {
+    name: 'FM CLAV', color: '#1abc9c',
+    params: { pitch: 60, decay: 0.25, edge: 0.6 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 36,  max: 84,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.05, max: 0.8, decimals: 2 },
+      { key: 'edge',  label: 'EDGE',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMClav,
+  },
+  pad: {
+    name: 'FM PAD', color: '#3498db',
+    params: { pitch: 60, decay: 2.5, depth: 0.5 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 96,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.5, max: 6.0, decimals: 2 },
+      { key: 'depth', label: 'DEPTH', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMPad,
+  },
+  pluck: {
+    name: 'FM PLUCK', color: '#e91e63',
+    params: { pitch: 60, decay: 0.5, bright: 0.6 },
+    knobs: [
+      { key: 'pitch',  label: 'NOTE',  min: 24,  max: 96,  decimals: 0 },
+      { key: 'decay',  label: 'DECAY', min: 0.1, max: 2.0, decimals: 2 },
+      { key: 'bright', label: 'BRITE', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMPluck,
+  },
+  flute: {
+    name: 'FM FLUTE', color: '#16a085',
+    params: { pitch: 72, decay: 1.2, breath: 0.4 },
+    knobs: [
+      { key: 'pitch',  label: 'NOTE',   min: 48,  max: 96,  decimals: 0 },
+      { key: 'decay',  label: 'DECAY',  min: 0.2, max: 3.0, decimals: 2 },
+      { key: 'breath', label: 'BRTH',   min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMFlute,
+  },
+  metal: {
+    name: 'FM METAL', color: '#7f8c8d',
+    params: { pitch: 48, decay: 0.6, grit: 0.6 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 84,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.1, max: 2.5, decimals: 2 },
+      { key: 'grit',  label: 'GRIT',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMMetal,
+  },
+}
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 export const PIANO_LOW   = 36
@@ -579,6 +697,21 @@ export function useStudio() {
     selectedChannelId.value = ch.id
   }
 
+  function addFMChannel(presetKey) {
+    const preset = FM_PRESETS[presetKey]
+    if (!preset) return
+    const ch = makeChannel({
+      name:   preset.name,
+      color:  preset.color,
+      params: { ...preset.params },
+      knobs:  preset.knobs.map(k => ({ ...k })),
+      fn:     preset.fn,
+    })
+    channels.push(ch)
+    if (audioCtx) rebuildGains()
+    selectedChannelId.value = ch.id
+  }
+
   function removeChannel(id) {
     const idx = channels.findIndex(c => c.id === id)
     if (idx < 0 || channels.length <= 1) return
@@ -600,7 +733,7 @@ export function useStudio() {
   _store = {
     // Channels
     channels, selectedChannelId, selectedChannel,
-    soloChannel, addChannel, removeChannel, moveChannel,
+    soloChannel, addChannel, addFMChannel, removeChannel, moveChannel,
     // Patterns
     patterns, currentPatternId, pickerPatternId, patternData,
     getPatData, getSteps, getPianoNotes,
