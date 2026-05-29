@@ -29,13 +29,6 @@
 
       <div class="divider" />
 
-      <label class="tb-label">SNAP</label>
-      <select v-model="snap" class="tb-select">
-        <option value="cell">Cell</option>
-        <option value="half">½ Cell</option>
-        <option value="none">None</option>
-      </select>
-
       <div class="divider" />
 
       <label class="tb-label">ZOOM</label>
@@ -406,7 +399,7 @@ const {
   patternData, channels,
   playlistTracks, playlistClips, automationClips, timeMarkers, usePlaylist,
   playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell, isPlaying,
-  bpm, totalSteps, getPlayheadTimeSeconds,
+  bpm, totalSteps, getPlayheadTimeSeconds, gridSnap,
   addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
   placeClip, removeClip, moveClip, resizeClip, splitClip, makeUniqueClip,
   addTimeMarker, removeTimeMarker,
@@ -425,8 +418,6 @@ const tools = [
   { id: 'mute',   icon: '⊘',  tip: 'Mute — toggle individual clip mute (T)' },
   { id: 'select', icon: '⬚',  tip: 'Select — drag box to select clips (E)' },
 ]
-const snap = ref('cell')
-
 // ── Auto-scroll & selection ───────────────────────────────────────────────────
 const autoScroll      = ref(true)
 const selectedClipIds = ref(new Set())
@@ -634,11 +625,17 @@ function addAutoTrack() {
   pickerTab.value     = 'automation'
 }
 
-// ── Snap helper ───────────────────────────────────────────────────────────────
+// ── Snap helper (uses global gridSnap from toolbar) ───────────────────────────
 function snapCell(raw) {
-  if (snap.value === 'none') return raw
-  if (snap.value === 'half') return Math.round(raw * 2) / 2
-  return Math.floor(raw)
+  switch (gridSnap.value) {
+    case 'bar':  return Math.floor(raw)
+    case '1/2':  return Math.round(raw * 2) / 2
+    case '1/4':  return Math.round(raw * 4) / 4
+    case '1/8':  return Math.round(raw * 8) / 8
+    case '1/16': return Math.round(raw * 16) / 16
+    case 'none': return raw
+    default:     return Math.floor(raw)
+  }
 }
 function cellFromX(x) { return snapCell(x / cellWidth.value) }
 
