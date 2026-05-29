@@ -214,7 +214,46 @@ export function useStudio() {
       cell + w > c.cell
     )
     if (collision) return
-    playlistClips.push({ id: 'c' + (++_clipId), trackId, cell, patternId: patternId ?? pickerPatternId.value, width: w, slipOffset: 0 })
+    playlistClips.push({ id: 'c' + (++_clipId), trackId, cell, patternId: patternId ?? pickerPatternId.value, width: w, slipOffset: 0, muted: false })
+  }
+
+  function splitClip(clipId, atCell) {
+    const clip = playlistClips.find(c => c.id === clipId)
+    if (!clip) return
+    const leftWidth = atCell - clip.cell
+    if (leftWidth <= 0 || leftWidth >= (clip.width || 1)) return
+    const rightWidth = (clip.width || 1) - leftWidth
+    clip.width = leftWidth
+    playlistClips.push({
+      id: 'c' + (++_clipId),
+      trackId: clip.trackId,
+      cell: atCell,
+      patternId: clip.patternId,
+      width: rightWidth,
+      slipOffset: 0,
+      muted: clip.muted || false,
+    })
+  }
+
+  function makeUniqueClip(clipId) {
+    const clip = playlistClips.find(c => c.id === clipId)
+    if (!clip) return
+    const srcPat = patterns.find(p => p.id === clip.patternId)
+    if (!srcPat) return
+    const newId = 'p' + (++_pid + 1)
+    patterns.push({ id: newId, name: srcPat.name + ' *', color: srcPat.color })
+    patternData[newId] = {}
+    const srcData = patternData[clip.patternId]
+    if (srcData) {
+      Object.keys(srcData).forEach(cid => {
+        const d = srcData[cid]
+        if (d) patternData[newId][cid] = reactive({
+          steps: [...(d.steps || Array(32).fill(false))],
+          pianoNotes: (d.pianoNotes || []).map(n => ({ ...n })),
+        })
+      })
+    }
+    clip.patternId = newId
   }
 
   function moveClip(clipId, newTrackId, newCell) {
@@ -333,9 +372,10 @@ export function useStudio() {
   const bpm         = ref(120)
   const totalSteps  = ref(16)
   const swing       = ref(0)
-  const isPlaying   = ref(false)
-  const displayStep = ref(-1)
-  const displayCell = ref(-1)
+  const isPlaying        = ref(false)
+  const displayStep      = ref(-1)
+  const displayCell      = ref(0)
+  const playbackStartCell = ref(0)
   // ── Audio engine ──────────────────────────────────────────────────────────────
   let audioCtx    = null
   let trackGains  = []
@@ -373,6 +413,8 @@ export function useStudio() {
   let schedStep      = 0
   let schedCell      = 0
   const noteQueue    = []
+  let playbackStartAudioTime   = 0
+  let playbackStartCellSeconds = 0
 
   function getPatternsForCell(cell) {
     if (!usePlaylist.value) return [currentPatternId.value]
@@ -381,13 +423,13 @@ export function useStudio() {
       .filter(c => {
         const w = c.width || 1
         const cellMod = cell % PLAYLIST_CELLS
-        return cellMod >= c.cell && cellMod < c.cell + w && playingTrackIds.has(c.trackId)
+        return cellMod >= c.cell && cellMod < c.cell + w && playingTrackIds.has(c.trackId) && !c.muted
       })
       .map(c => c.patternId)
   }
 
   function scheduleStep(step, when, cell) {
-    noteQueue.push({ step, time: when })
+    noteQueue.push({ step, time: when, cell: cell % PLAYLIST_CELLS })
     syncVolumes()
     const pids = getPatternsForCell(cell)
     channels.forEach((ch, ci) => {
@@ -420,11 +462,21 @@ export function useStudio() {
     }
   }
 
+  function getSecPerCell() {
+    return totalSteps.value * (60 / bpm.value) / 4
+  }
+
+  function getPlayheadTimeSeconds() {
+    if (!isPlaying.value || !audioCtx) return displayCell.value * getSecPerCell()
+    return playbackStartCellSeconds + Math.max(0, audioCtx.currentTime - playbackStartAudioTime)
+  }
+
   function drawLoop() {
     if (!isPlaying.value) return
     const now = audioCtx?.currentTime ?? 0
     while (noteQueue.length && noteQueue[0].time <= now + 0.01) {
       displayStep.value = noteQueue[0].step
+      displayCell.value = noteQueue[0].cell
       noteQueue.shift()
     }
     requestAnimationFrame(drawLoop)
@@ -433,9 +485,12 @@ export function useStudio() {
   function startPlay() {
     initAudio()
     isPlaying.value = true
-    schedStep = 0; schedCell = 0
+    const startCell = playbackStartCell.value
+    schedStep = 0; schedCell = startCell
     nextNoteTime = audioCtx.currentTime + 0.05
-    noteQueue.length = 0; displayStep.value = -1; displayCell.value = 0
+    playbackStartAudioTime   = audioCtx.currentTime
+    playbackStartCellSeconds = startCell * getSecPerCell()
+    noteQueue.length = 0; displayStep.value = -1; displayCell.value = startCell
     schedulerTimer = setInterval(tick, TICK_MS)
     requestAnimationFrame(drawLoop)
   }
@@ -443,7 +498,8 @@ export function useStudio() {
   function stopPlay() {
     isPlaying.value = false
     clearInterval(schedulerTimer); schedulerTimer = null
-    noteQueue.length = 0; displayStep.value = -1; displayCell.value = -1
+    noteQueue.length = 0; displayStep.value = -1
+    // Keep displayCell at last position (like FL Studio — playhead stays where it stopped)
   }
 
   function togglePlay() { isPlaying.value ? stopPlay() : startPlay() }
@@ -553,9 +609,9 @@ export function useStudio() {
     toggleStep, togglePianoNote, hasNote, clearChannel, clearAll,
     // Playlist
     playlistTracks, playlistClips, timeMarkers, usePlaylist,
-    playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell,
+    playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell,
     addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
-    placeClip, removeClip, moveClip, resizeClip,
+    placeClip, removeClip, moveClip, resizeClip, splitClip, makeUniqueClip,
     addTimeMarker, removeTimeMarker,
     PLAYLIST_CELLS,
     // Track groups/lock
@@ -570,6 +626,7 @@ export function useStudio() {
     // Sequencer
     bpm, totalSteps, swing, isPlaying, displayStep,
     togglePlay, startPlay, stopPlay,
+    getPlayheadTimeSeconds,
     // Keyboard
     playNote, handleKeyDown, handleKeyUp,
   }
