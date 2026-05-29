@@ -232,24 +232,31 @@
                   :style="patternClipStyle(clip)"
                   @mousedown.stop="onClipMouseDown($event, clip, track)"
                   @contextmenu.prevent.stop="openClipMenu($event, clip)"
-                  :title="patternName(clip.patternId) + ' — right-click for options'"
                 >
-                  <span class="clip-label">{{ patternName(clip.patternId) }}</span>
-                  <svg class="clip-preview-svg" preserveAspectRatio="none">
-                    <rect
-                      v-for="note in previewNotes(clip)"
-                      :key="note.key"
-                      :x="note.x + '%'" :y="note.y + '%'"
-                      :width="note.w + '%'" height="12%"
-                      :fill="patternColor(clip.patternId)"
-                      opacity="0.7"
+                  <!-- Title bar: solid theme color strip with name + dropdown -->
+                  <div class="clip-titlebar" :style="{ background: patternColor(clip.patternId) }">
+                    <button
+                      class="clip-dropdown-btn"
+                      @mousedown.stop
+                      @click.stop="openClipMenu($event, clip)"
+                      title="Clip options"
+                    >▼</button>
+                    <span
+                      class="clip-titlebar-name"
+                      :class="{ 'name-muted': clip.muted }"
+                    >{{ patternName(clip.patternId) }}</span>
+                  </div>
+                  <!-- Body: translucent theme color with canvas note preview -->
+                  <div class="clip-body" :style="{ background: hexToRgba(patternColor(clip.patternId), 0.18) }">
+                    <canvas
+                      :ref="el => onClipCanvasRef(clip.id, el)"
+                      class="clip-note-canvas"
                     />
-                  </svg>
+                  </div>
                   <div
                     v-if="!track.locked"
                     class="clip-resize-handle"
                     @mousedown.stop="onResizeStart($event, clip)"
-                    title="Drag to resize clip"
                   />
                 </div>
               </template>
@@ -467,10 +474,12 @@ function patternName(pid)  { return patterns.find(p => p.id === pid)?.name  ?? '
 function patternColor(pid) { return patterns.find(p => p.id === pid)?.color ?? '#4ecdc4' }
 
 function patternClipStyle(clip) {
+  const color = patternColor(clip.patternId)
   return {
     left:  clip.cell * cellWidth.value + 'px',
-    width: (clip.width || 1) * cellWidth.value - 3 + 'px',
-    '--clip-color': patternColor(clip.patternId),
+    width: (clip.width || 1) * cellWidth.value - 2 + 'px',
+    '--clip-color': color,
+    borderColor: hexToRgba(color, 0.5),
   }
 }
 
@@ -508,6 +517,80 @@ function previewNotes(clip) {
   })
   return notes
 }
+
+// ── Canvas clip preview engine ────────────────────────────────────────────────
+function hexToRgba(hex, alpha) {
+  if (!hex || !hex.startsWith('#') || hex.length < 7) return `rgba(255,255,255,${alpha})`
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return `rgba(${r},${g},${b},${alpha})`
+}
+
+const clipCanvases = new Map()
+
+function onClipCanvasRef(clipId, el) {
+  if (el) {
+    clipCanvases.set(clipId, el)
+    requestAnimationFrame(() => drawClipCanvas(clipId, el))
+  } else {
+    clipCanvases.delete(clipId)
+  }
+}
+
+function drawClipCanvas(clipId, canvas) {
+  const clip = playlistClips.find(c => c.id === clipId)
+  if (!clip || !canvas) return
+
+  const clipW = (clip.width || 1) * cellWidth.value - 4
+  const TITLE_H = 18
+  const clipH   = Math.max(4, trackHeight.value - TITLE_H - 6)
+
+  const dpr = window.devicePixelRatio || 1
+  canvas.width  = Math.round(clipW * dpr)
+  canvas.height = Math.round(clipH * dpr)
+
+  const ctx = canvas.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, clipW, clipH)
+
+  // LOD: skip note drawing for very narrow clips
+  if (clipW < 40) return
+
+  const color    = patternColor(clip.patternId)
+  const isActive = clip.patternId === currentPatternId.value || clip.patternId === pickerPatternId.value
+  const noteAlpha = isActive ? 0.85 : 0.28
+
+  // High-zoom: subtle vertical grid lines (piano-roll matrix feel)
+  if (clipW > 150) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)'
+    ctx.lineWidth = 1
+    for (let i = 1; i < 16; i++) {
+      const gx = (i / 16) * clipW
+      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, clipH); ctx.stroke()
+    }
+  }
+
+  // Collect normalised notes via existing previewNotes helper (returns x%, y%, w%)
+  const notes = previewNotes(clip)
+  if (!notes.length) return
+
+  ctx.fillStyle = hexToRgba(color, noteAlpha)
+  const noteH = Math.max(1.5, clipH * 0.13)
+  notes.forEach(n => {
+    const x = (n.x / 100) * clipW
+    const y = (n.y / 100) * clipH
+    const w = Math.max(1.5, (n.w / 100) * clipW - 0.5)
+    ctx.fillRect(x, y, w, noteH)
+  })
+}
+
+function redrawAllClipCanvases() {
+  nextTick(() => clipCanvases.forEach((el, id) => drawClipCanvas(id, el)))
+}
+
+watch([cellWidth, trackHeight, currentPatternId, pickerPatternId], redrawAllClipCanvases)
+watch(patternData, redrawAllClipCanvases, { deep: true })
 
 // ── Automation graph helpers ──────────────────────────────────────────────────
 function autoPolyline(auto) {
@@ -1245,31 +1328,50 @@ onBeforeUnmount(() => {
 /* ── Pattern clip ────────────────────────────────────────────────────────────── */
 .pl-clip {
   position: absolute; top: 3px; bottom: 3px;
-  background: color-mix(in srgb, var(--clip-color) 28%, #0e0e1a);
-  border: 1px solid color-mix(in srgb, var(--clip-color) 55%, transparent);
-  border-radius: 4px; overflow: hidden; cursor: grab; z-index: 2; transition: filter 0.08s;
+  border: 1px solid color-mix(in srgb, var(--clip-color) 50%, transparent);
+  border-radius: 4px; overflow: hidden; cursor: grab; z-index: 2;
+  display: flex; flex-direction: column; transition: filter 0.08s;
 }
-.pl-clip:hover  { filter: brightness(1.2); }
+.pl-clip:hover    { filter: brightness(1.18); }
 .pl-clip.ghost    { opacity: 0.2; pointer-events: none; }
 .pl-clip.dragging { opacity: 0.3; pointer-events: none; }
 .pl-clip.selected { outline: 2px solid #e74c3c; outline-offset: -1px; filter: brightness(1.3); }
 .pl-clip.clip-muted { opacity: 0.3; filter: saturate(0.2); }
-.pl-clip.clip-muted .clip-label { text-decoration: line-through; }
-.clip-label {
-  position: absolute; top: 2px; left: 4px; right: 10px;
+.pl-clip.clip-muted .name-muted { text-decoration: line-through; }
+
+/* Title bar (solid theme-color strip) */
+.clip-titlebar {
+  height: 18px; min-height: 18px; flex-shrink: 0;
+  display: flex; align-items: center; gap: 2px; padding: 0 4px 0 1px; overflow: hidden;
+}
+.clip-dropdown-btn {
+  background: transparent; border: none; cursor: pointer;
+  color: rgba(255,255,255,0.8); font-size: 6px; line-height: 1;
+  width: 12px; height: 14px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 2px; padding: 0; transition: background 0.1s;
+}
+.clip-dropdown-btn:hover { background: rgba(0,0,0,0.25); }
+.clip-titlebar-name {
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.08em; color: var(--clip-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  pointer-events: none; text-shadow: 0 0 4px rgba(0,0,0,0.9); z-index: 1;
+  letter-spacing: 0.05em; color: rgba(255,255,255,0.93);
+  text-shadow: 0 1px 3px rgba(0,0,0,0.6);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1;
 }
-.clip-preview-svg {
-  position: absolute; inset: 14px 8px 3px 3px;
-  width: calc(100% - 11px); height: calc(100% - 17px); pointer-events: none;
+
+/* Body (translucent theme-color + canvas preview) */
+.clip-body {
+  flex: 1; position: relative; overflow: hidden; min-height: 0;
 }
+.clip-note-canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;
+}
+
 .clip-resize-handle {
   position: absolute; right: 0; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 3;
-  background: linear-gradient(to left, rgba(255,255,255,0.08), transparent); border-radius: 0 3px 3px 0;
+  background: linear-gradient(to left, rgba(255,255,255,0.08), transparent);
 }
-.clip-resize-handle:hover { background: linear-gradient(to left, rgba(255,255,255,0.18), transparent); }
+.clip-resize-handle:hover { background: linear-gradient(to left, rgba(255,255,255,0.2), transparent); }
 .drag-ghost-clip { pointer-events: none; z-index: 8; border-style: dashed; }
 
 /* ── Automation clip ─────────────────────────────────────────────────────────── */
