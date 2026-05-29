@@ -479,12 +479,14 @@ export function useStudio() {
   }
 
   // ── UI state ─────────────────────────────────────────────────────────────────
-  const selectedChannelId = ref(channels[0].id)
-  const selectedChannel   = computed(() => channels.find(c => c.id === selectedChannelId.value) ?? channels[0])
-  const mainView          = ref('sequencer')
-  const pianoRollOpen     = ref(false)
-  const renderModalOpen   = ref(false)
-  const kbOctave          = ref(4)
+  const selectedChannelId  = ref(channels[0].id)
+  const selectedChannel    = computed(() => channels.find(c => c.id === selectedChannelId.value) ?? channels[0])
+  const mainView           = ref('sequencer')
+  const pianoRollOpen      = ref(false)
+  const renderModalOpen    = ref(false)
+  const kbOctave           = ref(4)
+  const gridSnap           = ref('1/4')
+  const keyboardInputMode  = ref(false)
 
   // ── Sequencer state ───────────────────────────────────────────────────────────
   const bpm         = ref(120)
@@ -494,24 +496,87 @@ export function useStudio() {
   const displayStep      = ref(-1)
   const displayCell      = ref(0)
   const playbackStartCell = ref(0)
+
+  // ── Undo / Redo ───────────────────────────────────────────────────────────────
+  const undoStack = reactive([])
+  const redoStack = reactive([])
+  const canUndo   = computed(() => undoStack.length > 0)
+  const canRedo   = computed(() => redoStack.length > 0)
+  const MAX_UNDO  = 50
+
+  function snapshotState() {
+    const patSnap = {}
+    Object.keys(patternData).forEach(pid => {
+      patSnap[pid] = {}
+      Object.keys(patternData[pid]).forEach(cid => {
+        const d = patternData[pid][cid]
+        patSnap[pid][cid] = { steps: [...d.steps], pianoNotes: d.pianoNotes.map(n => ({ ...n })) }
+      })
+    })
+    return { patSnap }
+  }
+
+  function restoreState(snapshot) {
+    Object.keys(snapshot.patSnap).forEach(pid => {
+      if (!patternData[pid]) patternData[pid] = {}
+      Object.keys(snapshot.patSnap[pid]).forEach(cid => {
+        const d = getPatData(cid, pid)
+        const s = snapshot.patSnap[pid][cid]
+        s.steps.forEach((v, i) => { d.steps[i] = v })
+        d.pianoNotes.length = 0
+        s.pianoNotes.forEach(n => d.pianoNotes.push({ ...n }))
+      })
+    })
+  }
+
+  function pushUndo() {
+    undoStack.push(snapshotState())
+    if (undoStack.length > MAX_UNDO) undoStack.shift()
+    redoStack.length = 0
+  }
+
+  function undoAction() {
+    if (!undoStack.length) return
+    redoStack.push(snapshotState())
+    restoreState(undoStack.pop())
+  }
+
+  function redoAction() {
+    if (!redoStack.length) return
+    undoStack.push(snapshotState())
+    restoreState(redoStack.pop())
+  }
+
   // ── Audio engine ──────────────────────────────────────────────────────────────
-  let audioCtx    = null
-  let trackGains  = []
+  let audioCtx     = null
+  let masterGain   = null
+  let analyserNode = null
+  let trackGains   = []
   let trackPanners = []
+  const audioLoad  = ref(0)
+  let _loadSmooth  = 0
 
   function initAudio() {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+      masterGain = audioCtx.createGain()
+      masterGain.gain.value = 1
+      analyserNode = audioCtx.createAnalyser()
+      analyserNode.fftSize = 256
+      masterGain.connect(analyserNode)
+      analyserNode.connect(audioCtx.destination)
+    }
     if (audioCtx.state === 'suspended') audioCtx.resume()
     rebuildGains()
   }
 
   function rebuildGains() {
-    if (!audioCtx) return
+    if (!audioCtx || !masterGain) return
     trackGains = []; trackPanners = []
     channels.forEach(ch => {
       const g = audioCtx.createGain(); g.gain.value = ch.volume
       const p = audioCtx.createStereoPanner(); p.pan.value = ch.pan
-      g.connect(p); p.connect(audioCtx.destination)
+      g.connect(p); p.connect(masterGain)
       trackGains.push(g); trackPanners.push(p)
     })
   }
@@ -568,6 +633,7 @@ export function useStudio() {
 
   function tick() {
     if (!audioCtx) return
+    const t0 = performance.now()
     const secPerBeat = 60 / bpm.value
     const secPerStep = secPerBeat / 4
     const steps = totalSteps.value
@@ -578,6 +644,9 @@ export function useStudio() {
       schedStep++
       if (schedStep % steps === 0) schedCell++
     }
+    const elapsed = performance.now() - t0
+    _loadSmooth = _loadSmooth * 0.85 + (elapsed * 40) * 0.15
+    audioLoad.value = Math.min(100, Math.round(_loadSmooth))
   }
 
   function getSecPerCell() {
@@ -613,14 +682,21 @@ export function useStudio() {
     requestAnimationFrame(drawLoop)
   }
 
+  function pausePlay() {
+    isPlaying.value = false
+    clearInterval(schedulerTimer); schedulerTimer = null
+    noteQueue.length = 0; displayStep.value = -1
+    // Playhead stays at current position (pause)
+  }
+
   function stopPlay() {
     isPlaying.value = false
     clearInterval(schedulerTimer); schedulerTimer = null
     noteQueue.length = 0; displayStep.value = -1
-    // Keep displayCell at last position (like FL Studio — playhead stays where it stopped)
+    displayCell.value = 0; playbackStartCell.value = 0
   }
 
-  function togglePlay() { isPlaying.value ? stopPlay() : startPlay() }
+  function togglePlay() { isPlaying.value ? pausePlay() : startPlay() }
 
   // ── Keyboard live play ────────────────────────────────────────────────────────
   const pressedKeys = new Set()
@@ -640,6 +716,7 @@ export function useStudio() {
     if (e.code === 'BracketRight') { kbOctave.value = Math.min(8, kbOctave.value + 1); return }
     const semi = KB_SEMITONES[e.code]
     if (semi === undefined || pressedKeys.has(e.code)) return
+    if (keyboardInputMode.value) e.preventDefault()
     pressedKeys.add(e.code)
     playNote(selectedChannel.value, 12 * (kbOctave.value + 1) + semi)
   }
@@ -648,10 +725,12 @@ export function useStudio() {
 
   // ── Pattern editing ───────────────────────────────────────────────────────────
   function toggleStep(channelId, step) {
+    pushUndo()
     const d = getPatData(channelId); d.steps[step] = !d.steps[step]
   }
 
   function togglePianoNote(channelId, step, pitch) {
+    pushUndo()
     const d   = getPatData(channelId)
     const idx = d.pianoNotes.findIndex(n => n.step === step && n.pitch === pitch)
     if (idx >= 0) d.pianoNotes.splice(idx, 1)
@@ -663,10 +742,12 @@ export function useStudio() {
   }
 
   function clearChannel(channelId) {
+    pushUndo()
     const d = getPatData(channelId); d.steps.fill(false); d.pianoNotes.length = 0
   }
 
   function clearAll() {
+    pushUndo()
     channels.forEach(ch => {
       const d = getPatData(ch.id); d.steps.fill(false); d.pianoNotes.length = 0
     })
@@ -756,10 +837,14 @@ export function useStudio() {
     getUnusedPatternIds,
     // UI state
     mainView, pianoRollOpen, renderModalOpen, kbOctave,
+    gridSnap, keyboardInputMode,
     // Sequencer
     bpm, totalSteps, swing, isPlaying, displayStep,
-    togglePlay, startPlay, stopPlay,
-    getPlayheadTimeSeconds,
+    togglePlay, startPlay, stopPlay, pausePlay,
+    getPlayheadTimeSeconds, audioLoad,
+    getAnalyser: () => analyserNode,
+    // Undo / Redo
+    canUndo, canRedo, undoAction, redoAction,
     // Keyboard
     playNote, handleKeyDown, handleKeyUp,
   }
