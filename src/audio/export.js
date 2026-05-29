@@ -56,7 +56,10 @@ async function renderAudioBuffer(tracks, options = {}) {
             track.fn(offCtx, when, { ...track.params, pitch: note.pitch, velocity: note.velocity ?? 1 }, vol)
           })
         } else {
-          if (track.pattern[step]) track.fn(offCtx, when, { ...track.params }, vol)
+          if (track.pattern[step]) {
+            const vel = track.stepVelocities?.[step] ?? 0.8
+            track.fn(offCtx, when, { ...track.params, velocity: vel }, vol)
+          }
         }
       })
     }
