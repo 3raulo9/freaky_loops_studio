@@ -1,5 +1,12 @@
+import { buildProcessChain } from './audioUtils.js'
+
 // Polyphonic sawtooth synth with ADSR envelope — used for melodic channels.
-export function playMelodicNote(ctx, time, { pitch = 60, decay = 0.4, attack = 0.01, wave = 'sawtooth', velocity = 1 }, dest) {
+export function playMelodicNote(ctx, time, {
+  pitch = 60, decay = 0.4, attack = 0.01, wave = 'sawtooth', velocity = 1,
+  drive = null, crunch = 0, distMix = 0.5,
+  lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
+  reverbSend = 0, delaySend = 0,
+} = {}, dest) {
   dest = dest ?? ctx.destination
   const freq = 440 * Math.pow(2, (pitch - 69) / 12)
 
@@ -14,7 +21,8 @@ export function playMelodicNote(ctx, time, { pitch = 60, decay = 0.4, attack = 0
   env.gain.exponentialRampToValueAtTime(0.001, time + Math.max(decay, 0.06))
 
   osc.connect(env)
-  env.connect(dest)
   osc.start(time)
   osc.stop(time + decay + 0.15)
+
+  buildProcessChain(ctx, env, dest, { drive, crunch, distMix, lpCutoff, hpCutoff, filterQ, reverbSend, delaySend })
 }

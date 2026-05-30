@@ -1,5 +1,6 @@
 import { ref, reactive, computed } from 'vue'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
+import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
 import {
   playFMBell, playFMRhodes, playFMBass, playFMOrgan, playFMBrass,
@@ -69,11 +70,11 @@ export const FM_PRESETS = {
   },
   bass: {
     name: 'FM BASS', color: '#e74c3c',
-    params: { pitch: 36, decay: 0.5, drive: 0.5 },
+    params: { pitch: 36, decay: 0.5, fmDrive: 0.5 },
     knobs: [
-      { key: 'pitch', label: 'NOTE',  min: 24,  max: 72,  decimals: 0 },
-      { key: 'decay', label: 'DECAY', min: 0.1, max: 1.5, decimals: 2 },
-      { key: 'drive', label: 'DRIVE', min: 0,   max: 1,   decimals: 2 },
+      { key: 'pitch',   label: 'NOTE',  min: 24,  max: 72,  decimals: 0 },
+      { key: 'decay',   label: 'DECAY', min: 0.1, max: 1.5, decimals: 2 },
+      { key: 'fmDrive', label: 'DRIVE', min: 0,   max: 1,   decimals: 2 },
     ],
     fn: playFMBass,
   },
@@ -212,7 +213,9 @@ function makeChannel(overrides = {}) {
     zipped:     false,
     loopEnabled: false,
     loopLength:  16,
-    groupId:    null,
+    groupId:        null,
+    activeModules:  [],
+    instrumentType: '',
     params: { pitch: 60, decay: 0.4, attack: 0.01, wave: 'sawtooth' },
     knobs: [
       { key: 'pitch',  label: 'NOTE',  min: 24,   max: 96,  decimals: 0 },
@@ -234,6 +237,7 @@ export function useStudio() {
   const channels = reactive([
     makeChannel({
       name: 'KICK', color: '#e74c3c', type: 'drum', mode: 'steps', volume: 0.9,
+      instrumentType: 'kick',
       params: { pitch: 60, decay: 0.55, punch: 0.65 },
       knobs: [
         { key: 'pitch', label: 'PITCH', min: 30,  max: 140, decimals: 0 },
@@ -244,6 +248,7 @@ export function useStudio() {
     }),
     makeChannel({
       name: 'SNARE', color: '#f39c12', type: 'drum', mode: 'steps', volume: 0.8,
+      instrumentType: 'snare',
       params: { snap: 0.7, tone: 210, decay: 0.28 },
       knobs: [
         { key: 'snap',  label: 'SNAP',  min: 0,   max: 1,   decimals: 2 },
@@ -254,6 +259,7 @@ export function useStudio() {
     }),
     makeChannel({
       name: 'HI-HAT', color: '#2ecc71', type: 'drum', mode: 'steps', volume: 0.65,
+      instrumentType: 'hihat',
       params: { decay: 0.07, tone: 0.5, mix: 0.75 },
       knobs: [
         { key: 'decay', label: 'DECAY', min: 0.01, max: 0.45, decimals: 2 },
@@ -264,6 +270,7 @@ export function useStudio() {
     }),
     makeChannel({
       name: 'CLASH', color: '#9b59b6', type: 'drum', mode: 'steps', volume: 0.7,
+      instrumentType: 'clash',
       params: { decay: 1.2, tone: 0.45, ring: 0.4 },
       knobs: [
         { key: 'decay', label: 'DECAY', min: 0.2, max: 4.0, decimals: 2 },
@@ -1123,6 +1130,23 @@ export function useStudio() {
   }
 
   // ── Project save / load ───────────────────────────────────────────────────────
+  // ── Drum module management ──────────────────────────────────────────────────
+  function addDrumModule(channelId, moduleId) {
+    const ch  = channels.find(c => c.id === channelId)
+    const mod = DRUM_MODULE_DEFS[moduleId]
+    if (!ch || !mod || ch.activeModules.includes(moduleId)) return
+    ch.activeModules.push(moduleId)
+    Object.assign(ch.params, mod.params)
+  }
+
+  function removeDrumModule(channelId, moduleId) {
+    const ch  = channels.find(c => c.id === channelId)
+    const mod = DRUM_MODULE_DEFS[moduleId]
+    if (!ch || !mod) return
+    ch.activeModules = ch.activeModules.filter(id => id !== moduleId)
+    for (const key of Object.keys(mod.params)) delete ch.params[key]
+  }
+
   function saveProject(name = 'project') {
     const project = {
       version: 1,
@@ -1144,9 +1168,11 @@ export function useStudio() {
         loopEnabled: ch.loopEnabled,
         loopLength:  ch.loopLength,
         groupId:     ch.groupId,
-        params:      { ...ch.params },
-        knobs:       ch.knobs.map(k => ({ ...k })),
-        fnKey:       FN_KEY_MAP.get(ch.fn) ?? 'melodic',
+        params:         { ...ch.params },
+        knobs:          ch.knobs.map(k => ({ ...k })),
+        fnKey:          FN_KEY_MAP.get(ch.fn) ?? 'melodic',
+        activeModules:  [...(ch.activeModules ?? [])],
+        instrumentType: ch.instrumentType ?? '',
       })),
       channelGroups: channelGroups.map(g => ({ ...g })),
       patterns:      patterns.map(p => ({ ...p })),
@@ -1231,9 +1257,11 @@ export function useStudio() {
       loopEnabled: ch.loopEnabled ?? false,
       loopLength:  ch.loopLength  ?? 16,
       groupId:     ch.groupId     ?? null,
-      params:      { ...(ch.params ?? {}) },
-      knobs:       (ch.knobs ?? []).map(k => ({ ...k })),
-      fn:          FN_FROM_KEY[ch.fnKey] ?? playMelodicNote,
+      params:         { ...(ch.params ?? {}) },
+      knobs:          (ch.knobs ?? []).map(k => ({ ...k })),
+      fn:             FN_FROM_KEY[ch.fnKey] ?? playMelodicNote,
+      activeModules:  [...(ch.activeModules ?? [])],
+      instrumentType: ch.instrumentType ?? '',
     })))
 
     // Channel groups
@@ -1355,6 +1383,8 @@ export function useStudio() {
     snapScale,
     // Project save / load
     saveProject, loadProjectFile,
+    // Drum modules
+    addDrumModule, removeDrumModule,
   }
   return _store
 }
