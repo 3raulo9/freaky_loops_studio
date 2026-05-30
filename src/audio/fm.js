@@ -453,6 +453,120 @@ export function playFMFlute(ctx, time, {
   buildProcessChain(ctx, env, dest, { drive, crunch, distMix, lpCutoff, hpCutoff, filterQ, reverbSend, delaySend })
 }
 
+// ─── FM GUITAR ───────────────────────────────────────────────────────────────
+// Two FM pairs: (1) 1:3.5 ratio for the bright string-pluck "twang" attack,
+// (2) 1:2 ratio for the warm body sustain. Amplitude tracks a fast pluck curve.
+export function playFMGuitar(ctx, time, {
+  pitch = 64, decay = 0.8, tone = 0.65, velocity = 1,
+  drive = null, crunch = 0, distMix = 0.5,
+  lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
+  reverbSend = 0, delaySend = 0,
+} = {}, dest) {
+  dest = dest ?? ctx.destination
+  const freq = midiToFreq(pitch)
+
+  const master = ctx.createGain()
+  master.gain.value = 0.5
+
+  // ── Voice 1: pluck twang  (mod ratio 3.5) ────────────────────────────────
+  const c1 = ctx.createOscillator(); c1.type = 'sine'; c1.frequency.value = freq
+  const m1 = ctx.createOscillator(); m1.type = 'sine'; m1.frequency.value = freq * 3.5
+  const md1 = ctx.createGain()
+  const g1  = ctx.createGain(); g1.gain.value = 0.72
+
+  const pluck = (3 + tone * 10) * freq * 3.5
+  md1.gain.setValueAtTime(pluck, time)
+  md1.gain.exponentialRampToValueAtTime(pluck * 0.002, time + 0.012 + (1 - tone) * 0.03)
+  md1.gain.exponentialRampToValueAtTime(0.001, time + 0.09)
+
+  m1.connect(md1); md1.connect(c1.frequency); c1.connect(g1); g1.connect(master)
+
+  // ── Voice 2: warm body sustain  (mod ratio 2) ────────────────────────────
+  const c2 = ctx.createOscillator(); c2.type = 'sine'; c2.frequency.value = freq
+  const m2 = ctx.createOscillator(); m2.type = 'sine'; m2.frequency.value = freq * 2
+  const md2 = ctx.createGain()
+  const g2  = ctx.createGain(); g2.gain.value = 0.55
+
+  const body = (0.4 + tone * 2.5) * freq * 2
+  md2.gain.setValueAtTime(body, time)
+  md2.gain.exponentialRampToValueAtTime(0.001, time + decay * 0.85)
+
+  m2.connect(md2); md2.connect(c2.frequency); c2.connect(g2); g2.connect(master)
+
+  // ── Amplitude envelope ────────────────────────────────────────────────────
+  const env = ctx.createGain()
+  env.gain.setValueAtTime(velocity, time)
+  env.gain.exponentialRampToValueAtTime(velocity * 0.18, time + 0.07)
+  env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+
+  master.connect(env)
+
+  const dur = decay + 0.1
+  ;[m1, c1, m2, c2].forEach(n => { n.start(time); n.stop(time + dur) })
+
+  buildProcessChain(ctx, env, dest, { drive, crunch, distMix, lpCutoff, hpCutoff, filterQ, reverbSend, delaySend })
+}
+
+// ─── FM BASS GUITAR ──────────────────────────────────────────────────────────
+// 1:1.5 ratio gives the rubbery "slap/pluck" tone of a bass guitar string.
+// Sub oscillator at half frequency adds low-end body.
+// Pick click oscillator handles the initial transient attack.
+export function playFMBassGuitar(ctx, time, {
+  pitch = 40, decay = 1.0, pick = 0.55, velocity = 1,
+  drive = null, crunch = 0, distMix = 0.5,
+  lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
+  reverbSend = 0, delaySend = 0,
+} = {}, dest) {
+  dest = dest ?? ctx.destination
+  const freq = midiToFreq(pitch)
+
+  const env = ctx.createGain()
+  env.gain.setValueAtTime(velocity * 0.9, time)
+  env.gain.exponentialRampToValueAtTime(velocity * 0.35, time + 0.06)
+  env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+
+  // ── Main FM body  (1 : 1.5 — perfect fifth) ──────────────────────────────
+  const carrier   = ctx.createOscillator(); carrier.type = 'sine'
+  const modulator = ctx.createOscillator(); modulator.type = 'sine'
+  const modDepth  = ctx.createGain()
+  const cGain     = ctx.createGain(); cGain.gain.value = 0.8
+
+  carrier.frequency.value   = freq
+  modulator.frequency.value = freq * 1.5
+
+  const d = (1 + pick * 7) * freq * 1.5
+  modDepth.gain.setValueAtTime(d * 2.2, time)
+  modDepth.gain.exponentialRampToValueAtTime(d * 0.25, time + 0.025)
+  modDepth.gain.exponentialRampToValueAtTime(0.001, time + decay * 0.65)
+
+  modulator.connect(modDepth); modDepth.connect(carrier.frequency)
+  carrier.connect(cGain); cGain.connect(env)
+
+  // ── Sub oscillator for low-end depth ─────────────────────────────────────
+  const sub     = ctx.createOscillator(); sub.type = 'triangle'
+  const subGain = ctx.createGain()
+  sub.frequency.value = freq * 0.5
+  subGain.gain.setValueAtTime(velocity * 0.45, time)
+  subGain.gain.exponentialRampToValueAtTime(0.001, time + decay * 0.7)
+  sub.connect(subGain); subGain.connect(env)
+
+  // ── Pick click transient ──────────────────────────────────────────────────
+  const click     = ctx.createOscillator(); click.type = 'triangle'
+  const clickGain = ctx.createGain()
+  click.frequency.value = freq * 5
+  clickGain.gain.setValueAtTime(velocity * pick * 0.5, time)
+  clickGain.gain.exponentialRampToValueAtTime(0.001, time + 0.01)
+  click.connect(clickGain); clickGain.connect(env)
+
+  const dur = decay + 0.1
+  modulator.start(time); modulator.stop(time + dur)
+  carrier.start(time);   carrier.stop(time + dur)
+  sub.start(time);       sub.stop(time + decay * 0.75)
+  click.start(time);     click.stop(time + 0.02)
+
+  buildProcessChain(ctx, env, dest, { drive, crunch, distMix, lpCutoff, hpCutoff, filterQ, reverbSend, delaySend })
+}
+
 // ─── FM METAL ────────────────────────────────────────────────────────────────
 export function playFMMetal(ctx, time, {
   pitch = 60, decay = 0.6, grit = 0.6, velocity = 1,

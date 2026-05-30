@@ -5,45 +5,50 @@ import { playMelodicNote } from '../audio/melodic.js'
 import {
   playFMBell, playFMRhodes, playFMBass, playFMOrgan, playFMBrass,
   playFMMarimba, playFMClav, playFMPad, playFMPluck, playFMFlute, playFMMetal,
+  playFMGuitar, playFMBassGuitar,
 } from '../audio/fm.js'
 
 // ─── Function key map (for project serialization) ─────────────────────────────
 export const FN_KEY_MAP = new Map([
-  [playKick,        'kick'],
-  [playSnare,       'snare'],
-  [playHiHat,       'hihat'],
-  [playClash,       'clash'],
-  [playMelodicNote, 'melodic'],
-  [playFMBell,      'fm:bell'],
-  [playFMRhodes,    'fm:rhodes'],
-  [playFMBass,      'fm:bass'],
-  [playFMOrgan,     'fm:organ'],
-  [playFMBrass,     'fm:brass'],
-  [playFMMarimba,   'fm:marimba'],
-  [playFMClav,      'fm:clav'],
-  [playFMPad,       'fm:pad'],
-  [playFMPluck,     'fm:pluck'],
-  [playFMFlute,     'fm:flute'],
-  [playFMMetal,     'fm:metal'],
+  [playKick,          'kick'],
+  [playSnare,         'snare'],
+  [playHiHat,         'hihat'],
+  [playClash,         'clash'],
+  [playMelodicNote,   'melodic'],
+  [playFMBell,        'fm:bell'],
+  [playFMRhodes,      'fm:rhodes'],
+  [playFMBass,        'fm:bass'],
+  [playFMOrgan,       'fm:organ'],
+  [playFMBrass,       'fm:brass'],
+  [playFMMarimba,     'fm:marimba'],
+  [playFMClav,        'fm:clav'],
+  [playFMPad,         'fm:pad'],
+  [playFMPluck,       'fm:pluck'],
+  [playFMFlute,       'fm:flute'],
+  [playFMMetal,       'fm:metal'],
+  [playFMGuitar,      'fm:guitar'],
+  [playFMBassGuitar,  'fm:bassguitar'],
 ])
 
 export const FN_FROM_KEY = {
-  kick:         playKick,
-  snare:        playSnare,
-  hihat:        playHiHat,
-  clash:        playClash,
-  melodic:      playMelodicNote,
-  'fm:bell':    playFMBell,
-  'fm:rhodes':  playFMRhodes,
-  'fm:bass':    playFMBass,
-  'fm:organ':   playFMOrgan,
-  'fm:brass':   playFMBrass,
-  'fm:marimba': playFMMarimba,
-  'fm:clav':    playFMClav,
-  'fm:pad':     playFMPad,
-  'fm:pluck':   playFMPluck,
-  'fm:flute':   playFMFlute,
-  'fm:metal':   playFMMetal,
+  kick:              playKick,
+  snare:             playSnare,
+  hihat:             playHiHat,
+  clash:             playClash,
+  melodic:           playMelodicNote,
+  'fm:bell':         playFMBell,
+  'fm:rhodes':       playFMRhodes,
+  'fm:bass':         playFMBass,
+  'fm:organ':        playFMOrgan,
+  'fm:brass':        playFMBrass,
+  'fm:marimba':      playFMMarimba,
+  'fm:clav':         playFMClav,
+  'fm:pad':          playFMPad,
+  'fm:pluck':        playFMPluck,
+  'fm:flute':        playFMFlute,
+  'fm:metal':        playFMMetal,
+  'fm:guitar':       playFMGuitar,
+  'fm:bassguitar':   playFMBassGuitar,
 }
 
 // ─── FM channel presets ────────────────────────────────────────────────────────
@@ -158,11 +163,31 @@ export const FM_PRESETS = {
     ],
     fn: playFMMetal,
   },
+  guitar: {
+    name: 'FM GUITAR', color: '#d4a843',
+    params: { pitch: 64, decay: 0.8, tone: 0.65 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 36,  max: 84,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.1, max: 2.5, decimals: 2 },
+      { key: 'tone',  label: 'TONE',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMGuitar,
+  },
+  bassguitar: {
+    name: 'BASS GUITAR', color: '#8b4513',
+    params: { pitch: 40, decay: 1.0, pick: 0.55 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 60,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.1, max: 2.5, decimals: 2 },
+      { key: 'pick',  label: 'PICK',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMBassGuitar,
+  },
 }
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
-export const PIANO_LOW   = 36
-export const PIANO_HIGH  = 84
+export const PIANO_LOW   = 12
+export const PIANO_HIGH  = 108
 export const NOTE_NAMES  = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 export const PIANO_KEYS  = Array.from({ length: PIANO_HIGH - PIANO_LOW + 1 }, (_, i) => PIANO_HIGH - i)
 export const PLAYLIST_BARS  = 32
@@ -213,6 +238,8 @@ function makeChannel(overrides = {}) {
     zipped:     false,
     loopEnabled: false,
     loopLength:  16,
+    cutSelf:     false,
+    swingMix:    1.0,
     groupId:        null,
     activeModules:  [],
     instrumentType: '',
@@ -660,6 +687,7 @@ export function useStudio() {
   let analyserNode    = null
   let trackGains      = []
   let trackPanners    = []
+  let cutGains        = []   // per-channel cut-self GainNode (null when cutSelf=false)
   let mixerInsertNodes = []  // [{ eqLow, eqMid, eqHigh, gain, panner, analyser }] per insert
   const audioLoad     = ref(0)
   let _loadSmooth     = 0
@@ -704,7 +732,8 @@ export function useStudio() {
     if (!audioCtx || !masterGain) return
     trackGains.forEach(g => { try { g.disconnect() } catch (e) {} })
     trackPanners.forEach(p => { try { p.disconnect() } catch (e) {} })
-    trackGains = []; trackPanners = []
+    cutGains.forEach(cg => { if (cg) try { cg.disconnect() } catch (e) {} })
+    trackGains = []; trackPanners = []; cutGains = []
     channels.forEach(ch => {
       const g = audioCtx.createGain(); g.gain.value = ch.volume
       const p = audioCtx.createStereoPanner(); p.pan.value = ch.pan
@@ -715,6 +744,14 @@ export function useStudio() {
         : masterGain
       p.connect(dest)
       trackGains.push(g); trackPanners.push(p)
+      // Cut-self gain node: sits between fn output and trackGain
+      if (ch.cutSelf) {
+        const cg = audioCtx.createGain(); cg.gain.value = 1.0
+        cg.connect(g)
+        cutGains.push(cg)
+      } else {
+        cutGains.push(null)
+      }
     })
   }
 
@@ -812,19 +849,34 @@ export function useStudio() {
       .map(c => c.patternId)
   }
 
-  function scheduleStep(step, when, cell) {
-    noteQueue.push({ step, time: when, cell: cell % PLAYLIST_CELLS })
+  function scheduleStep(step, baseWhen, cell) {
+    noteQueue.push({ step, time: baseWhen, cell: cell % PLAYLIST_CELLS })
     syncVolumes()
+    const secPerBeat = 60 / bpm.value
     const pids = getPatternsForCell(cell)
     channels.forEach((ch, ci) => {
       if (ch.muted) return
-      const dest = trackGains[ci] ?? audioCtx.destination
+      // Per-channel swing: multiply global swing by this channel's swingMix (0–1)
+      const swingMix = ch.swingMix ?? 1.0
+      const swingOff = step % 2 === 1 ? swing.value * swingMix * secPerBeat * 0.5 : 0
+      const when = baseWhen + swingOff
+      const dest     = trackGains[ci] ?? audioCtx.destination
+      const cutDest  = cutGains[ci]   ?? dest   // route through cutGain if cutSelf
       pids.forEach(pid => {
         const d = getPatData(ch.id, pid)
         if (ch.mode === 'steps') {
-          if (d.steps[step]) {
-            const vel = d.stepVelocities?.[step] ?? 0.8
-            ch.fn(audioCtx, when, { ...ch.params, velocity: vel }, dest)
+          // Per-channel loop length: map step back into loopLength range
+          const loopLen = ch.loopEnabled && ch.loopLength > 0 && ch.loopLength < totalSteps.value
+            ? ch.loopLength : null
+          const s = loopLen !== null ? step % loopLen : step
+          if (d.steps[s]) {
+            const vel = d.stepVelocities?.[s] ?? 0.8
+            // Cut-self: instantly silence previous note, then let new one through
+            if (cutGains[ci]) {
+              cutGains[ci].gain.setValueAtTime(0.0001, when)
+              cutGains[ci].gain.setValueAtTime(1.0,    when + 0.001)
+            }
+            ch.fn(audioCtx, when, { ...ch.params, velocity: vel }, cutDest)
           }
         } else {
           d.pianoNotes.filter(n => n.step === step).forEach(note => {
@@ -842,8 +894,8 @@ export function useStudio() {
     const secPerStep = secPerBeat / 4
     const steps = totalSteps.value
     while (nextNoteTime < audioCtx.currentTime + LOOK_AHEAD) {
-      const swingOff = schedStep % 2 === 1 ? swing.value * secPerBeat * 0.5 : 0
-      scheduleStep(schedStep % steps, nextNoteTime + swingOff, schedCell)
+      // Pass base grid time — per-channel swing applied inside scheduleStep
+      scheduleStep(schedStep % steps, nextNoteTime, schedCell)
       nextNoteTime += secPerStep
       schedStep++
       if (schedStep % steps === 0) schedCell++
@@ -910,8 +962,7 @@ export function useStudio() {
     const ci   = channels.indexOf(ch)
     const dest = (ci >= 0 && trackGains[ci]) ? trackGains[ci] : audioCtx.destination
     const when = audioCtx.currentTime + 0.005
-    if (ch.type === 'drum') ch.fn(audioCtx, when, { ...ch.params }, dest)
-    else ch.fn(audioCtx, when, { ...ch.params, pitch, velocity: 1 }, dest)
+    ch.fn(audioCtx, when, { ...ch.params, pitch, velocity: 1 }, dest)
   }
 
   function handleKeyDown(e) {
@@ -1129,6 +1180,40 @@ export function useStudio() {
     })
   }
 
+  // ── Cut-self toggle ───────────────────────────────────────────────────────────
+  function setCutSelf(channelId, value) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch) return
+    ch.cutSelf = value
+    if (audioCtx) rebuildGains()
+  }
+
+  // ── Split pattern by channel ──────────────────────────────────────────────────
+  // Creates a new pattern for each channel that has content in the given pattern.
+  function splitByChannel(patternId) {
+    const srcPat = patterns.find(p => p.id === patternId)
+    if (!srcPat) return false
+    let createdAny = false
+    channels.forEach(ch => {
+      const d = patternData[patternId]?.[ch.id]
+      if (!d) return
+      const hasContent = d.steps?.some(Boolean) || d.pianoNotes?.length > 0
+      if (!hasContent) return
+      createdAny = true
+      const newId = 'p' + (++_pid + 1)
+      patterns.push({ id: newId, name: srcPat.name + ' — ' + ch.name, color: ch.color })
+      patternData[newId] = {}
+      patternData[newId][ch.id] = reactive({
+        steps:          [...(d.steps          || Array(32).fill(false))],
+        pianoNotes:     (d.pianoNotes || []).map(n => ({ ...n })),
+        stepVelocities: [...(d.stepVelocities || Array(32).fill(0.8))],
+        stepPans:       [...(d.stepPans       || Array(32).fill(0))],
+        stepPitches:    [...(d.stepPitches    || Array(32).fill(0))],
+      })
+    })
+    return createdAny
+  }
+
   // ── Project save / load ───────────────────────────────────────────────────────
   // ── Drum module management ──────────────────────────────────────────────────
   function addDrumModule(channelId, moduleId) {
@@ -1167,6 +1252,8 @@ export function useStudio() {
         zipped:      ch.zipped,
         loopEnabled: ch.loopEnabled,
         loopLength:  ch.loopLength,
+        cutSelf:     ch.cutSelf  ?? false,
+        swingMix:    ch.swingMix ?? 1.0,
         groupId:     ch.groupId,
         params:         { ...ch.params },
         knobs:          ch.knobs.map(k => ({ ...k })),
@@ -1256,6 +1343,8 @@ export function useStudio() {
       zipped:      ch.zipped      ?? false,
       loopEnabled: ch.loopEnabled ?? false,
       loopLength:  ch.loopLength  ?? 16,
+      cutSelf:     ch.cutSelf     ?? false,
+      swingMix:    ch.swingMix    ?? 1.0,
       groupId:     ch.groupId     ?? null,
       params:         { ...(ch.params ?? {}) },
       knobs:          (ch.knobs ?? []).map(k => ({ ...k })),
@@ -1348,6 +1437,7 @@ export function useStudio() {
     graphEditorOpen, graphParam,
     // Channel operations
     cloneChannel, sortChannelsBy, colorChannelsRandom, colorChannelsGradient,
+    setCutSelf, splitByChannel,
     // Playlist
     playlistTracks, playlistClips, timeMarkers, usePlaylist,
     playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell,
