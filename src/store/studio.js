@@ -186,8 +186,8 @@ export const FM_PRESETS = {
 }
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
-export const PIANO_LOW   = 12
-export const PIANO_HIGH  = 108
+export const PIANO_LOW   = 0
+export const PIANO_HIGH  = 127
 export const NOTE_NAMES  = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 export const PIANO_KEYS  = Array.from({ length: PIANO_HIGH - PIANO_LOW + 1 }, (_, i) => PIANO_HIGH - i)
 export const PLAYLIST_BARS  = 32
@@ -879,8 +879,10 @@ export function useStudio() {
             ch.fn(audioCtx, when, { ...ch.params, velocity: vel }, cutDest)
           }
         } else {
-          d.pianoNotes.filter(n => n.step === step).forEach(note => {
-            ch.fn(audioCtx, when, { ...ch.params, pitch: note.pitch, velocity: note.velocity ?? 1 }, dest)
+          d.pianoNotes.filter(n => Math.round(n.step) === step && !n.muted).forEach(note => {
+            const secPerStep = (60 / bpm.value) / 4
+            const gate = Math.max(0.05, ((note.duration ?? 1) * secPerStep) - 0.02)
+            ch.fn(audioCtx, when, { ...ch.params, pitch: note.pitch, velocity: note.velocity ?? 1, gate }, dest)
           })
         }
       })
@@ -1417,6 +1419,7 @@ export function useStudio() {
 
   // ── Public API ────────────────────────────────────────────────────────────────
   _store = {
+    pushUndo,
     // Channels
     channels, selectedChannelId, selectedChannel,
     soloChannel, addChannel, addFMChannel, removeChannel, moveChannel,
