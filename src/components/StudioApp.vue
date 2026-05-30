@@ -14,7 +14,7 @@
       </div>
 
       <!-- ── Right: Properties panel (sequencer only) ────────────────── -->
-      <aside class="props-panel" v-if="mainView === 'sequencer'">
+      <aside class="props-panel" v-if="mainView === 'sequencer'" @click="showModulePicker = false">
         <div class="props-header" :style="{ borderColor: selectedChannel.color }">
           <span class="props-name" :style="{ color: selectedChannel.color }">{{ selectedChannel.name }}</span>
           <span class="props-type">{{ selectedChannel.type }}</span>
@@ -31,7 +31,7 @@
           </select>
         </div>
 
-        <!-- Knobs -->
+        <!-- Core knobs -->
         <div class="props-knobs">
           <Knob
             v-for="knob in selectedChannel.knobs"
@@ -41,6 +41,60 @@
             :label="knob.label" :color="selectedChannel.color"
             :size="48" :decimals="knob.decimals ?? 2"
           />
+        </div>
+
+        <!-- ── Module tabs ───────────────────────────────────────────── -->
+        <div class="module-section">
+
+          <!-- Active module tabs + add button -->
+          <div class="module-tabs-row">
+            <button
+              v-for="modId in selectedChannel.activeModules"
+              :key="modId"
+              class="mod-tab"
+              :class="{ active: activeModuleTab === modId }"
+              :style="{ '--acc': selectedChannel.color }"
+              @click="activeModuleTab = activeModuleTab === modId ? null : modId"
+            >
+              {{ DRUM_MODULE_DEFS[modId]?.label }}
+              <span class="mod-tab-x" @click.stop="onRemoveModule(modId)">×</span>
+            </button>
+
+            <!-- Add module picker -->
+            <div class="mod-add-wrap" @click.stop>
+              <button class="mod-add-btn" :style="{ color: selectedChannel.color }"
+                @click="showModulePicker = !showModulePicker" title="Add module">+</button>
+              <div v-if="showModulePicker" class="mod-picker">
+                <div class="mod-picker-header">ADD MODULE</div>
+                <template v-for="(mod, id) in DRUM_MODULE_DEFS" :key="id">
+                  <div
+                    v-if="isModuleAvailable(id)"
+                    class="mod-picker-item"
+                    :class="{ taken: selectedChannel.activeModules.includes(id) }"
+                    @click="onAddModule(id)"
+                  >
+                    {{ mod.label }}
+                    <span v-if="selectedChannel.activeModules.includes(id)" class="mod-picker-check">✓</span>
+                  </div>
+                </template>
+              </div>
+            </div>
+          </div>
+
+          <!-- Active tab knobs -->
+          <div v-if="activeModuleTab && DRUM_MODULE_DEFS[activeModuleTab]" class="module-knobs">
+            <div class="module-knobs-title" :style="{ color: selectedChannel.color }">
+              {{ DRUM_MODULE_DEFS[activeModuleTab].label }}
+            </div>
+            <Knob
+              v-for="knob in DRUM_MODULE_DEFS[activeModuleTab].knobs"
+              :key="knob.key"
+              v-model="selectedChannel.params[knob.key]"
+              :min="knob.min" :max="knob.max"
+              :label="knob.label" :color="selectedChannel.color"
+              :size="48" :decimals="knob.decimals ?? 2"
+            />
+          </div>
         </div>
 
         <!-- Keyboard hint -->
@@ -95,8 +149,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../store/studio.js'
+import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import TopBar      from './TopBar.vue'
 import ChannelRack from './ChannelRack.vue'
 import Playlist    from './Playlist.vue'
@@ -109,7 +164,34 @@ import RenderModal from './RenderModal.vue'
 const {
   mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen,
   clearChannel, handleKeyDown, handleKeyUp,
+  addDrumModule, removeDrumModule,
 } = useStudio()
+
+// ── Module panel state ────────────────────────────────────────────────────────
+const activeModuleTab   = ref(null)
+const showModulePicker  = ref(false)
+
+function isModuleAvailable(moduleId) {
+  return !!DRUM_MODULE_DEFS[moduleId]
+}
+
+function onAddModule(moduleId) {
+  if (selectedChannel.value.activeModules.includes(moduleId)) return
+  addDrumModule(selectedChannel.value.id, moduleId)
+  activeModuleTab.value  = moduleId
+  showModulePicker.value = false
+}
+
+function onRemoveModule(moduleId) {
+  removeDrumModule(selectedChannel.value.id, moduleId)
+  if (activeModuleTab.value === moduleId) activeModuleTab.value = null
+}
+
+// Reset module panel when switching to a different channel
+watch(() => selectedChannel.value?.id, () => {
+  activeModuleTab.value  = null
+  showModulePicker.value = false
+})
 
 // ── Global keyboard listeners ────────────────────────────────────────────────
 onMounted(() => {
@@ -229,6 +311,99 @@ function stopResize() {
   background: transparent; color: #404058; cursor: pointer; transition: all 0.12s;
 }
 .props-clr:hover { border-color: #9b59b6; color: #c084e0; }
+
+/* ── Drum module panel ───────────────────────────────────────────── */
+.module-section {
+  border-top: 1px solid #1a1a28;
+  margin-top: 4px;
+  padding-top: 6px;
+}
+
+.module-tabs-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 8px 6px;
+  align-items: center;
+}
+
+.mod-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px 3px 8px;
+  background: #111120;
+  border: 1px solid #252535;
+  border-radius: 4px;
+  color: #4a4a6a;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: border-color 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+.mod-tab:hover  { border-color: var(--acc, #4ecdc4); color: #a0a0c0; }
+.mod-tab.active { border-color: var(--acc, #4ecdc4); color: var(--acc, #4ecdc4); background: #0d0d1c; }
+.mod-tab-x {
+  font-size: 12px;
+  line-height: 1;
+  color: #30304a;
+  cursor: pointer;
+  margin-left: 2px;
+  transition: color 0.1s;
+}
+.mod-tab-x:hover { color: #e74c3c; }
+
+.mod-add-wrap { position: relative; }
+.mod-add-btn {
+  width: 22px; height: 22px;
+  background: #111120; border: 1px solid #252535; border-radius: 4px;
+  font-size: 16px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: border-color 0.12s;
+}
+.mod-add-btn:hover { border-color: currentColor; }
+
+.mod-picker {
+  position: absolute;
+  top: 26px; left: 0;
+  background: #0e0e1c;
+  border: 1px solid #252535;
+  border-radius: 6px;
+  min-width: 130px;
+  z-index: 200;
+  overflow: hidden;
+  box-shadow: 0 4px 16px #00000080;
+}
+.mod-picker-header {
+  padding: 5px 10px 4px;
+  font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.15em; color: #303048; border-bottom: 1px solid #1a1a28;
+}
+.mod-picker-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 10px;
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.06em; color: #8080a0; cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.mod-picker-item:hover       { background: #161628; color: #c0c0e0; }
+.mod-picker-item.taken       { color: #3a3a55; cursor: default; }
+.mod-picker-item.taken:hover { background: transparent; color: #3a3a55; }
+.mod-picker-check            { color: #4ecdc4; font-size: 11px; }
+
+.module-knobs {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 4px 8px 8px;
+  border-top: 1px solid #131320;
+}
+.module-knobs-title {
+  font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.15em; align-self: flex-start; padding-left: 4px;
+  margin-bottom: -4px;
+}
 
 /* ── Piano Roll bottom panel ─────────────────────────────────────── */
 .piano-roll-panel {
