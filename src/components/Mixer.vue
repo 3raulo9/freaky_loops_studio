@@ -323,7 +323,7 @@ function panLabel(p) {
   flex-direction: column;
   width: 100%;
   height: 100%;
-  background: #07070e;
+  background: var(--bg-base);
   overflow: hidden;
   user-select: none;
 }
@@ -334,18 +334,18 @@ function panLabel(p) {
   align-items: center;
   gap: 12px;
   padding: 6px 14px;
-  background: #0a0a14;
-  border-bottom: 1px solid #161626;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 .mx-title {
   font-family: 'Rajdhani', sans-serif;
   font-size: 11px; font-weight: 700; letter-spacing: 0.2em;
-  color: #303050; text-transform: uppercase;
+  color: var(--text-muted); text-transform: uppercase;
 }
 .mx-hint {
   font-family: 'Share Tech Mono', monospace;
-  font-size: 8px; color: #1c1c30;
+  font-size: 8px; color: var(--text-muted);
 }
 .mx-spacer { flex: 1; }
 
@@ -355,7 +355,7 @@ function panLabel(p) {
 .mx-mlabel {
   font-family: 'Rajdhani', sans-serif;
   font-size: 8px; font-weight: 700; letter-spacing: 0.15em;
-  color: #2a2a40; text-transform: uppercase;
+  color: var(--text-muted); text-transform: uppercase;
 }
 .mx-master-vol-slider {
   width: 90px; accent-color: #e74c3c; cursor: pointer;
@@ -388,17 +388,17 @@ function panLabel(p) {
   align-items: center;
   width: 72px;
   min-width: 72px;
-  background: #0c0c18;
-  border: 1px solid #151525;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
   border-top: none;
   padding: 0 4px 6px;
   gap: 4px;
   transition: background 0.1s;
   position: relative;
 }
-.mx-strip:hover { background: #0e0e1e; }
+.mx-strip:hover { background: var(--bg-hover); }
 .mx-strip.mx-muted { opacity: 0.45; }
-.mx-strip.mx-soloed { background: #0e0e20; }
+.mx-strip.mx-soloed { background: var(--bg-hover); }
 
 .mx-master {
   width: 82px; min-width: 82px;
@@ -431,7 +431,7 @@ function panLabel(p) {
 .mx-dot-empty {
   width: 7px; height: 7px;
   border-radius: 50%;
-  background: #1c1c2a;
+  background: var(--bg-track);
 }
 
 /* ── Name ───────────────────────────────────────────────────────────────── */
@@ -456,7 +456,7 @@ function panLabel(p) {
 .mx-name-input {
   font-family: 'Rajdhani', sans-serif;
   font-size: 9px; font-weight: 700; letter-spacing: 0.08em;
-  background: #0a0a18; border: 1px solid #303055;
+  background: var(--bg-deeper); border: 1px solid var(--border);
   color: var(--accent, #7070c0);
   width: 100%; text-align: center;
   padding: 1px 2px; border-radius: 2px; outline: none;
@@ -469,8 +469,8 @@ function panLabel(p) {
 }
 .mx-meter-bg {
   width: 18px; height: 80px;
-  background: #070710;
-  border: 1px solid #111120;
+  background: var(--bg-deeper);
+  border: 1px solid var(--border-subtle);
   border-radius: 2px;
   overflow: hidden;
   position: relative;
@@ -491,7 +491,7 @@ function panLabel(p) {
 }
 .mx-meter-db {
   font-family: 'Share Tech Mono', monospace;
-  font-size: 7px; color: #252535; text-align: center;
+  font-size: 7px; color: var(--text-muted); text-align: center;
 }
 
 /* ── EQ section ─────────────────────────────────────────────────────────── */
@@ -505,7 +505,7 @@ function panLabel(p) {
 .mx-eq-label {
   font-family: 'Rajdhani', sans-serif;
   font-size: 7px; font-weight: 700; letter-spacing: 0.15em;
-  color: #1e1e30; text-transform: uppercase;
+  color: var(--text-muted); text-transform: uppercase;
 }
 .mx-eq-bands {
   display: flex;
@@ -521,7 +521,7 @@ function panLabel(p) {
 .mx-eq-bl {
   font-family: 'Rajdhani', sans-serif;
   font-size: 8px; font-weight: 700;
-  color: #2a2a40; width: 9px; text-align: center;
+  color: var(--text-muted); width: 9px; text-align: center;
   flex-shrink: 0;
 }
 .mx-eq-track {
@@ -532,7 +532,7 @@ function panLabel(p) {
   top: 50%; left: 50%;
   transform: translate(-50%, -50%);
   width: 1px; height: 8px;
-  background: #1a1a28;
+  background: var(--border-subtle);
   pointer-events: none;
 }
 .mx-eq-slider {
@@ -542,7 +542,7 @@ function panLabel(p) {
 }
 .mx-eq-val {
   font-family: 'Share Tech Mono', monospace;
-  font-size: 7px; color: #252535;
+  font-size: 7px; color: var(--text-muted);
   min-width: 14px; text-align: right;
   flex-shrink: 0;
 }
@@ -569,7 +569,7 @@ function panLabel(p) {
 .mx-fader-unity {
   position: absolute;
   width: 30px; height: 1px;
-  background: #1e1e32;
+  background: var(--border-subtle);
   top: calc(100% - (80% * 1));
   pointer-events: none;
 }
@@ -584,7 +584,7 @@ function panLabel(p) {
 }
 .mx-vol-db {
   font-family: 'Share Tech Mono', monospace;
-  font-size: 8px; color: #353555;
+  font-size: 8px; color: var(--text-muted);
   text-align: center; min-width: 54px;
 }
 
@@ -598,7 +598,7 @@ function panLabel(p) {
 .mx-pan-lbl {
   font-family: 'Rajdhani', sans-serif;
   font-size: 7px; font-weight: 700; letter-spacing: 0.12em;
-  color: #1e1e30;
+  color: var(--text-muted);
   flex-shrink: 0;
 }
 .mx-pan-slider {
@@ -608,13 +608,13 @@ function panLabel(p) {
 }
 .mx-pan-val {
   font-family: 'Share Tech Mono', monospace;
-  font-size: 7px; color: #252535;
+  font-size: 7px; color: var(--text-muted);
   min-width: 22px; text-align: right;
   flex-shrink: 0;
 }
 .mx-pan-center {
   font-family: 'Share Tech Mono', monospace;
-  font-size: 8px; color: #252535; flex: 1; text-align: center;
+  font-size: 8px; color: var(--text-muted); flex: 1; text-align: center;
 }
 
 /* ── Mute / Solo ────────────────────────────────────────────────────────── */
@@ -625,8 +625,8 @@ function panLabel(p) {
 .mx-btn {
   width: 24px; height: 18px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  border-radius: 3px; border: 1px solid #1c1c2c;
-  background: transparent; color: #2a2a3e; cursor: pointer;
+  border-radius: 3px; border: 1px solid var(--border-subtle);
+  background: transparent; color: var(--text-muted); cursor: pointer;
   transition: all 0.1s; outline: none;
   display: flex; align-items: center; justify-content: center;
 }
@@ -652,7 +652,7 @@ function panLabel(p) {
 .mx-sep {
   width: 1px;
   align-self: stretch;
-  background: #1a1a2c;
+  background: var(--border-subtle);
   margin: 8px 4px;
   flex-shrink: 0;
 }

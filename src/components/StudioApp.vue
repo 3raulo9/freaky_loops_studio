@@ -112,6 +112,9 @@
     <!-- ── Render modal ──────────────────────────────────────────────── -->
     <RenderModal v-if="renderModalOpen" @close="renderModalOpen = false" />
 
+    <!-- ── Theme modal ───────────────────────────────────────────────── -->
+    <ThemeModal v-if="themeModalOpen" @close="themeModalOpen = false" />
+
     <!-- ── Bottom: Piano Roll panel ──────────────────────────────────── -->
     <div
       v-if="pianoRollOpen && mainView === 'sequencer'"
@@ -160,9 +163,10 @@ import PianoRoll   from './PianoRoll.vue'
 import StepGrid    from './StepGrid.vue'
 import Knob        from './Knob.vue'
 import RenderModal from './RenderModal.vue'
+import ThemeModal  from './ThemeModal.vue'
 
 const {
-  mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen,
+  mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen, themeModalOpen,
   clearChannel, handleKeyDown, handleKeyUp,
   addDrumModule, removeDrumModule,
 } = useStudio()
@@ -232,7 +236,7 @@ function stopResize() {
 .studio {
   display: flex; flex-direction: column;
   width: 100%; height: 100vh;
-  background: #0e0e14; color: #e0e0ee;
+  background: var(--bg-base); color: var(--text-primary);
   overflow: hidden;
 }
 
@@ -254,8 +258,8 @@ function stopResize() {
 .props-panel {
   width: 160px;
   min-width: 160px;
-  background: #0c0c16;
-  border-left: 1px solid #1a1a28;
+  background: var(--bg-header);
+  border-left: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   overflow-y: auto;
@@ -284,7 +288,7 @@ function stopResize() {
   letter-spacing: 0.15em; color: #40405a; text-transform: uppercase;
 }
 .props-select {
-  background: #141422; border: 1px solid #252535; color: #a0a0c0;
+  background: var(--bg-control); border: 1px solid var(--border); color: var(--text-primary);
   padding: 4px 6px; border-radius: 4px;
   font-family: 'Share Tech Mono', monospace; font-size: 11px;
   cursor: pointer; outline: none; width: 100%;
@@ -307,14 +311,14 @@ function stopResize() {
   margin: 10px 10px 0;
   font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
   letter-spacing: 0.1em; padding: 5px 0;
-  border: 1px solid #252535; border-radius: 5px;
-  background: transparent; color: #404058; cursor: pointer; transition: all 0.12s;
+  border: 1px solid var(--border); border-radius: 5px;
+  background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.12s;
 }
 .props-clr:hover { border-color: #9b59b6; color: #c084e0; }
 
 /* ── Drum module panel ───────────────────────────────────────────── */
 .module-section {
-  border-top: 1px solid #1a1a28;
+  border-top: 1px solid var(--border-subtle);
   margin-top: 4px;
   padding-top: 6px;
 }
@@ -332,8 +336,8 @@ function stopResize() {
   align-items: center;
   gap: 4px;
   padding: 3px 7px 3px 8px;
-  background: #111120;
-  border: 1px solid #252535;
+  background: var(--bg-deeper);
+  border: 1px solid var(--border);
   border-radius: 4px;
   color: #4a4a6a;
   font-family: 'Rajdhani', sans-serif;
@@ -345,7 +349,7 @@ function stopResize() {
   white-space: nowrap;
 }
 .mod-tab:hover  { border-color: var(--acc, #4ecdc4); color: #a0a0c0; }
-.mod-tab.active { border-color: var(--acc, #4ecdc4); color: var(--acc, #4ecdc4); background: #0d0d1c; }
+.mod-tab.active { border-color: var(--acc, #4ecdc4); color: var(--acc, #4ecdc4); background: var(--bg-deeper); }
 .mod-tab-x {
   font-size: 12px;
   line-height: 1;
@@ -359,7 +363,7 @@ function stopResize() {
 .mod-add-wrap { position: relative; }
 .mod-add-btn {
   width: 22px; height: 22px;
-  background: #111120; border: 1px solid #252535; border-radius: 4px;
+  background: var(--bg-deeper); border: 1px solid var(--border); border-radius: 4px;
   font-size: 16px; line-height: 1; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
   transition: border-color 0.12s;
@@ -369,8 +373,8 @@ function stopResize() {
 .mod-picker {
   position: absolute;
   top: 26px; left: 0;
-  background: #0e0e1c;
-  border: 1px solid #252535;
+  background: var(--bg-control);
+  border: 1px solid var(--border);
   border-radius: 6px;
   min-width: 130px;
   z-index: 200;
@@ -380,7 +384,7 @@ function stopResize() {
 .mod-picker-header {
   padding: 5px 10px 4px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.15em; color: #303048; border-bottom: 1px solid #1a1a28;
+  letter-spacing: 0.15em; color: var(--text-muted); border-bottom: 1px solid var(--border-subtle);
 }
 .mod-picker-item {
   display: flex; align-items: center; justify-content: space-between;
@@ -389,7 +393,7 @@ function stopResize() {
   letter-spacing: 0.06em; color: #8080a0; cursor: pointer;
   transition: background 0.1s, color 0.1s;
 }
-.mod-picker-item:hover       { background: #161628; color: #c0c0e0; }
+.mod-picker-item:hover       { background: var(--bg-hover); color: var(--text-primary); }
 .mod-picker-item.taken       { color: #3a3a55; cursor: default; }
 .mod-picker-item.taken:hover { background: transparent; color: #3a3a55; }
 .mod-picker-check            { color: #4ecdc4; font-size: 11px; }
@@ -397,7 +401,7 @@ function stopResize() {
 .module-knobs {
   display: flex; flex-direction: column; align-items: center; gap: 10px;
   padding: 4px 8px 8px;
-  border-top: 1px solid #131320;
+  border-top: 1px solid var(--border-subtle);
 }
 .module-knobs-title {
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
@@ -408,8 +412,8 @@ function stopResize() {
 /* ── Piano Roll bottom panel ─────────────────────────────────────── */
 .piano-roll-panel {
   display: flex; flex-direction: column;
-  background: #0e0e1a;
-  border-top: 1px solid #1a1a2c;
+  background: var(--bg-base);
+  border-top: 1px solid var(--border-subtle);
   flex-shrink: 0;
   overflow: hidden;
   position: relative;
@@ -417,8 +421,8 @@ function stopResize() {
 
 .pr-resize-handle {
   height: 5px; cursor: ns-resize;
-  background: #0a0a12;
-  border-bottom: 1px solid #1a1a28;
+  background: var(--bg-deeper);
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
   transition: background 0.1s;
 }
@@ -427,7 +431,7 @@ function stopResize() {
 .pr-panel-header {
   display: flex; align-items: center; gap: 10px;
   padding: 5px 12px;
-  background: #0a0a12; border-bottom: 1px solid #1a1a28;
+  background: var(--bg-deeper); border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 .pr-panel-title {
@@ -443,7 +447,7 @@ function stopResize() {
 .prm-btn {
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
   letter-spacing: 0.08em; padding: 3px 8px;
-  border: 1px solid #252535; border-radius: 3px;
+  border: 1px solid var(--border); border-radius: 3px;
   background: transparent; color: #404058; cursor: pointer; transition: all 0.1s;
 }
 .prm-btn.active { border-color: var(--accent); color: var(--accent); }

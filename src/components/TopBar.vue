@@ -215,6 +215,14 @@
         <span class="tb-win-icon">⬡</span>
         <span class="tb-win-lbl">RENDER</span>
       </button>
+      <button
+        class="tb-win tb-win-theme"
+        @click="themeModalOpen = true"
+        title="Theme settings"
+      >
+        <span class="tb-win-icon">◑</span>
+        <span class="tb-win-lbl">THEME</span>
+      </button>
     </div>
 
   </header>
@@ -226,7 +234,7 @@ import { useStudio } from '../store/studio.js'
 
 const {
   bpm, swing, totalSteps, isPlaying,
-  mainView, pianoRollOpen, renderModalOpen,
+  mainView, pianoRollOpen, renderModalOpen, themeModalOpen,
   usePlaylist, gridSnap, keyboardInputMode, audioLoad,
   togglePlay, stopPlay, getPlayheadTimeSeconds,
   canUndo, canRedo, undoAction, redoAction, getAnalyser,
@@ -300,13 +308,14 @@ function drawScope() {
   const w = canvas.width
   const h = canvas.height
 
-  ctx.fillStyle = '#07070f'
+  const style = getComputedStyle(document.documentElement)
+  ctx.fillStyle = style.getPropertyValue('--bg-deeper').trim() || '#07070f'
   ctx.fillRect(0, 0, w, h)
 
   const analyser = getAnalyser()
   if (!analyser) {
     ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2)
-    ctx.strokeStyle = '#181828'; ctx.lineWidth = 1; ctx.stroke()
+    ctx.strokeStyle = style.getPropertyValue('--border-subtle').trim() || '#1a1a28'; ctx.lineWidth = 1; ctx.stroke()
     scopeRaf = requestAnimationFrame(drawScope)
     return
   }
@@ -360,8 +369,8 @@ onBeforeUnmount(() => {
   align-items: center;
   height: 56px;
   padding: 0 10px;
-  background: linear-gradient(180deg, #0f0f1b 0%, #090912 100%);
-  border-bottom: 1px solid #181828;
+  background: linear-gradient(180deg, var(--bg-panel) 0%, var(--bg-deeper) 100%);
+  border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
   overflow: hidden;
   gap: 0;
@@ -371,7 +380,7 @@ onBeforeUnmount(() => {
 .tb-sep {
   width: 1px;
   height: 32px;
-  background: #1c1c2c;
+  background: var(--border-subtle);
   flex-shrink: 0;
   margin: 0 7px;
 }
@@ -443,10 +452,10 @@ onBeforeUnmount(() => {
 .tb-timecode {
   display: flex; flex-direction: column; align-items: center;
   cursor: pointer; padding: 3px 10px;
-  border: 1px solid #141422; border-radius: 4px; background: #05050d;
+  border: 1px solid var(--border-subtle); border-radius: 4px; background: var(--bg-deeper);
   transition: border-color 0.15s; flex-shrink: 0;
 }
-.tb-timecode:hover { border-color: #252540; }
+.tb-timecode:hover { border-color: var(--border); }
 .tb-timecode-val {
   font-family: 'Share Tech Mono', monospace;
   font-size: 21px; color: #e74c3c; letter-spacing: 0.04em; line-height: 1;
@@ -474,7 +483,7 @@ onBeforeUnmount(() => {
 .tb-red { color: #e74c3c; filter: drop-shadow(0 0 3px #e74c3c44); }
 .tb-slider { width: 68px; accent-color: #e74c3c; height: 3px; cursor: pointer; }
 .tb-select {
-  background: #0c0c18; border: 1px solid #222232; color: #7070a0;
+  background: var(--bg-control); border: 1px solid var(--border-subtle); color: var(--text-muted);
   padding: 3px 5px; border-radius: 4px;
   font-family: 'Share Tech Mono', monospace; font-size: 11px;
   cursor: pointer; outline: none; height: 22px;
@@ -485,7 +494,7 @@ onBeforeUnmount(() => {
 .tb-mode-btn {
   font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
   letter-spacing: 0.12em; padding: 4px 9px; height: 24px;
-  border: 1px solid #1e1e2e; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--border-subtle); border-radius: 4px; cursor: pointer;
   background: transparent; color: #30304a;
   transition: all 0.12s; display: flex; align-items: center;
 }
@@ -498,7 +507,7 @@ onBeforeUnmount(() => {
 /* ── Oscilloscope + CPU ────────────────────────────────────────────────────── */
 .tb-meter { display: flex; flex-direction: column; gap: 3px; align-items: center; flex-shrink: 0; }
 .tb-scope {
-  display: block; border: 1px solid #111120; border-radius: 3px; background: #06060e;
+  display: block; border: 1px solid var(--border-subtle); border-radius: 3px; background: var(--bg-deeper);
 }
 .tb-cpu-row {
   display: flex; align-items: center; gap: 4px; width: 100%;
@@ -509,8 +518,8 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
 }
 .tb-cpu-bar {
-  flex: 1; height: 4px; background: #0c0c18;
-  border-radius: 2px; overflow: hidden; border: 1px solid #181828;
+  flex: 1; height: 4px; background: var(--bg-control);
+  border-radius: 2px; overflow: hidden; border: 1px solid var(--border-subtle);
 }
 .tb-cpu-fill {
   height: 100%; border-radius: 2px;
@@ -523,12 +532,12 @@ onBeforeUnmount(() => {
 
 /* ── Tool buttons (keyboard, undo/redo) ────────────────────────────────────── */
 .tb-tools { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
-.tb-tools-sep { width: 1px; height: 16px; background: #181828; margin: 0 2px; }
+.tb-tools-sep { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 2px; }
 .tb-tool {
   width: 27px; height: 26px;
   display: flex; align-items: center; justify-content: center;
   font-family: 'Share Tech Mono', monospace; font-size: 14px;
-  background: transparent; border: 1px solid #1a1a2a; border-radius: 4px;
+  background: transparent; border: 1px solid var(--border-subtle); border-radius: 4px;
   color: #35354a; cursor: pointer; transition: all 0.1s; outline: none;
 }
 .tb-tool:hover:not(:disabled) { border-color: #404068; color: #8080b0; }
@@ -545,7 +554,7 @@ onBeforeUnmount(() => {
 .tb-win {
   display: flex; flex-direction: column; align-items: center; gap: 1px;
   padding: 4px 8px; min-width: 42px;
-  border: 1px solid #1a1a2a; border-radius: 5px; cursor: pointer;
+  border: 1px solid var(--border-subtle); border-radius: 5px; cursor: pointer;
   background: transparent; color: #30304a;
   transition: all 0.12s; outline: none;
 }
@@ -563,4 +572,7 @@ onBeforeUnmount(() => {
 .tb-win-render:hover { border-color: #e74c3c; color: #e74c3c; }
 .tb-win-render.active { border-color: #e74c3c; background: #1a0808; box-shadow: 0 0 8px #e74c3c33; }
 .tb-win-render.active .tb-win-lbl { color: #e74c3c; }
+.tb-win-theme:hover { border-color: #9b59b6; color: #9b59b6; }
+.tb-win-theme.active { border-color: #9b59b6; background: #160e20; box-shadow: 0 0 8px #9b59b633; }
+.tb-win-theme.active .tb-win-lbl { color: #9b59b6; }
 </style>
