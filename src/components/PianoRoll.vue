@@ -67,11 +67,13 @@
         <!-- Piano key -->
         <div class="pr-key"
           :class="{
-            black:       isBlackKey(pitch),
-            'scale-in':  snapScale.enabled && scaleSet.has(pitch % 12),
+            black:        isBlackKey(pitch),
+            'scale-in':   snapScale.enabled && scaleSet.has(pitch % 12),
             'scale-root': snapScale.enabled && pitch % 12 === snapScale.tonic,
+            active:       activePitch === pitch,
           }"
-          @mousedown.prevent="previewNote(pitch)">
+          @mousedown.prevent="onKeyDown(pitch)"
+          @mouseenter="onKeyEnter(pitch)">
           <span v-if="pitch % 12 === 0" class="key-label">{{ midiToLabel(pitch) }}</span>
         </div>
 
@@ -98,6 +100,9 @@
 import { ref, computed, onMounted } from 'vue'
 import { useStudio, PIANO_KEYS, isBlackKey, midiToLabel, SCALE_DEFS, NOTE_NAMES } from '../store/studio.js'
 
+let activePitch = ref(null)
+let keyHeld     = false
+
 const props = defineProps({ ch: { type: Object, required: true } })
 const { totalSteps, isPlaying, displayStep, togglePianoNote, getPatData, playNote, snapScale } = useStudio()
 
@@ -120,6 +125,17 @@ const noteSet = computed(() => {
 function hasNote(step, pitch) { return noteSet.value.has(step + ':' + pitch) }
 function previewNote(pitch)   { playNote(props.ch, pitch) }
 
+function onKeyDown(pitch) {
+  keyHeld = true
+  activePitch.value = pitch
+  previewNote(pitch)
+}
+function onKeyEnter(pitch) {
+  if (!keyHeld || activePitch.value === pitch) return
+  activePitch.value = pitch
+  previewNote(pitch)
+}
+
 const bodyRef = ref(null)
 let painting = false; let paintMode = null
 
@@ -137,9 +153,13 @@ function onCellEnter(step, pitch) {
 }
 
 onMounted(() => {
-  window.addEventListener('mouseup', () => { painting = false })
+  window.addEventListener('mouseup', () => {
+    painting = false
+    keyHeld = false
+    activePitch.value = null
+  })
   if (bodyRef.value) {
-    const c4idx = 84 - 60
+    const c4idx = PIANO_KEYS.indexOf(60)
     bodyRef.value.scrollTop = c4idx * 16 - bodyRef.value.clientHeight / 2
   }
 })
@@ -237,8 +257,10 @@ onMounted(() => {
   border-right: 1px solid #1a1a28; background: #f5f5f5; cursor: pointer; transition: background 0.08s;
 }
 .pr-key.black       { background: #222; }
-.pr-key:hover       { background: #ddd; }
-.pr-key.black:hover { background: #444; }
+.pr-key:hover          { background: #ddd; }
+.pr-key.black:hover    { background: #444; }
+.pr-key.active         { background: #b0cfe8 !important; }
+.pr-key.black.active   { background: #3a6080 !important; }
 .pr-key.scale-in  { background: #e8faf7; }
 .pr-key.black.scale-in { background: #1a3830; }
 .pr-key.scale-root { background: #1abc9c !important; }

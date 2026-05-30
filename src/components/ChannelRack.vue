@@ -22,6 +22,7 @@
       :style="{ top: patCtx.y+'px', left: patCtx.x+'px' }" @mouseleave="patCtx.open=false">
       <div class="ctx-item" @click="startPatRename">Rename</div>
       <div class="ctx-item" @click="duplicatePattern(currentPatternId); patCtx.open=false">Duplicate</div>
+      <div class="ctx-item" @click="splitByChannel(currentPatternId); patCtx.open=false">Split by channel</div>
       <div class="ctx-sep" />
       <div class="ctx-item danger" @click="removePattern(currentPatternId); patCtx.open=false">Delete Pattern</div>
     </div>
@@ -204,7 +205,7 @@
         @click.ctrl.exact.stop="toggleMultiSelect(ch)"
       >
         <!-- ── Mute LED ──────────────────────────────────────────── -->
-        <div class="led" :class="{ active: !ch.muted, solo: ch._soloed }"
+        <div class="led" :class="{ active: !ch.muted, solo: ch._soloed, firing: isChannelFiring(ch) }"
           @click.stop="ch.muted = !ch.muted"
           @contextmenu.prevent="soloChannel(ch.id)"
           title="L-click: mute / R-click: solo" />
@@ -246,11 +247,12 @@
 
           <!-- Channel name button -->
           <button class="ch-name-btn"
-            :class="{ 'piano-active': ch.type === 'melodic' && pianoRollOpen && selectedChannelId === ch.id }"
+            :class="{ 'piano-active': ch.mode === 'piano' && pianoRollOpen && selectedChannelId === ch.id }"
             :style="{ background: ch.color }"
             @click.stop="openOrSelectChannel(ch)"
             @contextmenu.prevent="showContextMenu($event, ch)"
-            :title="ch.type === 'melodic' ? 'Click to open Piano Roll' : ch.name">
+            :title="ch.mode === 'piano' ? 'Open Piano Roll' : 'Click to select · Right-click for options'">
+            <span class="ch-mode-pill">{{ ch.mode === 'piano' ? '♩' : '▦' }}</span>
             {{ ch.name }}
           </button>
 
@@ -261,12 +263,13 @@
               <div class="inline-steps" :style="{ '--cols': totalSteps }">
                 <button v-for="s in totalSteps" :key="s-1" class="istep"
                   :class="{
-                    lit:     getSteps(ch.id)[s-1],
+                    lit:     stepLit(ch, s-1),
+                    ghost:   stepGhost(ch, s-1),
                     playing: isPlaying && displayStep === s-1,
                     beat:    (s-1) % 4 === 0,
                   }"
-                  @click="toggleStep(ch.id, s-1)"
-                  @contextmenu.prevent="getSteps(ch.id)[s-1] = false"
+                  @click="onStepClick(ch, s-1)"
+                  @contextmenu.prevent="onStepRightClick(ch, s-1)"
                 />
               </div>
             </template>
@@ -343,7 +346,11 @@
     <div v-if="ctxMenu.open" class="ctx-menu"
       :style="{ top: ctxMenu.y+'px', left: ctxMenu.x+'px' }"
       @mouseleave="ctxMenu.open=false">
-      <div class="ctx-item" @click="ctxAction('piano-roll')">Open Piano Roll</div>
+      <div class="ctx-item" @click="ctxAction('to-piano')">
+        {{ ctxMenu.channel?.mode === 'piano' ? 'Open Piano Roll' : 'Switch to Piano Roll' }}
+      </div>
+      <div class="ctx-item" v-if="ctxMenu.channel?.mode === 'piano'"
+        @click="ctxAction('to-steps')">Switch to Steps</div>
       <div class="ctx-item" @click="ctxAction('rename')">Rename</div>
       <div class="ctx-item" @click="ctxAction('clone')">Clone</div>
       <div class="ctx-item" @click="ctxAction('clear')">Clear Pattern</div>
@@ -358,6 +365,39 @@
           <div class="ctx-item" @click="ctxFill(4)">Every 4 steps</div>
           <div class="ctx-item" @click="ctxFill(8)">Every 8 steps</div>
         </div>
+      </div>
+      <!-- Loop length submenu -->
+      <div class="ctx-sub-trigger"
+        @mouseenter="ctxSubOpen = 'loop-len'"
+        @mouseleave="ctxSubOpen = null">
+        Loop length ({{ ctxMenu.channel?.loopEnabled && ctxMenu.channel?.loopLength < totalSteps ? ctxMenu.channel.loopLength : totalSteps }}) ▶
+        <div v-if="ctxSubOpen === 'loop-len'" class="ctx-submenu">
+          <div class="ctx-item" @click="ctxSetLoopLen(totalSteps)">Full ({{ totalSteps }})</div>
+          <div class="ctx-item" v-if="totalSteps >= 32" @click="ctxSetLoopLen(32)">32 steps</div>
+          <div class="ctx-item" v-if="totalSteps >= 16" @click="ctxSetLoopLen(16)">16 steps</div>
+          <div class="ctx-item" v-if="totalSteps >= 8"  @click="ctxSetLoopLen(8)">8 steps</div>
+          <div class="ctx-item" @click="ctxSetLoopLen(4)">4 steps</div>
+        </div>
+      </div>
+      <!-- Swing mix submenu -->
+      <div class="ctx-sub-trigger"
+        @mouseenter="ctxSubOpen = 'swing-mix'"
+        @mouseleave="ctxSubOpen = null">
+        Swing mix ({{ Math.round((ctxMenu.channel?.swingMix ?? 1) * 100) }}%) ▶
+        <div v-if="ctxSubOpen === 'swing-mix'" class="ctx-submenu">
+          <div class="ctx-item" @click="ctxSetSwingMix(0)">0% — no swing</div>
+          <div class="ctx-item" @click="ctxSetSwingMix(0.25)">25%</div>
+          <div class="ctx-item" @click="ctxSetSwingMix(0.5)">50%</div>
+          <div class="ctx-item" @click="ctxSetSwingMix(0.75)">75%</div>
+          <div class="ctx-item" @click="ctxSetSwingMix(1)">100% — full swing</div>
+        </div>
+      </div>
+      <div class="ctx-sep"/>
+      <!-- Cut itself toggle -->
+      <div class="ctx-item" :class="{ 'ctx-active': ctxMenu.channel?.cutSelf }"
+        @click="ctxAction('cut-self')">
+        <span class="ctx-check-mark">{{ ctxMenu.channel?.cutSelf ? '✓' : ' ' }}</span>
+        Cut itself
       </div>
       <div class="ctx-sep"/>
       <div class="ctx-item" @click="ctxAction('zip')">
@@ -433,6 +473,7 @@ const {
   getStepVelocities, setStepVelocity, getStepPans, setStepPan, getStepPitches, setStepPitch,
   fillSteps, cloneChannel, sortChannelsBy, colorChannelsRandom, colorChannelsGradient,
   assignChannelToMixerTrack, mixerTracks,
+  setCutSelf, splitByChannel,
 } = useStudio()
 
 // ── Graph editor tabs ─────────────────────────────────────────────────────────
@@ -655,7 +696,7 @@ function applyGradient() {
 // ── Piano roll open/select ────────────────────────────────────────────────────
 function openOrSelectChannel(ch) {
   selectedChannelId.value = ch.id
-  if (ch.type === 'melodic') pianoRollOpen.value = true
+  if (ch.mode === 'piano') pianoRollOpen.value = true
 }
 
 // ── Mini piano-roll preview helpers ──────────────────────────────────────────
@@ -722,6 +763,43 @@ function startGeDrag(e, ch) {
   window.addEventListener('mouseup', onUp)
 }
 
+// ── Activity LED ──────────────────────────────────────────────────────────────
+function isChannelFiring(ch) {
+  if (!isPlaying.value || displayStep.value < 0 || ch.muted) return false
+  if (ch.mode === 'steps') return !!getSteps(ch.id)[displayStep.value]
+  return getPianoNotes(ch.id).some(n => n.step === displayStep.value)
+}
+
+// ── Ghost-step helpers ────────────────────────────────────────────────────────
+function getLoopLen(ch) {
+  if (!ch.loopEnabled || !ch.loopLength || ch.loopLength >= totalSteps.value) return null
+  return ch.loopLength
+}
+
+function stepLit(ch, s) {
+  const ll = getLoopLen(ch)
+  if (ll !== null && s >= ll) return false
+  return !!getSteps(ch.id)[s]
+}
+
+function stepGhost(ch, s) {
+  const ll = getLoopLen(ch)
+  if (ll === null || s < ll) return false
+  return !!getSteps(ch.id)[s % ll]
+}
+
+function onStepClick(ch, s) {
+  const ll = getLoopLen(ch)
+  if (ll !== null && s >= ll) return  // ghost area is read-only
+  toggleStep(ch.id, s)
+}
+
+function onStepRightClick(ch, s) {
+  const ll = getLoopLen(ch)
+  if (ll !== null && s >= ll) return
+  getSteps(ch.id)[s] = false
+}
+
 // ── Context menu ──────────────────────────────────────────────────────────────
 const ctxMenu = reactive({ open: false, x: 0, y: 0, channel: null })
 const ctxSubOpen = ref(null)
@@ -736,7 +814,10 @@ function showContextMenu(e, ch) {
 function ctxAction(action) {
   const ch = ctxMenu.channel
   ctxMenu.open = false
+  ctxSubOpen.value = null
   if (!ch) return
+  if (action === 'to-piano')  { ch.mode = 'piano'; openOrSelectChannel(ch) }
+  if (action === 'to-steps')  { ch.mode = 'steps' }
   if (action === 'piano-roll')   openOrSelectChannel(ch)
   if (action === 'rename')       startRename(ch)
   if (action === 'clone')        cloneChannel(ch.id)
@@ -746,11 +827,27 @@ function ctxAction(action) {
   if (action === 'delete')       removeChannel(ch.id)
   if (action === 'zip')          ch.zipped = !ch.zipped
   if (action === 'color-random') colorChannelsRandom([ch.id])
+  if (action === 'cut-self')     setCutSelf(ch.id, !ch.cutSelf)
 }
 function ctxFill(every) {
   ctxSubOpen.value = null
   ctxMenu.open = false
   if (ctxMenu.channel) fillSteps(ctxMenu.channel.id, every)
+}
+function ctxSetLoopLen(len) {
+  const ch = ctxMenu.channel
+  ctxMenu.open = false
+  ctxSubOpen.value = null
+  if (!ch) return
+  ch.loopLength = len
+  if (len < totalSteps.value) ch.loopEnabled = true
+}
+function ctxSetSwingMix(val) {
+  const ch = ctxMenu.channel
+  ctxMenu.open = false
+  ctxSubOpen.value = null
+  if (!ch) return
+  ch.swingMix = val
 }
 
 // ── Rename ────────────────────────────────────────────────────────────────────
@@ -1038,6 +1135,12 @@ function commitRename() {
   background: #f39c12; border-color: #f39c12;
   box-shadow: 0 0 6px #f39c1288;
 }
+.led.firing {
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 10px var(--accent), 0 0 18px color-mix(in srgb, var(--accent) 40%, transparent) !important;
+  transition: all 0s;
+}
 .led:hover { filter: brightness(1.3); }
 
 /* ── Knobs ───────────────────────────────────────────────────────── */
@@ -1066,10 +1169,16 @@ function commitRename() {
   letter-spacing: 0.12em; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.6);
   border: none; border-radius: 4px; cursor: pointer;
   transition: filter 0.1s, box-shadow 0.1s;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding: 0 8px 0 4px;
+  display: flex; align-items: center; gap: 3px;
 }
 .ch-name-btn:hover     { filter: brightness(1.12); }
 .ch-name-btn.piano-active { box-shadow: 0 0 0 2px #fff4, 0 0 10px var(--accent); }
+.ch-mode-pill {
+  font-size: 9px; opacity: 0.7; flex-shrink: 0;
+  line-height: 1; margin-top: 1px;
+}
 
 /* ── Sequencer area ──────────────────────────────────────────────── */
 .ch-seq { padding: 0 4px; position: relative; }
@@ -1089,10 +1198,15 @@ function commitRename() {
   background: var(--accent); border-color: var(--accent);
   box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, transparent);
 }
+.istep.ghost {
+  background: color-mix(in srgb, var(--accent) 18%, #0e0e22);
+  border-color: color-mix(in srgb, var(--accent) 25%, #1e1e32);
+}
 .istep.playing { border-color: #fff !important; box-shadow: 0 0 8px #ffffffaa !important; }
-.istep:hover:not(.lit) {
+.istep:hover:not(.lit):not(.ghost) {
   background: color-mix(in srgb, var(--accent) 20%, #1a1a32);
 }
+.istep.ghost:hover { opacity: 0.8; cursor: not-allowed; }
 
 /* ── Loop button ─────────────────────────────────────────────────── */
 .loop-btn {
@@ -1217,6 +1331,10 @@ function commitRename() {
 .ctx-item:hover  { background: #20203a; color: #e0e0ee; }
 .ctx-item.danger { color: #e74c3c44; }
 .ctx-item.danger:hover { color: #e74c3c; background: #1a0a0a; }
+.ctx-item.ctx-active { color: #4ecdc4; }
+.ctx-check-mark {
+  display: inline-block; width: 14px; font-size: 11px; color: #4ecdc4;
+}
 .ctx-sep { height: 1px; background: #1e1e2c; margin: 3px 0; }
 
 .ctx-sub-trigger {
