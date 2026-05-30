@@ -181,6 +181,15 @@
         <span class="tb-win-lbl">PLAYLIST</span>
       </button>
       <button
+        class="tb-win tb-win-mixer"
+        :class="{ active: mainView === 'mixer' }"
+        @click="mainView = 'mixer'"
+        title="Mixer"
+      >
+        <span class="tb-win-icon">⊟</span>
+        <span class="tb-win-lbl">MIXER</span>
+      </button>
+      <button
         class="tb-win tb-win-render"
         @click="renderModalOpen = true"
         title="Render / Export audio"
@@ -514,6 +523,9 @@ onBeforeUnmount(() => {
   font-size: 8px; font-weight: 700; letter-spacing: 0.1em; color: inherit;
 }
 .tb-win.active .tb-win-lbl { color: #9b59b6; }
+.tb-win-mixer:hover { border-color: #3498db; color: #3498db; }
+.tb-win-mixer.active { border-color: #3498db; background: #04121e; box-shadow: 0 0 8px #3498db33; }
+.tb-win-mixer.active .tb-win-lbl { color: #3498db; }
 .tb-win-render:hover { border-color: #e74c3c; color: #e74c3c; }
 .tb-win-render.active { border-color: #e74c3c; background: #1a0808; box-shadow: 0 0 8px #e74c3c33; }
 .tb-win-render.active .tb-win-lbl { color: #e74c3c; }

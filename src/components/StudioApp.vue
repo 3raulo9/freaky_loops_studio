@@ -6,13 +6,14 @@
     <!-- ── Main body ──────────────────────────────────────────────────── -->
     <div class="studio-body">
 
-      <!-- ── Left: Channel Rack OR Playlist ─────────────────────────── -->
+      <!-- ── Left: Channel Rack / Playlist / Mixer ─────────────────── -->
       <div class="main-area">
         <ChannelRack v-if="mainView === 'sequencer'" />
         <Playlist    v-else-if="mainView === 'playlist'" />
+        <Mixer       v-else-if="mainView === 'mixer'" />
       </div>
 
-      <!-- ── Right: Properties panel (selected channel knobs) ────────── -->
+      <!-- ── Right: Properties panel (sequencer only) ────────────────── -->
       <aside class="props-panel" v-if="mainView === 'sequencer'">
         <div class="props-header" :style="{ borderColor: selectedChannel.color }">
           <span class="props-name" :style="{ color: selectedChannel.color }">{{ selectedChannel.name }}</span>
@@ -99,6 +100,7 @@ import { useStudio } from '../store/studio.js'
 import TopBar      from './TopBar.vue'
 import ChannelRack from './ChannelRack.vue'
 import Playlist    from './Playlist.vue'
+import Mixer       from './Mixer.vue'
 import PianoRoll   from './PianoRoll.vue'
 import StepGrid    from './StepGrid.vue'
 import Knob        from './Knob.vue'
