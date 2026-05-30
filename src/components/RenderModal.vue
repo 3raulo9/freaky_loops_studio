@@ -140,11 +140,46 @@
           </section>
         </template>
 
-        <!-- ── Shared: Loop settings ──────────────────────────── -->
+        <!-- ── Render mode ─────────────────────────────────────── -->
         <section class="sect">
-          <div class="sect-label">LOOP</div>
+          <div class="sect-label">RENDER MODE</div>
+          <div class="pill-group">
+            <label class="pill" :class="{ active: renderMode === 'song' }">
+              <input type="radio" value="song" v-model="renderMode" />Song (Playlist)
+            </label>
+            <label class="pill" :class="{ active: renderMode === 'pattern' }">
+              <input type="radio" value="pattern" v-model="renderMode" />Pattern
+            </label>
+          </div>
+          <!-- Pattern picker (only in pattern mode) -->
+          <div v-if="renderMode === 'pattern'" class="pattern-pick-row">
+            <span class="setting-lbl">Pattern</span>
+            <div class="pattern-pill-list">
+              <label
+                v-for="pat in patterns"
+                :key="pat.id"
+                class="pill sm pat-pill"
+                :class="{ active: renderPatternId === pat.id }"
+                :style="renderPatternId === pat.id ? { borderColor: pat.color, color: pat.color } : {}"
+              >
+                <input type="radio" :value="pat.id" v-model="renderPatternId" />
+                <span class="pat-dot" :style="{ background: pat.color }" />
+                {{ pat.name }}
+              </label>
+            </div>
+          </div>
+          <!-- Song info (only in song mode) -->
+          <div v-if="renderMode === 'song'" class="song-info">
+            <span v-if="songTotalCells > 0">{{ songTotalCells }} bar{{ songTotalCells !== 1 ? 's' : '' }} · {{ activeSongClips }} clip{{ activeSongClips !== 1 ? 's' : '' }}</span>
+            <span v-else class="warn-empty">No clips in playlist — add clips first or use Pattern mode.</span>
+          </div>
+        </section>
+
+        <!-- ── Shared: Loop / Tail settings ───────────────────── -->
+        <section class="sect">
+          <div class="sect-label">{{ renderMode === 'song' ? 'TAIL' : 'LOOP' }}</div>
           <div class="two-col">
-            <div class="setting-row">
+            <div v-if="renderMode === 'pattern'" class="setting-row">
               <span class="setting-lbl">Bars</span>
               <div class="pill-group">
                 <label v-for="b in [1,2,4,8,16]" :key="b" class="pill sm" :class="{ active: bars === b }">
@@ -204,7 +239,7 @@
         </div>
         <div class="footer-btns">
           <button class="btn-cancel" @click="$emit('close')" :disabled="isRendering">CANCEL</button>
-          <button class="btn-render" @click="startRender" :disabled="isRendering">
+          <button class="btn-render" @click="startRender" :disabled="isRendering || (renderMode === 'song' && songTotalCells === 0)">
             <span v-if="isRendering"><span class="spin">◐</span> {{ renderVerb }}…</span>
             <span v-else>▶ RENDER &amp; EXPORT</span>
           </button>
@@ -216,7 +251,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useStudio } from '../store/studio.js'
 import {
   renderLoopToWav,
@@ -227,15 +262,83 @@ import {
 
 defineEmits(['close'])
 
-const { channels, bpm, totalSteps, swing, getPatData, currentPatternId } = useStudio()
+const {
+  channels, bpm, totalSteps, swing,
+  getPatData, currentPatternId,
+  patterns, playlistClips, playlistTracks,
+} = useStudio()
 
-// Resolve current pattern's step/note data into each channel before passing to
-// the encoder — export.js still expects track.pattern[] and track.pianoNotes[].
-function resolvedTracks() {
+// ── Render mode ───────────────────────────────────────────────────────────────
+const renderMode      = ref('song')           // 'song' | 'pattern'
+const renderPatternId = ref(currentPatternId.value)
+watch(currentPatternId, id => { if (renderMode.value === 'pattern') renderPatternId.value = id })
+
+// Song metrics (muted tracks ignored, same as live playback)
+const mutedTrackIds = computed(() => new Set(playlistTracks.filter(t => t.muted).map(t => t.id)))
+const activeSongClips = computed(() =>
+  playlistClips.filter(c => !c.muted && !mutedTrackIds.value.has(c.trackId)).length
+)
+const songTotalCells = computed(() => {
+  const clips = playlistClips.filter(c => !c.muted && !mutedTrackIds.value.has(c.trackId))
+  if (!clips.length) return 0
+  return Math.max(...clips.map(c => c.cell + (c.width || 1)))
+})
+
+// Build track list for a single pattern render
+function resolvedPatternTracks(patId) {
   return channels.map(ch => {
-    const d = getPatData(ch.id, currentPatternId.value)
-    return { ...ch, pattern: d.steps, pianoNotes: d.pianoNotes }
+    const d = getPatData(ch.id, patId)
+    return { ...ch, pattern: d.steps, pianoNotes: d.pianoNotes, stepVelocities: d.stepVelocities }
   })
+}
+
+// Build expanded track list for full song render.
+// Returns { tracks, songSteps } where songSteps is the total linear step count.
+function resolvedSongTracks() {
+  const stepsPerCell = totalSteps.value
+  const cells        = songTotalCells.value
+  if (!cells) return { tracks: resolvedPatternTracks(currentPatternId.value), songSteps: stepsPerCell }
+
+  const totalSongSteps = cells * stepsPerCell
+  const muted          = mutedTrackIds.value
+
+  return {
+    tracks: channels.map(ch => {
+      if (ch.muted) {
+        return { ...ch, pattern: new Array(totalSongSteps).fill(false), pianoNotes: [], stepVelocities: new Array(totalSongSteps).fill(0.8) }
+      }
+      const steps       = new Array(totalSongSteps).fill(false)
+      const vels        = new Array(totalSongSteps).fill(0.8)
+      const pianoNotes  = []
+
+      playlistClips.forEach(clip => {
+        if (clip.muted || muted.has(clip.trackId)) return
+        const d           = getPatData(ch.id, clip.patternId)
+        const clipSteps   = (clip.width || 1) * stepsPerCell
+        const clipStart   = clip.cell * stepsPerCell
+
+        for (let cs = 0; cs < clipSteps; cs++) {
+          const absStep = clipStart + cs
+          if (absStep >= totalSongSteps) break
+          const patStep = cs % stepsPerCell
+
+          if (ch.mode === 'steps') {
+            if (d.steps[patStep]) {
+              steps[absStep] = true
+              vels[absStep]  = d.stepVelocities?.[patStep] ?? 0.8
+            }
+          } else {
+            d.pianoNotes.filter(n => n.step === patStep).forEach(note => {
+              pianoNotes.push({ ...note, step: absStep })
+            })
+          }
+        }
+      })
+
+      return { ...ch, pattern: steps, pianoNotes, stepVelocities: vels }
+    }),
+    songSteps: totalSongSteps,
+  }
 }
 
 // ── Format definitions ────────────────────────────────────────────────────────
@@ -313,13 +416,20 @@ const currentExt = computed(() => {
   return oggMime?.startsWith('audio/ogg') ? 'ogg' : 'webm'
 })
 const filename = ref('')
-watch([bpm, bars, format], () => {
-  filename.value = `freaky-loop-${bpm.value}bpm-${bars.value}bar`
+watch([bpm, bars, format, renderMode, songTotalCells], () => {
+  if (renderMode.value === 'song') {
+    filename.value = `freaky-song-${bpm.value}bpm-${songTotalCells.value}bar`
+  } else {
+    filename.value = `freaky-loop-${bpm.value}bpm-${bars.value}bar`
+  }
 }, { immediate: true })
 
 // ── Metadata ──────────────────────────────────────────────────────────────────
 const duration = computed(() => {
   const secPerStep = (60 / bpm.value) / 4
+  if (renderMode.value === 'song') {
+    return songTotalCells.value * totalSteps.value * secPerStep + tail.value
+  }
   return bars.value * totalSteps.value * secPerStep + tail.value
 })
 const durationLabel = computed(() => {
@@ -381,18 +491,31 @@ async function startRender() {
   }
 
   try {
+    // Resolve tracks and timing based on render mode
+    let tracks, renderTotalSteps, renderBars
+    if (renderMode.value === 'song') {
+      const { tracks: t, songSteps } = resolvedSongTracks()
+      tracks           = t
+      renderTotalSteps = songSteps
+      renderBars       = 1
+    } else {
+      tracks           = resolvedPatternTracks(renderPatternId.value)
+      renderTotalSteps = totalSteps.value
+      renderBars       = bars.value
+    }
+
     const shared = {
       bpm:        bpm.value,
-      totalSteps: totalSteps.value,
+      totalSteps: renderTotalSteps,
       swing:      swing.value,
-      bars:       bars.value,
+      bars:       renderBars,
       tail:       tail.value,
     }
 
     let result
     if (format.value === 'wav') {
       progressLabel.value = `Rendering WAV — ${wav.value.sampleRate/1000}kHz · ${wav.value.bitDepth}-bit…`
-      result = await renderLoopToWav(resolvedTracks(), {
+      result = await renderLoopToWav(tracks, {
         ...shared,
         sampleRate: wav.value.sampleRate,
         bitDepth:   wav.value.bitDepth,
@@ -402,21 +525,21 @@ async function startRender() {
       })
     } else if (format.value === 'mp3') {
       progressLabel.value = `Rendering audio, then encoding MP3 at ${mp3.value.bitrate} kbps…`
-      result = await renderLoopToMp3(resolvedTracks(), {
+      result = await renderLoopToMp3(tracks, {
         ...shared,
         bitrate:   mp3.value.bitrate,
         channels:  mp3.value.channels,
         normalize: mp3.value.normalize,
-        sampleRate: 44100, // lamejs works best at 44100
+        sampleRate: 44100,
       })
     } else if (format.value === 'ogg') {
       progressLabel.value = `Encoding OGG/Opus at ${ogg.value.bitrate} kbps — playing back in real time…`
-      result = await renderLoopToOgg(resolvedTracks(), {
+      result = await renderLoopToOgg(tracks, {
         ...shared,
         bitrate:   ogg.value.bitrate,
         channels:  ogg.value.channels,
         normalize: ogg.value.normalize,
-        sampleRate: 48000, // Opus prefers 48kHz
+        sampleRate: 48000,
       })
     }
 
@@ -532,6 +655,21 @@ async function startRender() {
 .pill.active { border-color:#e74c3c; color:#e74c3c; background:#1a0a0a; }
 .pill-sub { font-size:9px; color:#404058; margin-left:2px; }
 .pill.active .pill-sub { color:#a03020; }
+
+/* ── Render mode extras ──────────────────────────────────────────── */
+.pattern-pick-row {
+  margin-top: 10px;
+  display: flex; align-items: flex-start; gap: 10px;
+}
+.pattern-pick-row .setting-lbl { padding-top: 5px; }
+.pattern-pill-list { display: flex; flex-wrap: wrap; gap: 5px; }
+.pat-pill { gap: 5px; }
+.pat-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.song-info {
+  margin-top: 8px;
+  font-family:'Share Tech Mono',monospace; font-size:10px; color:#606080;
+}
+.warn-empty { color:#b05020; }
 
 /* ── Setting rows ────────────────────────────────────────────────── */
 .two-col { display:flex; flex-direction:column; gap:8px; }
