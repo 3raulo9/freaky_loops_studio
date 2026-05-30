@@ -147,6 +147,24 @@
         :disabled="!canRedo"
         title="Redo"
       >↷</button>
+      <div class="tb-tools-sep" />
+      <button
+        class="tb-tool tb-tool-save"
+        @click="onSave"
+        title="Save project (.freak)"
+      >↓</button>
+      <button
+        class="tb-tool tb-tool-open"
+        @click="fileInput.click()"
+        title="Open project (.freak)"
+      >↑</button>
+      <input
+        ref="fileInput"
+        type="file"
+        accept=".freak,.json"
+        style="display:none"
+        @change="onFileChange"
+      />
     </div>
 
     <div class="tb-sep" />
@@ -212,7 +230,21 @@ const {
   usePlaylist, gridSnap, keyboardInputMode, audioLoad,
   togglePlay, stopPlay, getPlayheadTimeSeconds,
   canUndo, canRedo, undoAction, redoAction, getAnalyser,
+  saveProject, loadProjectFile,
 } = useStudio()
+
+// ── File save / open ──────────────────────────────────────────────────────────
+const fileInput = ref(null)
+
+function onSave() {
+  saveProject('project')
+}
+
+function onFileChange(e) {
+  const file = e.target.files?.[0]
+  if (file) loadProjectFile(file)
+  e.target.value = ''
+}
 
 // ── PAT / SONG ────────────────────────────────────────────────────────────────
 function setPAT() {
@@ -505,6 +537,8 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 7px #1abc9c33;
 }
 .tb-tool:disabled { opacity: 0.22; cursor: not-allowed; }
+.tb-tool-save:hover:not(:disabled) { border-color: #2ecc71; color: #2ecc71; }
+.tb-tool-open:hover:not(:disabled) { border-color: #3498db; color: #3498db; }
 
 /* ── Window Manager ────────────────────────────────────────────────────────── */
 .tb-windows { display: flex; gap: 3px; flex-shrink: 0; }

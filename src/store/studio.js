@@ -6,6 +6,45 @@ import {
   playFMMarimba, playFMClav, playFMPad, playFMPluck, playFMFlute, playFMMetal,
 } from '../audio/fm.js'
 
+// ─── Function key map (for project serialization) ─────────────────────────────
+export const FN_KEY_MAP = new Map([
+  [playKick,        'kick'],
+  [playSnare,       'snare'],
+  [playHiHat,       'hihat'],
+  [playClash,       'clash'],
+  [playMelodicNote, 'melodic'],
+  [playFMBell,      'fm:bell'],
+  [playFMRhodes,    'fm:rhodes'],
+  [playFMBass,      'fm:bass'],
+  [playFMOrgan,     'fm:organ'],
+  [playFMBrass,     'fm:brass'],
+  [playFMMarimba,   'fm:marimba'],
+  [playFMClav,      'fm:clav'],
+  [playFMPad,       'fm:pad'],
+  [playFMPluck,     'fm:pluck'],
+  [playFMFlute,     'fm:flute'],
+  [playFMMetal,     'fm:metal'],
+])
+
+export const FN_FROM_KEY = {
+  kick:         playKick,
+  snare:        playSnare,
+  hihat:        playHiHat,
+  clash:        playClash,
+  melodic:      playMelodicNote,
+  'fm:bell':    playFMBell,
+  'fm:rhodes':  playFMRhodes,
+  'fm:bass':    playFMBass,
+  'fm:organ':   playFMOrgan,
+  'fm:brass':   playFMBrass,
+  'fm:marimba': playFMMarimba,
+  'fm:clav':    playFMClav,
+  'fm:pad':     playFMPad,
+  'fm:pluck':   playFMPluck,
+  'fm:flute':   playFMFlute,
+  'fm:metal':   playFMMetal,
+}
+
 // ─── FM channel presets ────────────────────────────────────────────────────────
 export const FM_PRESETS = {
   bell: {
@@ -1083,6 +1122,182 @@ export function useStudio() {
     })
   }
 
+  // ── Project save / load ───────────────────────────────────────────────────────
+  function saveProject(name = 'project') {
+    const project = {
+      version: 1,
+      bpm:        bpm.value,
+      totalSteps: totalSteps.value,
+      swing:      swing.value,
+      snapScale:  { ...snapScale },
+      channels: channels.map(ch => ({
+        id:          ch.id,
+        name:        ch.name,
+        color:       ch.color,
+        type:        ch.type,
+        mode:        ch.mode,
+        volume:      ch.volume,
+        pan:         ch.pan,
+        mixerTrack:  ch.mixerTrack,
+        muted:       ch.muted,
+        zipped:      ch.zipped,
+        loopEnabled: ch.loopEnabled,
+        loopLength:  ch.loopLength,
+        groupId:     ch.groupId,
+        params:      { ...ch.params },
+        knobs:       ch.knobs.map(k => ({ ...k })),
+        fnKey:       FN_KEY_MAP.get(ch.fn) ?? 'melodic',
+      })),
+      channelGroups: channelGroups.map(g => ({ ...g })),
+      patterns:      patterns.map(p => ({ ...p })),
+      patternData: (() => {
+        const out = {}
+        Object.keys(patternData).forEach(pid => {
+          out[pid] = {}
+          Object.keys(patternData[pid]).forEach(cid => {
+            const d = patternData[pid][cid]
+            out[pid][cid] = {
+              steps:          [...d.steps],
+              pianoNotes:     d.pianoNotes.map(n => ({ ...n })),
+              stepVelocities: [...(d.stepVelocities || Array(32).fill(0.8))],
+              stepPans:       [...(d.stepPans       || Array(32).fill(0))],
+              stepPitches:    [...(d.stepPitches    || Array(32).fill(0))],
+            }
+          })
+        })
+        return out
+      })(),
+      currentPatternId: currentPatternId.value,
+      playlistTracks:   playlistTracks.map(t => ({ ...t })),
+      playlistClips:    playlistClips.map(c => ({ ...c })),
+      timeMarkers:      timeMarkers.map(m => ({ ...m })),
+      automationClips:  automationClips.map(a => ({ ...a, nodes: a.nodes.map(n => ({ ...n })) })),
+      mixerTracks: mixerTracks.map(mt => ({
+        id:     mt.id,
+        name:   mt.name,
+        color:  mt.color,
+        volume: mt.volume,
+        pan:    mt.pan,
+        muted:  mt.muted,
+        eq:     { ...mt.eq },
+      })),
+    }
+
+    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = name + '.freak'
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  function loadProjectFile(file) {
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = e => {
+      try {
+        _applyProject(JSON.parse(e.target.result))
+      } catch (err) {
+        console.error('[FreakyLoops] Failed to load project:', err)
+        alert('Failed to load project. The file may be corrupted or in an unsupported format.')
+      }
+    }
+    reader.readAsText(file)
+  }
+
+  function _applyProject(p) {
+    if (isPlaying.value) pausePlay()
+
+    bpm.value        = p.bpm        ?? 120
+    totalSteps.value = p.totalSteps ?? 16
+    swing.value      = p.swing      ?? 0
+    if (p.snapScale) Object.assign(snapScale, p.snapScale)
+
+    // Channels
+    channels.splice(0, channels.length, ...(p.channels ?? []).map(ch => reactive({
+      id:          ch.id,
+      name:        ch.name,
+      color:       ch.color,
+      type:        ch.type        ?? 'melodic',
+      mode:        ch.mode        ?? 'piano',
+      volume:      ch.volume      ?? 0.8,
+      pan:         ch.pan         ?? 0,
+      mixerTrack:  ch.mixerTrack  ?? 0,
+      muted:       ch.muted       ?? false,
+      _soloed:     false,
+      selected:    false,
+      zipped:      ch.zipped      ?? false,
+      loopEnabled: ch.loopEnabled ?? false,
+      loopLength:  ch.loopLength  ?? 16,
+      groupId:     ch.groupId     ?? null,
+      params:      { ...(ch.params ?? {}) },
+      knobs:       (ch.knobs ?? []).map(k => ({ ...k })),
+      fn:          FN_FROM_KEY[ch.fnKey] ?? playMelodicNote,
+    })))
+
+    // Channel groups
+    channelGroups.splice(0, channelGroups.length, ...(p.channelGroups ?? []).map(g => ({ ...g })))
+
+    // Patterns metadata
+    patterns.splice(0, patterns.length, ...(p.patterns ?? []).map(pt => ({ ...pt })))
+
+    // Pattern data
+    Object.keys(patternData).forEach(k => delete patternData[k])
+    Object.keys(p.patternData ?? {}).forEach(pid => {
+      patternData[pid] = {}
+      Object.keys(p.patternData[pid]).forEach(cid => {
+        const d = p.patternData[pid][cid]
+        patternData[pid][cid] = reactive({
+          steps:          [...(d.steps          ?? Array(32).fill(false))],
+          pianoNotes:     (d.pianoNotes ?? []).map(n => ({ ...n })),
+          stepVelocities: [...(d.stepVelocities ?? Array(32).fill(0.8))],
+          stepPans:       [...(d.stepPans       ?? Array(32).fill(0))],
+          stepPitches:    [...(d.stepPitches    ?? Array(32).fill(0))],
+        })
+      })
+    })
+
+    const firstPatId = patterns[0]?.id ?? 'p1'
+    currentPatternId.value = p.currentPatternId ?? firstPatId
+    pickerPatternId.value  = p.currentPatternId ?? firstPatId
+
+    // Playlist
+    playlistTracks.splice(0, playlistTracks.length, ...(p.playlistTracks ?? []).map(t => ({ ...t, _soloed: false })))
+    playlistClips.splice(0, playlistClips.length, ...(p.playlistClips ?? []).map(c => ({ ...c })))
+    timeMarkers.splice(0, timeMarkers.length, ...(p.timeMarkers ?? []).map(m => ({ ...m })))
+    automationClips.splice(0, automationClips.length, ...(p.automationClips ?? []).map(a => ({
+      ...a, nodes: (a.nodes ?? []).map(n => ({ ...n })),
+    })))
+
+    // Mixer
+    ;(p.mixerTracks ?? []).forEach((mt, i) => {
+      if (!mixerTracks[i]) return
+      mixerTracks[i].name    = mt.name   ?? mixerTracks[i].name
+      mixerTracks[i].color   = mt.color  ?? mixerTracks[i].color
+      mixerTracks[i].volume  = mt.volume ?? 1.0
+      mixerTracks[i].pan     = mt.pan    ?? 0
+      mixerTracks[i].muted   = mt.muted  ?? false
+      mixerTracks[i]._soloed = false
+      if (mt.eq) Object.assign(mixerTracks[i].eq, mt.eq)
+    })
+
+    // Update selected channel
+    selectedChannelId.value = channels[0]?.id ?? ''
+
+    // Advance ID counters to prevent collisions with loaded IDs
+    _cid = Math.max(_cid, ...channels.map(ch => parseInt(ch.id) || 0))
+    _pid = Math.max(_pid, ...patterns.map(pt => parseInt(pt.id.replace(/^p/, '')) || 0))
+    _clipId   = Math.max(_clipId,   ...playlistClips.map(c  => parseInt(c.id.replace(/^c/, ''))  || 0))
+    _markerId = Math.max(_markerId, ...timeMarkers.map(m    => parseInt(m.id.replace(/^m/, ''))  || 0))
+    _autoId   = Math.max(_autoId,   ...automationClips.map(a => parseInt(a.id.replace(/^a/, '')) || 0))
+    _gid      = Math.max(_gid,      ...channelGroups.map(g  => parseInt(g.id.replace(/^g/, ''))  || 0))
+
+    if (audioCtx) rebuildGains()
+    undoStack.length = 0
+    redoStack.length = 0
+  }
+
   // ── Public API ────────────────────────────────────────────────────────────────
   _store = {
     // Channels
@@ -1138,6 +1353,8 @@ export function useStudio() {
     getMixerAnalyser, assignChannelToMixerTrack,
     // Scale snap
     snapScale,
+    // Project save / load
+    saveProject, loadProjectFile,
   }
   return _store
 }
