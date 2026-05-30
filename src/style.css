@@ -5,13 +5,21 @@
 }
 
 :root {
-  --bg-base: #0e0e14;
-  --bg-panel: #16161f;
-  --bg-track: #1c1c28;
-  --bg-header: #12121a;
-  --border: #2a2a3a;
+  /* ── Backgrounds (dark → light) ───────────────────────── */
+  --bg-deeper:  #080810;   /* rulers, canvas, deepest pits  */
+  --bg-base:    #0e0e14;   /* main app background            */
+  --bg-header:  #0c0c14;   /* topbar, modal headers/footers  */
+  --bg-panel:   #16161f;   /* side panels, property strips   */
+  --bg-track:   #1c1c28;   /* track rows, list items         */
+  --bg-control: #0e0e1c;   /* inputs, selects, dark controls */
+  --bg-hover:   #141428;   /* hover / selected row tint      */
+  /* ── Borders ─────────────────────────────────────────── */
+  --border-subtle: #1a1a28; /* dividers, subtle separators   */
+  --border:        #252535; /* standard element borders       */
+  /* ── Text ────────────────────────────────────────────── */
   --text-primary: #e0e0ee;
-  --text-muted: #666680;
+  --text-muted:   #666680;
+  /* ── Typography ──────────────────────────────────────── */
   --font-mono: 'Share Tech Mono', monospace;
   --font-ui: 'Rajdhani', sans-serif;
 }

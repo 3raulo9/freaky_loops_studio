@@ -586,6 +586,8 @@ export function useStudio() {
   const mainView           = ref('sequencer')
   const pianoRollOpen      = ref(false)
   const renderModalOpen    = ref(false)
+  const themeModalOpen     = ref(false)
+  const currentTheme       = ref(localStorage.getItem('fls-theme') ?? 'void')
   const kbOctave           = ref(4)
   const gridSnap           = ref('1/4')
   const keyboardInputMode  = ref(false)
@@ -1456,7 +1458,7 @@ export function useStudio() {
     // Utilities
     getUnusedPatternIds,
     // UI state
-    mainView, pianoRollOpen, renderModalOpen, kbOctave,
+    mainView, pianoRollOpen, renderModalOpen, themeModalOpen, currentTheme, kbOctave,
     gridSnap, keyboardInputMode,
     // Sequencer
     bpm, totalSteps, swing, isPlaying, displayStep,

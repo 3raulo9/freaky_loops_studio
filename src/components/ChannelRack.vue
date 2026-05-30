@@ -875,10 +875,10 @@ function commitRename() {
 /* ── Pattern navigator ───────────────────────────────────────────── */
 .pattern-nav {
   display: flex; align-items: center; gap: 6px; padding: 6px 10px;
-  background: #080810; border-bottom: 1px solid #1a1a28; flex-shrink: 0;
+  background: var(--bg-deeper); border-bottom: 1px solid var(--border-subtle); flex-shrink: 0;
 }
 .pat-nav-btn {
-  width: 22px; height: 22px; border-radius: 4px; border: 1px solid #252535;
+  width: 22px; height: 22px; border-radius: 4px; border: 1px solid var(--border);
   background: transparent; color: #60608a; font-size: 16px; line-height: 1;
   cursor: pointer; display: flex; align-items: center; justify-content: center;
   transition: all 0.1s; padding: 0;
@@ -887,7 +887,7 @@ function commitRename() {
 .pat-nav-btn:disabled { opacity: 0.25; cursor: default; }
 .pat-name-wrap {
   flex: 1; display: flex; align-items: center; gap: 6px;
-  padding: 3px 8px; border: 1px solid #1e1e2c; border-radius: 4px;
+  padding: 3px 8px; border: 1px solid var(--border-subtle); border-radius: 4px;
   cursor: pointer; transition: border-color 0.1s;
 }
 .pat-name-wrap:hover { border-color: #3a3a5a; }
@@ -899,8 +899,8 @@ function commitRename() {
 }
 .pat-add-btn {
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
-  letter-spacing: 0.08em; padding: 3px 8px; border: 1px dashed #252535;
-  border-radius: 4px; background: transparent; color: #404058; cursor: pointer;
+  letter-spacing: 0.08em; padding: 3px 8px; border: 1px dashed var(--border);
+  border-radius: 4px; background: transparent; color: var(--text-muted); cursor: pointer;
   white-space: nowrap; transition: all 0.12s;
 }
 .pat-add-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
@@ -908,13 +908,13 @@ function commitRename() {
 /* ── Rack root ───────────────────────────────────────────────────── */
 .channel-rack {
   display: flex; flex-direction: column; flex: 1;
-  overflow: hidden; background: #0e0e18; position: relative;
+  overflow: hidden; background: var(--bg-base); position: relative;
 }
 
 /* ── Options panel ───────────────────────────────────────────────── */
 .options-panel {
   position: fixed; z-index: 3000;
-  background: #141422; border: 1px solid #2a2a3e; border-radius: 7px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 7px;
   padding: 4px 0; min-width: 210px;
   box-shadow: 0 12px 40px rgba(0,0,0,0.8);
   max-height: 80vh; overflow-y: auto;
@@ -932,7 +932,7 @@ function commitRename() {
   transition: background 0.07s, color 0.07s;
   position: relative;
 }
-.op-item:hover { background: #1c1c30; color: #d0d0ee; }
+.op-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .op-item.danger { color: #7a3030; }
 .op-item.danger:hover { color: #e74c3c; background: #1a0a0a; }
 .op-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
@@ -940,7 +940,7 @@ function commitRename() {
   margin-left: auto; font-family: 'Share Tech Mono', monospace;
   font-size: 9px; color: #353548; letter-spacing: 0;
 }
-.op-sep { height: 1px; background: #1e1e30; margin: 3px 0; }
+.op-sep { height: 1px; background: var(--border-subtle); margin: 3px 0; }
 
 .op-sub-trigger {
   display: flex; align-items: center;
@@ -950,10 +950,10 @@ function commitRename() {
   transition: background 0.07s, color 0.07s;
   position: relative;
 }
-.op-sub-trigger:hover { background: #1c1c30; color: #d0d0ee; }
+.op-sub-trigger:hover { background: var(--bg-hover); color: var(--text-primary); }
 .op-submenu {
   position: absolute; left: 100%; top: 0; z-index: 3100;
-  background: #141422; border: 1px solid #2a2a3e; border-radius: 6px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px;
   min-width: 150px; padding: 4px 0;
   box-shadow: 0 8px 28px rgba(0,0,0,0.75);
 }
@@ -962,12 +962,12 @@ function commitRename() {
 .rack-toolbar {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 10px;
-  background: #0a0a12; border-bottom: 1px solid #1a1a28;
+  background: var(--bg-deeper); border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 .options-btn {
   width: 24px; height: 22px; border-radius: 4px;
-  border: 1px solid #252535; background: transparent; color: #50506a;
+  border: 1px solid var(--border); background: transparent; color: var(--text-muted);
   font-size: 15px; cursor: pointer; display: flex; align-items: center;
   justify-content: center; transition: all 0.1s; flex-shrink: 0;
 }
@@ -983,14 +983,14 @@ function commitRename() {
 .df-btn {
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
   letter-spacing: 0.1em; padding: 3px 8px;
-  border: 1px solid #252535; border-radius: 4px;
-  background: #0e0e1c; color: #60608a; cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg-control); color: var(--text-muted); cursor: pointer; white-space: nowrap;
   transition: all 0.1s;
 }
 .df-btn:hover { border-color: #4a4a6a; color: #a0a0c0; }
 .df-dropdown {
   position: absolute; top: calc(100% + 3px); left: 0; z-index: 2500;
-  background: #141422; border: 1px solid #2a2a3e; border-radius: 6px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px;
   padding: 4px 0; min-width: 160px;
   box-shadow: 0 10px 32px rgba(0,0,0,0.75);
 }
@@ -1000,21 +1000,21 @@ function commitRename() {
   letter-spacing: 0.07em; color: #7070a0; cursor: pointer;
   transition: background 0.07s, color 0.07s;
 }
-.df-item:hover { background: #1c1c30; color: #d0d0ee; }
+.df-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .df-item.active { color: #c0c0ee; }
 .df-item.df-group { padding-left: 20px; color: #5a5a80; }
 .df-item.df-group:hover { color: #d0d0ee; }
 .df-item.df-group.active { color: #4ecdc4; }
 .df-item.df-add { color: #3a3a5a; }
 .df-item.df-add:hover { color: #4ecdc4; }
-.df-sep { height: 1px; background: #1e1e2e; margin: 2px 0; }
+.df-sep { height: 1px; background: var(--border-subtle); margin: 2px 0; }
 
 /* ── Graph editor toggle ─────────────────────────────────────────── */
 .ge-toggle-btn {
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
   letter-spacing: 0.12em; padding: 3px 8px;
-  border: 1px solid #252535; border-radius: 4px;
-  background: transparent; color: #404058; cursor: pointer; transition: all 0.12s;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.12s;
 }
 .ge-toggle-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
 .ge-toggle-btn.active { border-color: #4ecdc4; color: #4ecdc4; background: #041614; }
@@ -1026,13 +1026,13 @@ function commitRename() {
 .add-synth-wrap { position: relative; }
 .add-ch-btn {
   font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
-  letter-spacing: 0.1em; padding: 4px 10px; border: 1px dashed #252535;
-  border-radius: 5px; background: transparent; color: #404058; cursor: pointer; transition: all 0.15s;
+  letter-spacing: 0.1em; padding: 4px 10px; border: 1px dashed var(--border);
+  border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.15s;
 }
 .add-ch-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
 .synth-picker {
   position: absolute; right: 0; top: calc(100% + 5px); z-index: 2000;
-  background: #141422; border: 1px solid #2a2a3c; border-radius: 7px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 7px;
   padding: 5px 0; min-width: 170px;
   box-shadow: 0 10px 36px rgba(0,0,0,0.75);
   max-height: 340px; overflow-y: auto;
@@ -1048,7 +1048,7 @@ function commitRename() {
   letter-spacing: 0.08em; color: #8080a8; cursor: pointer;
   transition: background 0.08s, color 0.08s;
 }
-.synth-pick-item:hover { background: #1c1c2e; color: #d0d0ee; }
+.synth-pick-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .synth-pick-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
 /* ── Column headers ──────────────────────────────────────────────── */
@@ -1056,7 +1056,7 @@ function commitRename() {
   display: grid;
   grid-template-columns: 20px 34px 34px 38px 130px 1fr;
   padding: 4px 0 4px 4px;
-  background: #080810; border-bottom: 1px solid #141420;
+  background: var(--bg-deeper); border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
 }
 .col-headers > div {
@@ -1076,16 +1076,16 @@ function commitRename() {
   grid-template-columns: 20px 34px 34px 38px 130px 1fr;
   align-items: center;
   min-height: 40px;
-  border-bottom: 1px solid #0b0b14;
-  background: #0e0e18;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-base);
   cursor: pointer;
   transition: background 0.08s;
   padding-left: 4px;
   position: relative;
 }
-.channel-row:hover    { background: #121220; }
-.channel-row.selected { background: #161626; }
-.channel-row.multi-sel { background: #141428; }
+.channel-row:hover    { background: var(--bg-panel); }
+.channel-row.selected { background: var(--bg-hover); }
+.channel-row.multi-sel { background: var(--bg-hover); }
 .channel-row.muted    { opacity: 0.45; }
 .channel-row.selected::before {
   content: ''; position: absolute; left: 0; top: 0; bottom: 0;
@@ -1114,7 +1114,7 @@ function commitRename() {
 }
 .zip-ch-btn:hover { filter: brightness(1.12); }
 .unzip-btn {
-  width: 16px; height: 16px; border-radius: 3px; border: 1px solid #252535;
+  width: 16px; height: 16px; border-radius: 3px; border: 1px solid var(--border);
   background: transparent; color: #404058; font-size: 8px;
   cursor: pointer; display: flex; align-items: center; justify-content: center;
   flex-shrink: 0; transition: all 0.1s;
@@ -1124,7 +1124,7 @@ function commitRename() {
 /* ── LED ─────────────────────────────────────────────────────────── */
 .led {
   width: 10px; height: 10px; border-radius: 50%;
-  background: #1a1a28; border: 1px solid #252535;
+  background: var(--border-subtle); border: 1px solid var(--border);
   cursor: pointer; transition: all 0.12s; justify-self: center;
 }
 .led.active {
@@ -1154,8 +1154,8 @@ function commitRename() {
 /* ── Mixer track number ──────────────────────────────────────────── */
 .mix-num { display: flex; align-items: center; justify-content: center; height: 100%; }
 .mix-input {
-  width: 28px; background: #141422; border: 1px solid #252535;
-  color: #7070a0; font-family: 'Share Tech Mono', monospace; font-size: 10px;
+  width: 28px; background: var(--bg-control); border: 1px solid var(--border);
+  color: var(--text-muted); font-family: 'Share Tech Mono', monospace; font-size: 10px;
   text-align: center; border-radius: 3px; outline: none; padding: 2px 0;
   -moz-appearance: textfield;
 }
@@ -1189,18 +1189,18 @@ function commitRename() {
   gap: 2px;
 }
 .istep {
-  height: 24px; border: 1px solid #1e1e32;
-  border-radius: 3px; background: #0e0e22;
+  height: 24px; border: 1px solid var(--border-subtle);
+  border-radius: 3px; background: var(--bg-base);
   cursor: pointer; transition: background 0.07s, box-shadow 0.07s; padding: 0;
 }
-.istep.beat    { background: #111128; border-color: #222238; }
+.istep.beat    { background: var(--bg-panel); border-color: var(--border-subtle); }
 .istep.lit     {
   background: var(--accent); border-color: var(--accent);
   box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, transparent);
 }
 .istep.ghost {
-  background: color-mix(in srgb, var(--accent) 18%, #0e0e22);
-  border-color: color-mix(in srgb, var(--accent) 25%, #1e1e32);
+  background: color-mix(in srgb, var(--accent) 18%, var(--bg-base));
+  border-color: color-mix(in srgb, var(--accent) 25%, var(--border-subtle));
 }
 .istep.playing { border-color: #fff !important; box-shadow: 0 0 8px #ffffffaa !important; }
 .istep:hover:not(.lit):not(.ghost) {
@@ -1212,7 +1212,7 @@ function commitRename() {
 .loop-btn {
   position: absolute; right: 3px; top: 50%; transform: translateY(-50%);
   width: 18px; height: 18px; border-radius: 3px;
-  border: 1px solid #1e1e32; background: #09090f; color: #303048;
+  border: 1px solid var(--border-subtle); background: var(--bg-deeper); color: var(--text-muted);
   font-size: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center;
   transition: all 0.1s; z-index: 5; flex-shrink: 0;
 }
@@ -1227,16 +1227,16 @@ function commitRename() {
   display: grid;
   grid-template-columns: repeat(var(--cols), 1fr);
   gap: 2px; height: 28px;
-  background: #0a0a18; border: 1px solid #1a1a2c;
+  background: var(--bg-deeper); border: 1px solid var(--border-subtle);
   border-radius: 3px; cursor: pointer; position: relative;
   overflow: hidden; transition: border-color 0.1s;
 }
 .mini-pr:hover { border-color: #3a3a5a; }
 .mini-pr-col {
   height: 100%; position: relative;
-  border-right: 1px solid #0e0e1a; transition: background 0.05s;
+  border-right: 1px solid var(--bg-base); transition: background 0.05s;
 }
-.mini-pr-col.beat    { border-left: 1px solid #141428; }
+.mini-pr-col.beat    { border-left: 1px solid var(--border-subtle); }
 .mini-pr-col.playing { background: rgba(255,255,255,0.08); }
 .mini-note {
   position: absolute; left: 1px; right: 1px; height: 3px;
@@ -1254,19 +1254,19 @@ function commitRename() {
 /* ── Graph Editor strip ──────────────────────────────────────────── */
 .ge-strip {
   grid-column: 1 / -1;
-  border-top: 1px solid #141428;
-  background: #09090f;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-deeper);
 }
 .ge-tabs {
   display: flex; align-items: center; gap: 2px;
-  padding: 3px 6px; background: #080810;
-  border-bottom: 1px solid #141420;
+  padding: 3px 6px; background: var(--bg-deeper);
+  border-bottom: 1px solid var(--border-subtle);
 }
 .ge-tab {
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
   letter-spacing: 0.12em; padding: 2px 7px;
-  border: 1px solid #1e1e2e; border-radius: 3px;
-  background: transparent; color: #353548; cursor: pointer; transition: all 0.1s;
+  border: 1px solid var(--border-subtle); border-radius: 3px;
+  background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.1s;
 }
 .ge-tab:hover { border-color: #3a3a5a; color: #7070a0; }
 .ge-tab.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
@@ -1280,24 +1280,24 @@ function commitRename() {
   grid-template-columns: repeat(var(--cols), 1fr);
   gap: 1px; height: 52px;
   padding: 3px 4px; cursor: crosshair; user-select: none;
-  background: #0a0a14;
+  background: var(--bg-deeper);
 }
 .ge-col {
   position: relative; display: flex; align-items: flex-end;
-  border-right: 1px solid #0e0e18; transition: background 0.05s;
+  border-right: 1px solid var(--bg-base); transition: background 0.05s;
 }
-.ge-col.beat { border-left: 1px solid #141424; }
+.ge-col.beat { border-left: 1px solid var(--border-subtle); }
 .ge-col.playing { background: rgba(255,255,255,0.05); }
 .ge-col.lit .ge-bar { opacity: 1; }
 .ge-col:not(.lit) .ge-bar { opacity: 0.45; }
 
 .ge-bar-bg {
   position: absolute; inset: 0;
-  background: #0c0c1a;
+  background: var(--bg-control);
 }
 .ge-center-line {
   position: absolute; left: 0; right: 0; top: 50%;
-  height: 1px; background: #1e1e30; z-index: 1;
+  height: 1px; background: var(--border-subtle); z-index: 1;
 }
 .ge-bar {
   position: absolute; left: 1px; right: 1px;
@@ -1318,7 +1318,7 @@ function commitRename() {
 /* ── Context menu ────────────────────────────────────────────────── */
 .ctx-menu {
   position: fixed; z-index: 1000;
-  background: #181828; border: 1px solid #2a2a3c; border-radius: 6px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px;
   padding: 4px 0; min-width: 170px;
   box-shadow: 0 8px 32px rgba(0,0,0,0.7);
 }
@@ -1328,14 +1328,14 @@ function commitRename() {
   letter-spacing: 0.08em; color: #a0a0c0; cursor: pointer;
   transition: background 0.1s, color 0.1s;
 }
-.ctx-item:hover  { background: #20203a; color: #e0e0ee; }
+.ctx-item:hover  { background: var(--bg-hover); color: var(--text-primary); }
 .ctx-item.danger { color: #e74c3c44; }
 .ctx-item.danger:hover { color: #e74c3c; background: #1a0a0a; }
 .ctx-item.ctx-active { color: #4ecdc4; }
 .ctx-check-mark {
   display: inline-block; width: 14px; font-size: 11px; color: #4ecdc4;
 }
-.ctx-sep { height: 1px; background: #1e1e2c; margin: 3px 0; }
+.ctx-sep { height: 1px; background: var(--border-subtle); margin: 3px 0; }
 
 .ctx-sub-trigger {
   padding: 7px 16px;
@@ -1344,10 +1344,10 @@ function commitRename() {
   transition: background 0.1s, color 0.1s;
   position: relative;
 }
-.ctx-sub-trigger:hover { background: #20203a; color: #e0e0ee; }
+.ctx-sub-trigger:hover { background: var(--bg-hover); color: var(--text-primary); }
 .ctx-submenu {
   position: absolute; left: 100%; top: 0; z-index: 1100;
-  background: #181828; border: 1px solid #2a2a3c; border-radius: 6px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px;
   min-width: 150px; padding: 4px 0;
   box-shadow: 0 8px 28px rgba(0,0,0,0.75);
 }
@@ -1359,7 +1359,7 @@ function commitRename() {
   display: flex; align-items: center; justify-content: center;
 }
 .rename-box {
-  background: #181828; border: 1px solid #2a2a3c; border-radius: 8px;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
   padding: 20px 24px; display: flex; flex-direction: column; gap: 10px;
   min-width: 280px; box-shadow: 0 12px 40px rgba(0,0,0,0.8);
 }
@@ -1368,7 +1368,7 @@ function commitRename() {
   letter-spacing: 0.1em; color: #606080; text-transform: uppercase;
 }
 .rename-input {
-  background: #0e0e1c; border: 1px solid #3a3a5a; color: #e0e0ee;
+  background: var(--bg-control); border: 1px solid var(--border); color: var(--text-primary);
   padding: 7px 10px; border-radius: 5px; font-family: 'Rajdhani', sans-serif;
   font-size: 16px; font-weight: 700; letter-spacing: 0.1em; outline: none;
 }
@@ -1381,7 +1381,7 @@ function commitRename() {
 }
 .rename-ok:hover { background: #4ecdc4; color: #000; }
 .rename-cancel {
-  padding: 6px 14px; background: transparent; border: 1px solid #252535; color: #606080;
+  padding: 6px 14px; background: transparent; border: 1px solid var(--border); color: var(--text-muted);
   border-radius: 5px; cursor: pointer; font-family: 'Rajdhani', sans-serif; font-size: 13px;
 }
 .rename-cancel:hover { border-color: #4a4a6a; color: #a0a0c0; }
