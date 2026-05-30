@@ -235,10 +235,13 @@
               label="" :color="ch.color" :size="24" />
           </div>
 
-          <!-- Mixer track number -->
-          <div class="mix-num" @click.stop>
+          <!-- Mixer track assignment -->
+          <div class="mix-num" @click.stop
+            :style="{ borderColor: ch.mixerTrack > 0 ? mixerTracks[ch.mixerTrack]?.color : 'transparent' }"
+            :title="`Mixer: ${ch.mixerTrack === 0 ? 'Master' : mixerTracks[ch.mixerTrack]?.name ?? 'MIX ' + ch.mixerTrack}`">
             <input type="number" v-model.number="ch.mixerTrack"
-              min="0" max="99" class="mix-input" :title="`Mixer track ${ch.mixerTrack}`" />
+              min="0" :max="mixerTracks.length - 1" class="mix-input"
+              @change="assignChannelToMixerTrack(ch.id, ch.mixerTrack)" />
           </div>
 
           <!-- Channel name button -->
@@ -429,6 +432,7 @@ const {
   graphEditorOpen, graphParam,
   getStepVelocities, setStepVelocity, getStepPans, setStepPan, getStepPitches, setStepPitch,
   fillSteps, cloneChannel, sortChannelsBy, colorChannelsRandom, colorChannelsGradient,
+  assignChannelToMixerTrack, mixerTracks,
 } = useStudio()
 
 // ── Graph editor tabs ─────────────────────────────────────────────────────────

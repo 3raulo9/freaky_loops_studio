@@ -128,6 +128,23 @@ export const PIANO_KEYS  = Array.from({ length: PIANO_HIGH - PIANO_LOW + 1 }, (_
 export const PLAYLIST_BARS  = 32
 export const PLAYLIST_CELLS = 32
 
+export const SCALE_DEFS = {
+  major:      [0, 2, 4, 5, 7, 9, 11],
+  minor:      [0, 2, 3, 5, 7, 8, 10],
+  harmMinor:  [0, 2, 3, 5, 7, 8, 11],
+  pentatonic: [0, 2, 4, 7, 9],
+  minPent:    [0, 3, 5, 7, 10],
+  blues:      [0, 3, 5, 6, 7, 10],
+  dorian:     [0, 2, 3, 5, 7, 9, 10],
+  phrygian:   [0, 1, 3, 5, 7, 8, 10],
+  lydian:     [0, 2, 4, 6, 7, 9, 11],
+  mixolydian: [0, 2, 4, 5, 7, 9, 10],
+  locrian:    [0, 1, 3, 5, 6, 8, 10],
+  chromatic:  [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+}
+
+export const NUM_MX_INSERTS = 8
+
 export function midiToLabel(m) { return NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1) }
 export function isBlackKey(m)  { return [1, 3, 6, 8, 10].includes(m % 12) }
 
@@ -500,6 +517,21 @@ export function useStudio() {
   const gridSnap           = ref('1/4')
   const keyboardInputMode  = ref(false)
 
+  // ── Mixer tracks (0 = master, 1-8 = inserts) ─────────────────────────────
+  const mixerTracks = reactive([
+    { id: 'mx0', name: 'MASTER', color: '#e74c3c', volume: 1.0, pan: 0, muted: false, _soloed: false, eq: { low: 0, mid: 0, high: 0 } },
+    ...Array.from({ length: NUM_MX_INSERTS }, (_, i) => ({
+      id: 'mx' + (i + 1),
+      name: 'MIX ' + (i + 1),
+      color: COLORS[i % COLORS.length],
+      volume: 1.0, pan: 0, muted: false, _soloed: false,
+      eq: { low: 0, mid: 0, high: 0 },
+    }))
+  ])
+
+  // ── Scale snap state ──────────────────────────────────────────────────────
+  const snapScale = reactive({ enabled: false, tonic: 0, scale: 'major' })
+
   // ── Channel groups (named display filter groups) ───────────────────────────
   const channelGroups = reactive([])
   let _gid = 0
@@ -577,44 +609,138 @@ export function useStudio() {
   }
 
   // ── Audio engine ──────────────────────────────────────────────────────────────
-  let audioCtx     = null
-  let masterGain   = null
-  let analyserNode = null
-  let trackGains   = []
-  let trackPanners = []
-  const audioLoad  = ref(0)
-  let _loadSmooth  = 0
+  let audioCtx        = null
+  let masterGain      = null
+  let analyserNode    = null
+  let trackGains      = []
+  let trackPanners    = []
+  let mixerInsertNodes = []  // [{ eqLow, eqMid, eqHigh, gain, panner, analyser }] per insert
+  const audioLoad     = ref(0)
+  let _loadSmooth     = 0
 
   function initAudio() {
     if (!audioCtx) {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)()
       masterGain = audioCtx.createGain()
-      masterGain.gain.value = 1
+      masterGain.gain.value = mixerTracks[0].volume
       analyserNode = audioCtx.createAnalyser()
       analyserNode.fftSize = 256
       masterGain.connect(analyserNode)
       analyserNode.connect(audioCtx.destination)
+      buildMixerInserts()
     }
     if (audioCtx.state === 'suspended') audioCtx.resume()
     rebuildGains()
   }
 
+  function buildMixerInserts() {
+    mixerInsertNodes = []
+    mixerTracks.slice(1).forEach(mt => {
+      const eqLow    = audioCtx.createBiquadFilter()
+      const eqMid    = audioCtx.createBiquadFilter()
+      const eqHigh   = audioCtx.createBiquadFilter()
+      const gain     = audioCtx.createGain()
+      const panner   = audioCtx.createStereoPanner()
+      const analyser = audioCtx.createAnalyser()
+      analyser.fftSize = 256
+      eqLow.type  = 'lowshelf';   eqLow.frequency.value  = 80;   eqLow.gain.value  = mt.eq.low
+      eqMid.type  = 'peaking';    eqMid.frequency.value  = 1000; eqMid.Q.value = 1; eqMid.gain.value = mt.eq.mid
+      eqHigh.type = 'highshelf';  eqHigh.frequency.value = 8000; eqHigh.gain.value = mt.eq.high
+      gain.gain.value   = mt.muted ? 0 : mt.volume
+      panner.pan.value  = mt.pan
+      eqLow.connect(eqMid); eqMid.connect(eqHigh); eqHigh.connect(gain)
+      gain.connect(panner); panner.connect(analyser); analyser.connect(masterGain)
+      mixerInsertNodes.push({ eqLow, eqMid, eqHigh, gain, panner, analyser })
+    })
+  }
+
   function rebuildGains() {
     if (!audioCtx || !masterGain) return
+    trackGains.forEach(g => { try { g.disconnect() } catch (e) {} })
+    trackPanners.forEach(p => { try { p.disconnect() } catch (e) {} })
     trackGains = []; trackPanners = []
     channels.forEach(ch => {
       const g = audioCtx.createGain(); g.gain.value = ch.volume
       const p = audioCtx.createStereoPanner(); p.pan.value = ch.pan
-      g.connect(p); p.connect(masterGain)
+      g.connect(p)
+      const mtIdx = ch.mixerTrack || 0
+      const dest = (mtIdx >= 1 && mixerInsertNodes[mtIdx - 1])
+        ? mixerInsertNodes[mtIdx - 1].eqLow
+        : masterGain
+      p.connect(dest)
       trackGains.push(g); trackPanners.push(p)
     })
   }
 
   function syncVolumes() {
     channels.forEach((ch, i) => {
-      if (trackGains[i])   trackGains[i].gain.value  = ch.volume
-      if (trackPanners[i]) trackPanners[i].pan.value  = ch.pan
+      if (trackGains[i])   trackGains[i].gain.value = ch.volume
+      if (trackPanners[i]) trackPanners[i].pan.value = ch.pan
     })
+  }
+
+  // ── Mixer controls ────────────────────────────────────────────────────────
+  function setMixerTrackVolume(trackIdx, vol) {
+    const mt = mixerTracks[trackIdx]; if (!mt) return
+    mt.volume = vol
+    if (trackIdx === 0) { if (masterGain) masterGain.gain.value = mt.muted ? 0 : vol }
+    else { const n = mixerInsertNodes[trackIdx - 1]?.gain; if (n) n.gain.value = mt.muted ? 0 : vol }
+  }
+
+  function setMixerTrackPan(trackIdx, pan) {
+    const mt = mixerTracks[trackIdx]; if (!mt) return
+    mt.pan = pan
+    if (trackIdx > 0) { const n = mixerInsertNodes[trackIdx - 1]?.panner; if (n) n.pan.value = pan }
+  }
+
+  function setMixerEq(trackIdx, band, val) {
+    const mt = mixerTracks[trackIdx]; if (!mt || trackIdx === 0) return
+    mt.eq[band] = val
+    const nodes = mixerInsertNodes[trackIdx - 1]; if (!nodes) return
+    if (band === 'low')  nodes.eqLow.gain.value  = val
+    if (band === 'mid')  nodes.eqMid.gain.value  = val
+    if (band === 'high') nodes.eqHigh.gain.value = val
+  }
+
+  function muteMixerTrack(trackIdx) {
+    const mt = mixerTracks[trackIdx]; if (!mt) return
+    mt.muted = !mt.muted
+    if (trackIdx === 0) { if (masterGain) masterGain.gain.value = mt.muted ? 0 : mt.volume }
+    else { const n = mixerInsertNodes[trackIdx - 1]?.gain; if (n) n.gain.value = mt.muted ? 0 : mt.volume }
+  }
+
+  function soloMixerTrack(trackIdx) {
+    const already = mixerTracks[trackIdx]?._soloed
+    mixerTracks.forEach((mt, i) => {
+      mt._soloed = !already && i === trackIdx
+      mt.muted   = !already && i !== trackIdx && i !== 0
+    })
+    _syncAllMixerGains()
+  }
+
+  function renameMixerTrack(trackIdx, name) {
+    const mt = mixerTracks[trackIdx]
+    if (mt && name.trim()) mt.name = name.trim()
+  }
+
+  function _syncAllMixerGains() {
+    mixerTracks.forEach((mt, i) => {
+      const g = i === 0 ? masterGain : mixerInsertNodes[i - 1]?.gain
+      const p = i === 0 ? null : mixerInsertNodes[i - 1]?.panner
+      if (g) g.gain.value = mt.muted ? 0 : mt.volume
+      if (p) p.pan.value  = mt.pan
+    })
+  }
+
+  function getMixerAnalyser(trackIdx) {
+    if (trackIdx === 0) return analyserNode
+    return mixerInsertNodes[trackIdx - 1]?.analyser ?? null
+  }
+
+  function assignChannelToMixerTrack(channelId, trackIdx) {
+    const ch = channels.find(c => c.id === channelId); if (!ch) return
+    ch.mixerTrack = Math.max(0, Math.min(NUM_MX_INSERTS, trackIdx))
+    if (audioCtx) rebuildGains()
   }
 
   // ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -1005,6 +1131,13 @@ export function useStudio() {
     canUndo, canRedo, undoAction, redoAction,
     // Keyboard
     playNote, handleKeyDown, handleKeyUp,
+    // Mixer
+    mixerTracks,
+    setMixerTrackVolume, setMixerTrackPan, setMixerEq,
+    muteMixerTrack, soloMixerTrack, renameMixerTrack,
+    getMixerAnalyser, assignChannelToMixerTrack,
+    // Scale snap
+    snapScale,
   }
   return _store
 }
