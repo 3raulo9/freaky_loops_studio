@@ -1,4 +1,5 @@
 import { ref, reactive, computed } from 'vue'
+import { applyTheme } from '../themes.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
@@ -595,6 +596,7 @@ export function useStudio() {
   const renderModalOpen    = ref(false)
   const themeModalOpen     = ref(false)
   const currentTheme       = ref(localStorage.getItem('fls-theme') ?? 'void')
+  applyTheme(currentTheme.value)
   const kbOctave           = ref(4)
   const gridSnap           = ref('1/4')
   const keyboardInputMode  = ref(false)
