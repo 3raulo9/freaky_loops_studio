@@ -46,12 +46,14 @@
 
       <!-- Snap -->
       <span class="pr-lbl">SNAP</span>
-      <select v-model.number="snapSteps" class="pr-sel">
-        <option :value="1">1/16</option>
-        <option :value="2">1/8</option>
-        <option :value="4">1/4</option>
-        <option :value="8">1/2</option>
-        <option :value="16">1 BAR</option>
+      <select v-model.number="snapTicks" class="pr-sel">
+        <option :value="30">1/64</option>
+        <option :value="60">1/32</option>
+        <option :value="120">1/16</option>
+        <option :value="240">1/8</option>
+        <option :value="480">1/4</option>
+        <option :value="960">1/2</option>
+        <option :value="1920">1 BAR</option>
       </select>
 
       <div class="pr-sep" />
@@ -144,10 +146,10 @@
               :style="{ top: (ri * ROW_H) + 'px', height: ROW_H + 'px' }" />
 
             <!-- Vertical grid lines -->
-            <div v-for="vl in gridLines" :key="'vl' + vl.step"
+            <div v-for="vl in gridLines" :key="'vl' + vl.t"
               class="pr-vline"
               :class="{ bar: vl.isBar, beat: vl.isBeat, snap: vl.isSnap }"
-              :style="{ left: (vl.step * pxPerStep) + 'px', height: gridHeight + 'px' }" />
+              :style="{ left: (vl.t * pxPerTick) + 'px', height: gridHeight + 'px' }" />
 
             <!-- Ghost notes (other channels, behind active notes) -->
             <template v-if="ghostsEnabled">
@@ -161,7 +163,7 @@
               :class="{ selected: selectedNotes.has(idx), muted: note.muted }"
               :style="noteStyle(note)"
               @mousedown.prevent.stop="onNoteDown($event, idx)">
-              <span v-if="(note.duration ?? 1) * pxPerStep > 32" class="pr-note-lbl">
+              <span v-if="(note.durationTicks ?? TICKS_PER_STEP) * pxPerTick > 32" class="pr-note-lbl">
                 {{ midiToLabel(note.pitch) }}
               </span>
               <!-- Resize handle on right edge -->
@@ -205,10 +207,10 @@
               :style="ctrlBarStyle(note)" />
 
             <!-- Grid lines -->
-            <div v-for="vl in gridLines" :key="'cvl' + vl.step"
+            <div v-for="vl in gridLines" :key="'cvl' + vl.t"
               class="pr-ctrl-vline"
               :class="{ bar: vl.isBar, beat: vl.isBeat }"
-              :style="{ left: (vl.step * pxPerStep) + 'px' }" />
+              :style="{ left: (vl.t * pxPerTick) + 'px' }" />
 
             <!-- Playhead -->
             <div class="pr-ctrl-head" :style="{ left: playheadX + 'px' }" />
@@ -237,6 +239,9 @@ const {
 // ── Constants ──────────────────────────────────────────────────────────────────
 const ROW_H   = 16   // px per pitch row
 const RULER_H = 20   // px for time ruler
+const TICKS_PER_BEAT = 480
+const TICKS_PER_STEP = 120   // 1/16 note
+const TICKS_PER_BAR  = 1920  // 4 beats
 
 const TOOLS = [
   { key: 'draw',   icon: '✏', label: 'Draw (P) — click to add, drag to move/resize' },
@@ -251,13 +256,10 @@ const CTRL_TABS = [
   { key: 'pan',      label: 'PAN' },
 ]
 
-const STEPS_PER_BAR  = 16
-const STEPS_PER_BEAT = 4
-
 // ── UI state ───────────────────────────────────────────────────────────────────
 const tool        = ref('draw')
 const pxPerStep   = ref(40)
-const snapSteps   = ref(1)
+const snapTicks   = ref(120)   // default 1/16 note
 const ctrlTarget  = ref('velocity')
 const ghostsEnabled = ref(true)
 const prFocused   = ref(false)
@@ -295,7 +297,9 @@ const scaleSet = computed(() => {
 })
 
 // ── Grid dimensions ────────────────────────────────────────────────────────────
-const gridWidth  = computed(() => totalSteps.value * pxPerStep.value)
+const pxPerTick  = computed(() => pxPerStep.value / TICKS_PER_STEP)
+const totalTicks = computed(() => totalSteps.value * TICKS_PER_STEP)
+const gridWidth  = computed(() => totalTicks.value * pxPerTick.value)
 const gridHeight = computed(() => PIANO_KEYS.length * ROW_H)
 const playheadX  = computed(() => Math.max(0, displayStep.value) * pxPerStep.value)
 
@@ -319,11 +323,13 @@ function clearNotes() {
 // ── Ruler / grid line marks ────────────────────────────────────────────────────
 const rulerMarks = computed(() => {
   const marks = []
-  for (let s = 0; s < totalSteps.value; s += STEPS_PER_BEAT) {
-    const isBar = s % STEPS_PER_BAR === 0
+  for (let t = 0; t < totalTicks.value; t += TICKS_PER_BEAT) {
+    const isBar = t % TICKS_PER_BAR === 0
     marks.push({
-      x: s * pxPerStep.value, isBar, isBeat: !isBar,
-      label: isBar ? String(s / STEPS_PER_BAR + 1) : (pxPerStep.value >= 12 ? String(Math.floor(s / STEPS_PER_BEAT) + 1) : ''),
+      x: t * pxPerTick.value, isBar, isBeat: !isBar,
+      label: isBar
+        ? String(t / TICKS_PER_BAR + 1)
+        : (pxPerStep.value >= 12 ? String(Math.floor(t / TICKS_PER_BEAT) + 1) : ''),
     })
   }
   return marks
@@ -331,25 +337,25 @@ const rulerMarks = computed(() => {
 
 const gridLines = computed(() => {
   const lines = []
-  for (let s = 0; s <= totalSteps.value; s++) {
-    const isBar  = s % STEPS_PER_BAR === 0
-    const isBeat = !isBar && s % STEPS_PER_BEAT === 0
-    const isSnap = !isBar && !isBeat && s % snapSteps.value === 0
+  for (let t = 0; t <= totalTicks.value; t += snapTicks.value) {
+    const isBar  = t % TICKS_PER_BAR === 0
+    const isBeat = !isBar && t % TICKS_PER_BEAT === 0
+    const isSnap = !isBar && !isBeat
     if (isBar || isBeat || (isSnap && pxPerStep.value >= 16))
-      lines.push({ step: s, isBar, isBeat, isSnap })
+      lines.push({ t, isBar, isBeat, isSnap })
   }
   return lines
 })
 
 // ── Coordinate helpers ─────────────────────────────────────────────────────────
-function stepToX(s)   { return s * pxPerStep.value }
-function xToStep(x)   { return x / pxPerStep.value }
+function tickToX(t)   { return t * pxPerTick.value }
+function xToTick(x)   { return x / pxPerTick.value }
 function pitchToY(p)  { return PIANO_KEYS.indexOf(p) * ROW_H }
 function yToPitch(y)  { return PIANO_KEYS[Math.max(0, Math.min(PIANO_KEYS.length - 1, Math.floor(y / ROW_H)))] }
 
-function snapVal(s, alt = false) {
-  if (alt) return Math.max(0, s)  // Alt key bypass
-  return Math.max(0, Math.round(s / snapSteps.value) * snapSteps.value)
+function snapTick(t, alt = false) {
+  if (alt) return Math.max(0, t)
+  return Math.max(0, Math.round(t / snapTicks.value) * snapTicks.value)
 }
 function snapPitch(p) {
   if (!snapScale.enabled || scaleSet.value.has(p % 12)) return p
@@ -377,8 +383,8 @@ function hitTest(x, y) {
   const notes = currentNotes.value
   for (let i = notes.length - 1; i >= 0; i--) {
     const n = notes[i]
-    const nx = stepToX(n.step)
-    const nw = Math.max(4, (n.duration ?? 1) * pxPerStep.value)
+    const nx = tickToX(n.startTick)
+    const nw = Math.max(4, (n.durationTicks ?? TICKS_PER_STEP) * pxPerTick.value)
     const ny = pitchToY(n.pitch)
     if (x >= nx && x < nx + nw && y >= ny && y < ny + ROW_H) return i
   }
@@ -387,12 +393,12 @@ function hitTest(x, y) {
 
 // ── Note styling ───────────────────────────────────────────────────────────────
 function noteStyle(note) {
-  const dur = Math.max(snapSteps.value, note.duration ?? 1)
+  const durTicks = Math.max(snapTicks.value, note.durationTicks ?? TICKS_PER_STEP)
   const color = note.muted ? '#484860' : targetCh.value.color
   return {
-    left: stepToX(note.step) + 'px',
+    left: tickToX(note.startTick) + 'px',
     top:  pitchToY(note.pitch) + 'px',
-    width: Math.max(4, dur * pxPerStep.value - 1) + 'px',
+    width: Math.max(4, durTicks * pxPerTick.value - 1) + 'px',
     height: (ROW_H - 1) + 'px',
     background: color,
     borderColor: note.muted ? '#333348' : `color-mix(in srgb, ${color} 55%, #000)`,
@@ -400,11 +406,11 @@ function noteStyle(note) {
 }
 
 function ghostStyle(note) {
-  const dur = note.duration ?? 1
+  const durTicks = note.durationTicks ?? TICKS_PER_STEP
   return {
-    left: stepToX(note.step) + 'px',
+    left: tickToX(note.startTick) + 'px',
     top:  pitchToY(note.pitch) + 'px',
-    width: Math.max(4, dur * pxPerStep.value - 1) + 'px',
+    width: Math.max(4, durTicks * pxPerTick.value - 1) + 'px',
     height: (ROW_H - 1) + 'px',
     background: note._color + '30',
     border: `1px solid ${note._color}55`,
@@ -412,8 +418,8 @@ function ghostStyle(note) {
 }
 
 function ctrlBarStyle(note) {
-  const nw = Math.max(3, snapSteps.value * pxPerStep.value - 2)
-  const base = { position: 'absolute', left: stepToX(note.step) + 'px', width: nw + 'px' }
+  const nw = Math.max(3, snapTicks.value * pxPerTick.value - 2)
+  const base = { position: 'absolute', left: tickToX(note.startTick) + 'px', width: nw + 'px' }
   const color = targetCh.value.color
 
   if (ctrlTarget.value === 'velocity') {
@@ -482,7 +488,7 @@ function finalizeRubberBand() {
   const minY = Math.min(y1, y2), maxY = Math.max(y1, y2)
   const newSel = new Set()
   currentNotes.value.forEach((n, i) => {
-    const nx = stepToX(n.step), nw = (n.duration ?? 1) * pxPerStep.value
+    const nx = tickToX(n.startTick), nw = (n.durationTicks ?? TICKS_PER_STEP) * pxPerTick.value
     const ny = pitchToY(n.pitch)
     if (nx < maxX && nx + nw > minX && ny < maxY && ny + ROW_H > minY) newSel.add(i)
   })
@@ -507,14 +513,14 @@ function doRightDelete(x, y) {
 
 function doPaint(x, y) {
   if (!paintStroke || y < 0 || y > gridHeight.value) return
-  const step = snapVal(xToStep(x))
-  if (step >= totalSteps.value) return
-  const key = `${step}`
+  const startTick = snapTick(xToTick(x))
+  if (startTick >= totalTicks.value) return
+  const key = `${startTick}`
   if (paintStroke.painted.has(key)) return
   paintStroke.painted.add(key)
   const notes = getPatData(targetChId.value).pianoNotes
-  if (!notes.some(n => Math.round(n.step) === step && n.pitch === paintStroke.pitch)) {
-    notes.push({ step, pitch: paintStroke.pitch, velocity: 0.8, duration: snapSteps.value })
+  if (!notes.some(n => Math.round(n.startTick) === startTick && n.pitch === paintStroke.pitch)) {
+    notes.push({ startTick, pitch: paintStroke.pitch, velocity: 0.8, durationTicks: snapTicks.value })
     playNote(targetCh.value, paintStroke.pitch)
   }
 }
@@ -577,7 +583,7 @@ function onGridDown(e) {
         type: 'select-move',
         startClientX: e.clientX, startClientY: e.clientY,
         origPositions: [...selectedNotes.value].map(i => ({
-          i, step: notes[i].step, pitchIdx: PIANO_KEYS.indexOf(notes[i].pitch),
+          i, startTick: notes[i].startTick, pitchIdx: PIANO_KEYS.indexOf(notes[i].pitch),
         })),
       }
     } else {
@@ -608,7 +614,7 @@ function onGridDown(e) {
         type: 'select-move',
         startClientX: e.clientX, startClientY: e.clientY,
         origPositions: [...selectedNotes.value].map(i => ({
-          i, step: notes[i].step, pitchIdx: PIANO_KEYS.indexOf(notes[i].pitch),
+          i, startTick: notes[i].startTick, pitchIdx: PIANO_KEYS.indexOf(notes[i].pitch),
         })),
       }
     } else {
@@ -616,25 +622,25 @@ function onGridDown(e) {
       drag = {
         type: 'move', noteIdx: hitIdx,
         startClientX: e.clientX, startClientY: e.clientY,
-        origStep: notes[hitIdx].step, origPitch: notes[hitIdx].pitch,
-        origDuration: notes[hitIdx].duration ?? 1,
+        origStartTick: notes[hitIdx].startTick, origPitch: notes[hitIdx].pitch,
+        origDurationTicks: notes[hitIdx].durationTicks ?? TICKS_PER_STEP,
       }
     }
     return
   }
 
   // Click on empty space → create note
-  const step  = snapVal(xToStep(x), e.altKey)
+  const startTick = snapTick(xToTick(x), e.altKey)
   const pitch = snapPitch(yToPitch(y))
-  if (step >= totalSteps.value) return
+  if (startTick >= totalTicks.value) return
   pushUndo()
   selectedNotes.value = new Set()
   const notes = getPatData(targetChId.value).pianoNotes
-  notes.push({ step, pitch, velocity: 0.8, duration: snapSteps.value })
+  notes.push({ startTick, pitch, velocity: 0.8, durationTicks: snapTicks.value })
   playNote(targetCh.value, pitch)
   drag = {
     type: 'create', noteIdx: notes.length - 1,
-    startClientX: e.clientX, origDuration: snapSteps.value,
+    startClientX: e.clientX, origDurationTicks: snapTicks.value,
   }
 }
 
@@ -660,7 +666,7 @@ function onNoteDown(e, idx) {
       type: 'select-move',
       startClientX: e.clientX, startClientY: e.clientY,
       origPositions: [...selectedNotes.value].map(i => ({
-        i, step: notes[i].step, pitchIdx: PIANO_KEYS.indexOf(notes[i].pitch),
+        i, startTick: notes[i].startTick, pitchIdx: PIANO_KEYS.indexOf(notes[i].pitch),
       })),
     }
   } else {
@@ -668,7 +674,7 @@ function onNoteDown(e, idx) {
     drag = {
       type: 'move', noteIdx: idx,
       startClientX: e.clientX, startClientY: e.clientY,
-      origStep: note.step, origPitch: note.pitch, origDuration: note.duration ?? 1,
+      origStartTick: note.startTick, origPitch: note.pitch, origDurationTicks: note.durationTicks ?? TICKS_PER_STEP,
     }
   }
 }
@@ -678,7 +684,7 @@ function onResizeDown(e, idx) {
   const notes = getPatData(targetChId.value).pianoNotes
   if (!notes[idx]) return
   pushUndo()
-  drag = { type: 'resize', noteIdx: idx, startClientX: e.clientX, origDuration: notes[idx].duration ?? 1 }
+  drag = { type: 'resize', noteIdx: idx, startClientX: e.clientX, origDurationTicks: notes[idx].durationTicks ?? TICKS_PER_STEP }
 }
 
 // ── Global mouse move / up ─────────────────────────────────────────────────────
@@ -710,9 +716,9 @@ function onWindowMouseMove(e) {
     const dxPx = e.clientX - drag.startClientX
     const dyPx = e.clientY - drag.startClientY
     const dRows = Math.round(dyPx / ROW_H)
-    drag.origPositions.forEach(({ i, step: os, pitchIdx: opi }) => {
+    drag.origPositions.forEach(({ i, startTick: os, pitchIdx: opi }) => {
       const n = notes[i]; if (!n) return
-      n.step  = snapVal(os + dxPx / pxPerStep.value, alt)
+      n.startTick = snapTick(os + dxPx / pxPerTick.value, alt)
       const np = Math.max(0, Math.min(PIANO_KEYS.length - 1, opi + dRows))
       n.pitch = PIANO_KEYS[np]
     })
@@ -723,17 +729,17 @@ function onWindowMouseMove(e) {
   const dxPx = e.clientX - drag.startClientX
 
   if (drag.type === 'create' || drag.type === 'resize') {
-    const dSteps = dxPx / pxPerStep.value
-    note.duration = alt
-      ? Math.max(0.1, drag.origDuration + dSteps)
-      : Math.max(snapSteps.value, snapVal(drag.origDuration + dSteps))
+    const dTicks = dxPx / pxPerTick.value
+    note.durationTicks = alt
+      ? Math.max(1, drag.origDurationTicks + dTicks)
+      : Math.max(snapTicks.value, snapTick(drag.origDurationTicks + dTicks))
     return
   }
 
   if (drag.type === 'move') {
     const dyPx  = e.clientY - drag.startClientY
     const dRows = Math.round(dyPx / ROW_H)
-    note.step  = snapVal(drag.origStep + dxPx / pxPerStep.value, alt)
+    note.startTick = snapTick(drag.origStartTick + dxPx / pxPerTick.value, alt)
     const opi  = PIANO_KEYS.indexOf(drag.origPitch)
     const npi  = Math.max(0, Math.min(PIANO_KEYS.length - 1, opi + dRows))
     note.pitch = snapPitch(PIANO_KEYS[npi])
@@ -784,7 +790,7 @@ function applyCtrlEdit(e) {
   // Find note whose bar center is closest
   let best = -1, bestDist = Infinity
   notes.forEach((n, i) => {
-    const nx = stepToX(n.step), nw = Math.max(4, snapSteps.value * pxPerStep.value)
+    const nx = tickToX(n.startTick), nw = Math.max(4, snapTicks.value * pxPerTick.value)
     const d = Math.abs(absX - nx)
     if (absX >= nx && absX <= nx + nw && d < bestDist) { bestDist = d; best = i }
   })
