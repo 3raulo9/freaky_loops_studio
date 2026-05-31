@@ -130,7 +130,7 @@ export function playFMBass(ctx, time, {
 
 // ─── FM ORGAN ────────────────────────────────────────────────────────────────
 export function playFMOrgan(ctx, time, {
-  pitch = 60, decay = 0.6, draw = 0.5, velocity = 1,
+  pitch = 60, decay = 0.6, draw = 0.5, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
@@ -142,9 +142,16 @@ export function playFMOrgan(ctx, time, {
   mix.gain.value = velocity * 0.3
 
   const env = ctx.createGain()
-  env.gain.setValueAtTime(velocity * 0.8, time)
-  env.gain.setValueAtTime(velocity * 0.8, time + Math.max(decay - 0.02, 0.01))
-  env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    env.gain.setValueAtTime(velocity * 0.8, time)
+    const holdEnd = Math.max(time + gate - decay, time + 0.01)
+    env.gain.setValueAtTime(velocity * 0.8, holdEnd)
+    env.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    env.gain.setValueAtTime(velocity * 0.8, time)
+    env.gain.setValueAtTime(velocity * 0.8, time + Math.max(decay - 0.02, 0.01))
+    env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  }
   env.connect(mix)
 
   const partials = [
@@ -153,7 +160,7 @@ export function playFMOrgan(ctx, time, {
     { freqMult: 3, modRatio: 3, modIdx: 0.08, level: draw * 0.4 },
   ]
 
-  const dur = decay + 0.1
+  const dur = gate !== null ? gate + decay + 0.1 : decay + 0.1
   partials.forEach(({ freqMult, modRatio, modIdx, level }) => {
     const carrier   = ctx.createOscillator()
     const modulator = ctx.createOscillator()
@@ -178,7 +185,7 @@ export function playFMOrgan(ctx, time, {
 
 // ─── FM BRASS ────────────────────────────────────────────────────────────────
 export function playFMBrass(ctx, time, {
-  pitch = 60, decay = 0.7, bright = 0.7, velocity = 1,
+  pitch = 60, decay = 0.7, bright = 0.7, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
@@ -200,16 +207,28 @@ export function playFMBrass(ctx, time, {
   modDepth.gain.setValueAtTime(0.001, time)
   modDepth.gain.linearRampToValueAtTime(peakDepth, time + 0.018)
   modDepth.gain.exponentialRampToValueAtTime(bodyDepth, time + 0.06)
-  modDepth.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const modHoldEnd = Math.max(time + gate - decay, time + 0.07)
+    modDepth.gain.setValueAtTime(bodyDepth, modHoldEnd)
+    modDepth.gain.exponentialRampToValueAtTime(0.001, time + gate + decay)
+  } else {
+    modDepth.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  }
 
   env.gain.setValueAtTime(0.001, time)
   env.gain.linearRampToValueAtTime(velocity * 0.8, time + 0.02)
-  env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const holdEnd = Math.max(time + gate - decay, time + 0.03)
+    env.gain.setValueAtTime(velocity * 0.7, holdEnd)
+    env.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  }
 
   modulator.connect(modDepth); modDepth.connect(carrier.frequency)
   carrier.connect(env)
 
-  const dur = decay + 0.1
+  const dur = gate !== null ? gate + decay + 0.1 : decay + 0.1
   modulator.start(time); modulator.stop(time + dur)
   carrier.start(time);   carrier.stop(time + dur)
 
@@ -305,7 +324,7 @@ export function playFMClav(ctx, time, {
 
 // ─── FM PAD ──────────────────────────────────────────────────────────────────
 export function playFMPad(ctx, time, {
-  pitch = 60, decay = 2.5, depth: padDepth = 0.5, velocity = 1,
+  pitch = 60, decay = 2.5, depth: padDepth = 0.5, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
@@ -317,10 +336,16 @@ export function playFMPad(ctx, time, {
   const attack = 0.25
   masterGain.gain.setValueAtTime(0.001, time)
   masterGain.gain.linearRampToValueAtTime(velocity * 0.55, time + attack)
-  masterGain.gain.setValueAtTime(velocity * 0.55, time + decay - 0.25)
-  masterGain.gain.linearRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const holdEnd = Math.max(time + gate - decay, time + attack)
+    masterGain.gain.setValueAtTime(velocity * 0.55, holdEnd)
+    masterGain.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    masterGain.gain.setValueAtTime(velocity * 0.55, time + decay - 0.25)
+    masterGain.gain.linearRampToValueAtTime(0.001, time + decay)
+  }
 
-  const dur = decay + 0.15
+  const dur = gate !== null ? gate + decay + 0.15 : decay + 0.15
   const detuneAmount = [0, 0.5, -0.5]
 
   detuneAmount.forEach((detune, i) => {
@@ -394,7 +419,7 @@ export function playFMPluck(ctx, time, {
 
 // ─── FM FLUTE ────────────────────────────────────────────────────────────────
 export function playFMFlute(ctx, time, {
-  pitch = 72, decay = 1.2, breath = 0.4, velocity = 1,
+  pitch = 72, decay = 1.2, breath = 0.4, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
@@ -422,16 +447,23 @@ export function playFMFlute(ctx, time, {
   const attack = 0.08
   env.gain.setValueAtTime(0.001, time)
   env.gain.linearRampToValueAtTime(velocity * 0.65, time + attack)
-  env.gain.setValueAtTime(velocity * 0.65, time + decay - 0.08)
-  env.gain.linearRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const holdEnd = Math.max(time + gate - decay, time + attack)
+    env.gain.setValueAtTime(velocity * 0.65, holdEnd)
+    env.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    env.gain.setValueAtTime(velocity * 0.65, time + decay - 0.08)
+    env.gain.linearRampToValueAtTime(0.001, time + decay)
+  }
 
   vibrato.connect(vibratoG); vibratoG.connect(carrier.frequency)
   modulator.connect(modDepth); modDepth.connect(carrier.frequency)
   carrier.connect(env)
 
+  const dur = gate !== null ? gate + decay + 0.15 : decay + 0.15
   if (breath > 0.05) {
-    const nLen = decay + 0.2
-    const buf  = ctx.createBuffer(1, ctx.sampleRate * nLen, ctx.sampleRate)
+    const nLen = dur
+    const buf  = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * nLen), ctx.sampleRate)
     const data = buf.getChannelData(0)
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1
     const noise  = ctx.createBufferSource(); noise.buffer = buf
@@ -440,12 +472,17 @@ export function playFMFlute(ctx, time, {
     const noiseEnv = ctx.createGain()
     noiseEnv.gain.setValueAtTime(0.001, time)
     noiseEnv.gain.linearRampToValueAtTime(breath * 0.07 * velocity, time + attack)
-    noiseEnv.gain.exponentialRampToValueAtTime(0.001, time + decay)
+    if (gate !== null) {
+      const noiseHoldEnd = Math.max(time + gate - decay, time + attack)
+      noiseEnv.gain.setValueAtTime(breath * 0.07 * velocity, noiseHoldEnd)
+      noiseEnv.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+    } else {
+      noiseEnv.gain.exponentialRampToValueAtTime(0.001, time + decay)
+    }
     noise.connect(nbpf); nbpf.connect(noiseEnv); noiseEnv.connect(env)
     noise.start(time); noise.stop(time + nLen)
   }
 
-  const dur = decay + 0.15
   vibrato.start(time);   vibrato.stop(time + dur)
   modulator.start(time); modulator.stop(time + dur)
   carrier.start(time);   carrier.stop(time + dur)
@@ -658,7 +695,7 @@ export function playFMXylophone(ctx, time, {
 
 // ─── FM STRINGS ──────────────────────────────────────────────────────────────
 export function playFMStrings(ctx, time, {
-  pitch = 60, decay = 3.0, ensemble = 0.5, velocity = 1,
+  pitch = 60, decay = 3.0, ensemble = 0.5, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
@@ -666,13 +703,19 @@ export function playFMStrings(ctx, time, {
   dest = dest ?? ctx.destination
   const freq = midiToFreq(pitch)
   const attack = 0.2 + ensemble * 0.15
-  const dur = decay + 0.2
+  const dur = gate !== null ? gate + decay + 0.2 : decay + 0.2
 
   const masterGain = ctx.createGain()
   masterGain.gain.setValueAtTime(0.001, time)
   masterGain.gain.linearRampToValueAtTime(velocity * 0.5, time + attack)
-  masterGain.gain.setValueAtTime(velocity * 0.5, time + decay - 0.2)
-  masterGain.gain.linearRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const holdEnd = Math.max(time + gate - decay, time + attack)
+    masterGain.gain.setValueAtTime(velocity * 0.5, holdEnd)
+    masterGain.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    masterGain.gain.setValueAtTime(velocity * 0.5, time + decay - 0.2)
+    masterGain.gain.linearRampToValueAtTime(0.001, time + decay)
+  }
 
   ;[-8, -4, 0, 4, 8].forEach(cents => {
     const carrier   = ctx.createOscillator()
@@ -696,7 +739,7 @@ export function playFMStrings(ctx, time, {
 
 // ─── FM CELLO ────────────────────────────────────────────────────────────────
 export function playFMCello(ctx, time, {
-  pitch = 48, decay = 1.5, bow = 0.5, velocity = 1,
+  pitch = 48, decay = 1.5, bow = 0.5, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
@@ -704,7 +747,7 @@ export function playFMCello(ctx, time, {
   dest = dest ?? ctx.destination
   const freq = midiToFreq(pitch)
   const attack = 0.12 + bow * 0.1
-  const dur = decay + 0.15
+  const dur = gate !== null ? gate + decay + 0.15 : decay + 0.15
 
   const carrier   = ctx.createOscillator()
   const modulator = ctx.createOscillator()
@@ -721,8 +764,14 @@ export function playFMCello(ctx, time, {
   modDepth.gain.setValueAtTime(0.001, time)
   modDepth.gain.linearRampToValueAtTime(depth * 1.5, time + 0.02)
   modDepth.gain.linearRampToValueAtTime(depth, time + attack)
-  modDepth.gain.setValueAtTime(depth, time + decay - 0.1)
-  modDepth.gain.linearRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const modHoldEnd = Math.max(time + gate - decay, time + attack)
+    modDepth.gain.setValueAtTime(depth, modHoldEnd)
+    modDepth.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    modDepth.gain.setValueAtTime(depth, time + decay - 0.1)
+    modDepth.gain.linearRampToValueAtTime(0.001, time + decay)
+  }
 
   vibrato.type = 'sine'; vibrato.frequency.value = 5.8
   vibratoG.gain.setValueAtTime(0, time + 0.3)
@@ -730,8 +779,14 @@ export function playFMCello(ctx, time, {
 
   env.gain.setValueAtTime(0.001, time)
   env.gain.linearRampToValueAtTime(velocity * 0.7, time + attack)
-  env.gain.setValueAtTime(velocity * 0.7, time + decay - 0.1)
-  env.gain.linearRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const holdEnd = Math.max(time + gate - decay, time + attack)
+    env.gain.setValueAtTime(velocity * 0.7, holdEnd)
+    env.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    env.gain.setValueAtTime(velocity * 0.7, time + decay - 0.1)
+    env.gain.linearRampToValueAtTime(0.001, time + decay)
+  }
 
   vibrato.connect(vibratoG); vibratoG.connect(carrier.frequency)
   modulator.connect(modDepth); modDepth.connect(carrier.frequency)
@@ -746,14 +801,14 @@ export function playFMCello(ctx, time, {
 
 // ─── FM TRUMPET ──────────────────────────────────────────────────────────────
 export function playFMTrumpet(ctx, time, {
-  pitch = 67, decay = 0.8, bright = 0.8, velocity = 1,
+  pitch = 67, decay = 0.8, bright = 0.8, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
 } = {}, dest) {
   dest = dest ?? ctx.destination
   const freq = midiToFreq(pitch)
-  const dur = decay + 0.1
+  const dur = gate !== null ? gate + decay + 0.1 : decay + 0.1
 
   const carrier    = ctx.createOscillator()
   const modulator  = ctx.createOscillator()
@@ -772,14 +827,26 @@ export function playFMTrumpet(ctx, time, {
   modDepth.gain.setValueAtTime(0.001, time)
   modDepth.gain.linearRampToValueAtTime(peak1, time + 0.015)
   modDepth.gain.exponentialRampToValueAtTime(body1, time + 0.06)
-  modDepth.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const modHoldEnd = Math.max(time + gate - decay, time + 0.07)
+    modDepth.gain.setValueAtTime(body1, modHoldEnd)
+    modDepth.gain.exponentialRampToValueAtTime(0.001, time + gate + decay)
+  } else {
+    modDepth.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  }
 
   modDepth2.gain.setValueAtTime((1 + bright * 4) * freq * 2, time)
   modDepth2.gain.exponentialRampToValueAtTime(0.001, time + 0.05)
 
   env.gain.setValueAtTime(0.001, time)
   env.gain.linearRampToValueAtTime(velocity * 0.85, time + 0.018)
-  env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const holdEnd = Math.max(time + gate - decay, time + 0.02)
+    env.gain.setValueAtTime(velocity * 0.75, holdEnd)
+    env.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  }
 
   modulator.connect(modDepth);   modDepth.connect(carrier.frequency)
   modulator2.connect(modDepth2); modDepth2.connect(carrier.frequency)
@@ -795,7 +862,7 @@ export function playFMTrumpet(ctx, time, {
 // ─── FM CLARINET ─────────────────────────────────────────────────────────────
 // 1:2 ratio emphasises odd harmonics, giving the hollow clarinet timbre.
 export function playFMClarinet(ctx, time, {
-  pitch = 60, decay = 1.0, reedy = 0.5, velocity = 1,
+  pitch = 60, decay = 1.0, reedy = 0.5, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
@@ -803,7 +870,7 @@ export function playFMClarinet(ctx, time, {
   dest = dest ?? ctx.destination
   const freq = midiToFreq(pitch)
   const attack = 0.06
-  const dur = decay + 0.1
+  const dur = gate !== null ? gate + decay + 0.1 : decay + 0.1
 
   const carrier   = ctx.createOscillator()
   const modulator = ctx.createOscillator()
@@ -817,13 +884,25 @@ export function playFMClarinet(ctx, time, {
   const depth = (0.5 + reedy * 3) * freq * 2
   modDepth.gain.setValueAtTime(0.001, time)
   modDepth.gain.linearRampToValueAtTime(depth, time + attack)
-  modDepth.gain.setValueAtTime(depth, time + decay - 0.1)
-  modDepth.gain.linearRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const modHoldEnd = Math.max(time + gate - decay, time + attack)
+    modDepth.gain.setValueAtTime(depth, modHoldEnd)
+    modDepth.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    modDepth.gain.setValueAtTime(depth, time + decay - 0.1)
+    modDepth.gain.linearRampToValueAtTime(0.001, time + decay)
+  }
 
   env.gain.setValueAtTime(0.001, time)
   env.gain.linearRampToValueAtTime(velocity * 0.65, time + attack)
-  env.gain.setValueAtTime(velocity * 0.65, time + decay - 0.08)
-  env.gain.linearRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const holdEnd = Math.max(time + gate - decay, time + attack)
+    env.gain.setValueAtTime(velocity * 0.65, holdEnd)
+    env.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    env.gain.setValueAtTime(velocity * 0.65, time + decay - 0.08)
+    env.gain.linearRampToValueAtTime(0.001, time + decay)
+  }
 
   modulator.connect(modDepth); modDepth.connect(carrier.frequency)
   carrier.connect(env)
@@ -971,14 +1050,14 @@ export function playFMGlocken(ctx, time, {
 
 // ─── FM WOBBLE BASS ──────────────────────────────────────────────────────────
 export function playFMWobble(ctx, time, {
-  pitch = 36, decay = 0.6, rate = 0.5, velocity = 1,
+  pitch = 36, decay = 0.6, rate = 0.5, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
 } = {}, dest) {
   dest = dest ?? ctx.destination
   const freq = midiToFreq(pitch)
-  const dur = decay + 0.1
+  const dur = gate !== null ? gate + decay + 0.1 : decay + 0.1
 
   const carrier   = ctx.createOscillator()
   const modulator = ctx.createOscillator()
@@ -996,7 +1075,13 @@ export function playFMWobble(ctx, time, {
   lfoGain.gain.value  = 5 * freq * rate
 
   env.gain.setValueAtTime(velocity * 0.85, time)
-  env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const holdEnd = Math.max(time + gate - decay, time + 0.01)
+    env.gain.setValueAtTime(velocity * 0.85, holdEnd)
+    env.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  }
 
   lfo.connect(lfoGain); lfoGain.connect(modDepth.gain)
   modulator.connect(modDepth); modDepth.connect(carrier.frequency)
@@ -1011,7 +1096,7 @@ export function playFMWobble(ctx, time, {
 
 // ─── FM CHOIR ────────────────────────────────────────────────────────────────
 export function playFMChoir(ctx, time, {
-  pitch = 60, decay = 2.5, vowel = 0.5, velocity = 1,
+  pitch = 60, decay = 2.5, vowel = 0.5, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
@@ -1019,13 +1104,19 @@ export function playFMChoir(ctx, time, {
   dest = dest ?? ctx.destination
   const freq = midiToFreq(pitch)
   const attack = 0.3
-  const dur = decay + 0.2
+  const dur = gate !== null ? gate + decay + 0.2 : decay + 0.2
 
   const masterGain = ctx.createGain()
   masterGain.gain.setValueAtTime(0.001, time)
   masterGain.gain.linearRampToValueAtTime(velocity * 0.5, time + attack)
-  masterGain.gain.setValueAtTime(velocity * 0.5, time + decay - 0.2)
-  masterGain.gain.linearRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const holdEnd = Math.max(time + gate - decay, time + attack)
+    masterGain.gain.setValueAtTime(velocity * 0.5, holdEnd)
+    masterGain.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    masterGain.gain.setValueAtTime(velocity * 0.5, time + decay - 0.2)
+    masterGain.gain.linearRampToValueAtTime(0.001, time + decay)
+  }
 
   ;[-8, -4, 0, 4, 8].forEach(cents => {
     const carrier   = ctx.createOscillator()
@@ -1188,14 +1279,14 @@ export function playFMDistGtr(ctx, time, {
 // ─── FM MOOG ─────────────────────────────────────────────────────────────────
 // Sawtooth carrier with sub-octave FM and resonant filter sweep.
 export function playFMMoog(ctx, time, {
-  pitch = 48, decay = 0.7, cutoff = 0.5, velocity = 1,
+  pitch = 48, decay = 0.7, cutoff = 0.5, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
 } = {}, dest) {
   dest = dest ?? ctx.destination
   const freq = midiToFreq(pitch)
-  const dur = decay + 0.1
+  const dur = gate !== null ? gate + decay + 0.1 : decay + 0.1
 
   const carrier   = ctx.createOscillator()
   const modulator = ctx.createOscillator()
@@ -1210,11 +1301,17 @@ export function playFMMoog(ctx, time, {
   const depth = (1 + cutoff * 3) * freq * 0.5
   modDepth.gain.setValueAtTime(depth * 3, time)
   modDepth.gain.exponentialRampToValueAtTime(depth, time + 0.015)
-  modDepth.gain.exponentialRampToValueAtTime(0.001, time + decay * 0.8)
+  modDepth.gain.exponentialRampToValueAtTime(0.001, time + (gate !== null ? gate * 0.8 + decay : decay * 0.8))
 
   env.gain.setValueAtTime(0.001, time)
   env.gain.linearRampToValueAtTime(velocity * 0.8, time + 0.01)
-  env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  if (gate !== null) {
+    const holdEnd = Math.max(time + gate - decay, time + 0.01)
+    env.gain.setValueAtTime(velocity * 0.7, holdEnd)
+    env.gain.linearRampToValueAtTime(0.001, time + gate + decay * 0.5)
+  } else {
+    env.gain.exponentialRampToValueAtTime(0.001, time + decay)
+  }
 
   lpFilter.type = 'lowpass'; lpFilter.Q.value = 5 + cutoff * 8
   lpFilter.frequency.setValueAtTime(freq * (2 + cutoff * 8), time)
