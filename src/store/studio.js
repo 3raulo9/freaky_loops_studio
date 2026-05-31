@@ -7,6 +7,11 @@ import {
   playFMBell, playFMRhodes, playFMBass, playFMOrgan, playFMBrass,
   playFMMarimba, playFMClav, playFMPad, playFMPluck, playFMFlute, playFMMetal,
   playFMGuitar, playFMBassGuitar,
+  playFMVibe, playFMXylophone, playFMStrings, playFMCello, playFMTrumpet,
+  playFMClarinet, playFMSitar, playFMSteelDrum, playFMGlocken, playFMWobble,
+  playFMChoir, playFMWurly, playFMKalimba, playFMDistGtr, playFMMoog,
+  playFMTimpani, playFMCeleste, playFMKoto, playFMHarmonica, playFMOboe,
+  playFMTabla,
 } from '../audio/fm.js'
 
 // ─── Function key map (for project serialization) ─────────────────────────────
@@ -29,6 +34,27 @@ export const FN_KEY_MAP = new Map([
   [playFMMetal,       'fm:metal'],
   [playFMGuitar,      'fm:guitar'],
   [playFMBassGuitar,  'fm:bassguitar'],
+  [playFMVibe,        'fm:vibe'],
+  [playFMXylophone,   'fm:xylophone'],
+  [playFMStrings,     'fm:strings'],
+  [playFMCello,       'fm:cello'],
+  [playFMTrumpet,     'fm:trumpet'],
+  [playFMClarinet,    'fm:clarinet'],
+  [playFMSitar,       'fm:sitar'],
+  [playFMSteelDrum,   'fm:steeldrum'],
+  [playFMGlocken,     'fm:glocken'],
+  [playFMWobble,      'fm:wobble'],
+  [playFMChoir,       'fm:choir'],
+  [playFMWurly,       'fm:wurly'],
+  [playFMKalimba,     'fm:kalimba'],
+  [playFMDistGtr,     'fm:distgtr'],
+  [playFMMoog,        'fm:moog'],
+  [playFMTimpani,     'fm:timpani'],
+  [playFMCeleste,     'fm:celeste'],
+  [playFMKoto,        'fm:koto'],
+  [playFMHarmonica,   'fm:harmonica'],
+  [playFMOboe,        'fm:oboe'],
+  [playFMTabla,       'fm:tabla'],
 ])
 
 export const FN_FROM_KEY = {
@@ -50,6 +76,27 @@ export const FN_FROM_KEY = {
   'fm:metal':        playFMMetal,
   'fm:guitar':       playFMGuitar,
   'fm:bassguitar':   playFMBassGuitar,
+  'fm:vibe':         playFMVibe,
+  'fm:xylophone':    playFMXylophone,
+  'fm:strings':      playFMStrings,
+  'fm:cello':        playFMCello,
+  'fm:trumpet':      playFMTrumpet,
+  'fm:clarinet':     playFMClarinet,
+  'fm:sitar':        playFMSitar,
+  'fm:steeldrum':    playFMSteelDrum,
+  'fm:glocken':      playFMGlocken,
+  'fm:wobble':       playFMWobble,
+  'fm:choir':        playFMChoir,
+  'fm:wurly':        playFMWurly,
+  'fm:kalimba':      playFMKalimba,
+  'fm:distgtr':      playFMDistGtr,
+  'fm:moog':         playFMMoog,
+  'fm:timpani':      playFMTimpani,
+  'fm:celeste':      playFMCeleste,
+  'fm:koto':         playFMKoto,
+  'fm:harmonica':    playFMHarmonica,
+  'fm:oboe':         playFMOboe,
+  'fm:tabla':        playFMTabla,
 }
 
 // ─── FM channel presets ────────────────────────────────────────────────────────
@@ -183,6 +230,216 @@ export const FM_PRESETS = {
       { key: 'pick',  label: 'PICK',  min: 0,   max: 1,   decimals: 2 },
     ],
     fn: playFMBassGuitar,
+  },
+  vibe: {
+    name: 'FM VIBRAPHONE', color: '#a8e6cf',
+    params: { pitch: 65, decay: 2.0, hardness: 0.4 },
+    knobs: [
+      { key: 'pitch',    label: 'NOTE',  min: 36,  max: 96,  decimals: 0 },
+      { key: 'decay',    label: 'DECAY', min: 0.5, max: 5.0, decimals: 2 },
+      { key: 'hardness', label: 'HARD',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMVibe,
+  },
+  xylophone: {
+    name: 'FM XYLOPHONE', color: '#dda0dd',
+    params: { pitch: 72, decay: 0.18, hardness: 0.6 },
+    knobs: [
+      { key: 'pitch',    label: 'NOTE',  min: 48,  max: 96,  decimals: 0 },
+      { key: 'decay',    label: 'DECAY', min: 0.05, max: 0.6, decimals: 2 },
+      { key: 'hardness', label: 'HARD',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMXylophone,
+  },
+  strings: {
+    name: 'FM STRINGS', color: '#6c9bd2',
+    params: { pitch: 60, decay: 3.0, ensemble: 0.5 },
+    knobs: [
+      { key: 'pitch',    label: 'NOTE',  min: 24,  max: 96,  decimals: 0 },
+      { key: 'decay',    label: 'DECAY', min: 0.5, max: 6.0, decimals: 2 },
+      { key: 'ensemble', label: 'ENS',   min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMStrings,
+  },
+  cello: {
+    name: 'FM CELLO', color: '#8b6914',
+    params: { pitch: 48, decay: 1.5, bow: 0.5 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 72,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.2, max: 4.0, decimals: 2 },
+      { key: 'bow',   label: 'BOW',   min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMCello,
+  },
+  trumpet: {
+    name: 'FM TRUMPET', color: '#cc4400',
+    params: { pitch: 67, decay: 0.8, bright: 0.8 },
+    knobs: [
+      { key: 'pitch',  label: 'NOTE',  min: 48,  max: 96,  decimals: 0 },
+      { key: 'decay',  label: 'DECAY', min: 0.1, max: 2.0, decimals: 2 },
+      { key: 'bright', label: 'BRITE', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMTrumpet,
+  },
+  clarinet: {
+    name: 'FM CLARINET', color: '#5c8a5e',
+    params: { pitch: 60, decay: 1.0, reedy: 0.5 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 48,  max: 84,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.2, max: 3.0, decimals: 2 },
+      { key: 'reedy', label: 'REEDY', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMClarinet,
+  },
+  sitar: {
+    name: 'FM SITAR', color: '#c4851c',
+    params: { pitch: 60, decay: 1.2, jivari: 0.5 },
+    knobs: [
+      { key: 'pitch',  label: 'NOTE',   min: 36,  max: 84,  decimals: 0 },
+      { key: 'decay',  label: 'DECAY',  min: 0.3, max: 3.0, decimals: 2 },
+      { key: 'jivari', label: 'JIVARI', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMSitar,
+  },
+  steeldrum: {
+    name: 'FM STEEL DRM', color: '#20b2aa',
+    params: { pitch: 60, decay: 1.0, ring: 0.5 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 48,  max: 84,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.3, max: 3.0, decimals: 2 },
+      { key: 'ring',  label: 'RING',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMSteelDrum,
+  },
+  glocken: {
+    name: 'FM GLOCKEN', color: '#b8a9c9',
+    params: { pitch: 72, decay: 1.5, brightness: 0.7 },
+    knobs: [
+      { key: 'pitch',      label: 'NOTE',  min: 48,  max: 96,  decimals: 0 },
+      { key: 'decay',      label: 'DECAY', min: 0.3, max: 4.0, decimals: 2 },
+      { key: 'brightness', label: 'BRITE', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMGlocken,
+  },
+  wobble: {
+    name: 'FM WOBBLE', color: '#4a4e69',
+    params: { pitch: 36, decay: 0.6, rate: 0.5 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 60,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.1, max: 2.0, decimals: 2 },
+      { key: 'rate',  label: 'RATE',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMWobble,
+  },
+  choir: {
+    name: 'FM CHOIR', color: '#c77dff',
+    params: { pitch: 60, decay: 2.5, vowel: 0.5 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 84,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.5, max: 6.0, decimals: 2 },
+      { key: 'vowel', label: 'VOWEL', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMChoir,
+  },
+  wurly: {
+    name: 'FM WURLY', color: '#d4691e',
+    params: { pitch: 60, decay: 1.2, bark: 0.5 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 36,  max: 84,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.2, max: 3.0, decimals: 2 },
+      { key: 'bark',  label: 'BARK',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMWurly,
+  },
+  kalimba: {
+    name: 'FM KALIMBA', color: '#8fbc8f',
+    params: { pitch: 60, decay: 0.8, tone: 0.5 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 48,  max: 96,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.2, max: 2.5, decimals: 2 },
+      { key: 'tone',  label: 'TONE',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMKalimba,
+  },
+  distgtr: {
+    name: 'FM DIST GTR', color: '#ff4500',
+    params: { pitch: 52, decay: 1.0, gain: 0.7 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 24,  max: 72,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.1, max: 3.0, decimals: 2 },
+      { key: 'gain',  label: 'GAIN',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMDistGtr,
+  },
+  moog: {
+    name: 'FM MOOG', color: '#660099',
+    params: { pitch: 48, decay: 0.7, cutoff: 0.5 },
+    knobs: [
+      { key: 'pitch',  label: 'NOTE',   min: 24,  max: 72,  decimals: 0 },
+      { key: 'decay',  label: 'DECAY',  min: 0.1, max: 2.0, decimals: 2 },
+      { key: 'cutoff', label: 'CUTOFF', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMMoog,
+  },
+  timpani: {
+    name: 'FM TIMPANI', color: '#556b2f',
+    params: { pitch: 48, decay: 1.5, tension: 0.5 },
+    knobs: [
+      { key: 'pitch',   label: 'NOTE',  min: 24,  max: 60,  decimals: 0 },
+      { key: 'decay',   label: 'DECAY', min: 0.3, max: 4.0, decimals: 2 },
+      { key: 'tension', label: 'TENS',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMTimpani,
+  },
+  celeste: {
+    name: 'FM CELESTE', color: '#b0e0e6',
+    params: { pitch: 72, decay: 1.5, softness: 0.5 },
+    knobs: [
+      { key: 'pitch',    label: 'NOTE',  min: 48,  max: 96,  decimals: 0 },
+      { key: 'decay',    label: 'DECAY', min: 0.3, max: 4.0, decimals: 2 },
+      { key: 'softness', label: 'SOFT',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMCeleste,
+  },
+  koto: {
+    name: 'FM KOTO', color: '#dc143c',
+    params: { pitch: 60, decay: 1.0, snap: 0.6 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 36,  max: 84,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.2, max: 3.0, decimals: 2 },
+      { key: 'snap',  label: 'SNAP',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMKoto,
+  },
+  harmonica: {
+    name: 'FM HARMONICA', color: '#cd853f',
+    params: { pitch: 60, decay: 0.9, reedy: 0.6 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 48,  max: 84,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.2, max: 2.5, decimals: 2 },
+      { key: 'reedy', label: 'REEDY', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMHarmonica,
+  },
+  oboe: {
+    name: 'FM OBOE', color: '#2e8b57',
+    params: { pitch: 65, decay: 1.0, nasal: 0.6 },
+    knobs: [
+      { key: 'pitch', label: 'NOTE',  min: 48,  max: 84,  decimals: 0 },
+      { key: 'decay', label: 'DECAY', min: 0.2, max: 3.0, decimals: 2 },
+      { key: 'nasal', label: 'NASAL', min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMOboe,
+  },
+  tabla: {
+    name: 'FM TABLA', color: '#b5651d',
+    params: { pitch: 55, decay: 0.6, resonance: 0.5 },
+    knobs: [
+      { key: 'pitch',     label: 'NOTE',  min: 36,  max: 72,  decimals: 0 },
+      { key: 'decay',     label: 'DECAY', min: 0.1, max: 2.0, decimals: 2 },
+      { key: 'resonance', label: 'RESO',  min: 0,   max: 1,   decimals: 2 },
+    ],
+    fn: playFMTabla,
   },
 }
 
