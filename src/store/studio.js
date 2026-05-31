@@ -1276,7 +1276,48 @@ export function useStudio() {
     }
   }
 
+  // Panic — instantly silence everything currently playing.
+  // Stops the sequencer, releases held keys, sends all-notes-off to plugin
+  // nodes, and briefly ducks the master gain to swallow any in-flight Web
+  // Audio oscillator tails.
+  function panicAll() {
+    if (isPlaying.value) stopPlay()
+    pressedKeys.clear()
+    pressedKeyPitch.clear()
+    if (!audioCtx) return
+
+    const t = audioCtx.currentTime
+    customSynthNodes.forEach(node => {
+      try { node.port.postMessage({ type: 'allNotesOff', time: t }) } catch (_) {}
+    })
+    wasmNodes.forEach(node => {
+      try {
+        for (let pitch = 0; pitch < 128; pitch++) {
+          node.port.postMessage({ type: 'noteOff', pitch, time: t })
+        }
+      } catch (_) {}
+    })
+
+    if (masterGain) {
+      try {
+        const now  = audioCtx.currentTime
+        const prev = mixerTracks[0].muted ? 0 : mixerTracks[0].volume
+        masterGain.gain.cancelScheduledValues(now)
+        masterGain.gain.setValueAtTime(masterGain.gain.value, now)
+        masterGain.gain.linearRampToValueAtTime(0, now + 0.005)
+        masterGain.gain.setValueAtTime(0, now + 0.3)
+        masterGain.gain.linearRampToValueAtTime(prev, now + 0.31)
+      } catch (_) {}
+    }
+  }
+
   function handleKeyDown(e) {
+    // Global panic shortcut — works even from inputs, before any other guards.
+    if (e.code === 'Digit7' && e.ctrlKey && e.shiftKey) {
+      e.preventDefault()
+      panicAll()
+      return
+    }
     if (e.repeat || ['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return
     if (e.code === 'BracketLeft')  { kbOctave.value = Math.max(0, kbOctave.value - 1); return }
     if (e.code === 'BracketRight') { kbOctave.value = Math.min(8, kbOctave.value + 1); return }
@@ -1876,7 +1917,7 @@ export function useStudio() {
     // Undo / Redo
     canUndo, canRedo, undoAction, redoAction,
     // Keyboard
-    playNote, stopNote, handleKeyDown, handleKeyUp,
+    playNote, stopNote, handleKeyDown, handleKeyUp, panicAll,
     // Mixer
     mixerTracks,
     setMixerTrackVolume, setMixerTrackPan, setMixerEq,

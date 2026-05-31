@@ -38,6 +38,11 @@ A theme picker modal lets you switch the entire UI color scheme without reloadin
 ### Export
 Click **EXPORT WAV** to render your composition. Uses `OfflineAudioContext` to render faster than real time and encodes as 16-bit PCM WAV. The export matches exactly what you hear in the browser.
 
+### Keyboard shortcuts
+- **Z–M / Q–U** — play the selected melodic channel live
+- **`[` / `]`** — shift the live-play octave down/up
+- **Ctrl+Shift+7** — panic: instantly silence everything (stops the sequencer, releases held keys, sends all-notes-off to every synth)
+
 ---
 
 ## Running it
