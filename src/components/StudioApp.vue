@@ -31,6 +31,45 @@
           </select>
         </div>
 
+        <!-- WASM Plugin panel -->
+        <div v-if="selectedChannel.type === 'wasm'" class="wasm-panel">
+          <div class="wasm-status-row">
+            <span class="wasm-dot" :class="'wasm-dot--' + selectedChannel.wasmStatus" />
+            <span class="wasm-status-label">{{ wasmStatusLabel }}</span>
+          </div>
+          <div v-if="selectedChannel.wasmName" class="wasm-filename" :title="selectedChannel.wasmName">
+            {{ selectedChannel.wasmName }}
+          </div>
+          <div v-if="selectedChannel.wasmError" class="wasm-error">
+            {{ selectedChannel.wasmError }}
+          </div>
+          <label class="wasm-upload-btn" :style="{ borderColor: selectedChannel.color, color: selectedChannel.color }">
+            {{ selectedChannel.wasmStatus === 'idle' ? '⬡ LOAD PLUGIN' : '⬡ CHANGE PLUGIN' }}
+            <input type="file" accept=".wasm,.js" @change="onWasmFile" style="display:none" />
+          </label>
+
+          <!-- Built-in example plugins -->
+          <div class="wasm-examples-title">EXAMPLES</div>
+          <div class="wasm-examples">
+            <button v-for="ex in WASM_EXAMPLES" :key="ex.file"
+              class="wasm-ex-btn"
+              :disabled="selectedChannel.wasmStatus === 'loading'"
+              @click="loadExample(ex.file)"
+            >{{ ex.label }}</button>
+          </div>
+
+          <div class="wasm-api-hint">
+            <div class="wasm-hint-title">JS plugin exports:</div>
+            <code>init(sampleRate)</code>
+            <code>note_on(pitch, vel)</code>
+            <code>note_off(pitch)</code>
+            <code>process(L, R)</code>
+          </div>
+          <div class="wasm-compat-note">
+            Accepts .js (JS AudioWorklet) or .wasm. .dll / .vst cannot run in a browser.
+          </div>
+        </div>
+
         <!-- Core knobs -->
         <div class="props-knobs">
           <Knob
@@ -115,6 +154,16 @@
     <!-- ── Theme modal ───────────────────────────────────────────────── -->
     <ThemeModal v-if="themeModalOpen" @close="themeModalOpen = false" />
 
+    <!-- ── Bottom: Custom Synth panel (when custom synth selected + piano roll closed) ── -->
+    <div
+      v-if="selectedChannel.type === 'custom' && mainView === 'sequencer' && !pianoRollOpen"
+      class="custom-synth-panel"
+      :style="{ height: customSynthHeight + 'px' }"
+    >
+      <div class="pr-resize-handle" @mousedown="startCustomSynthResize" title="Drag to resize" />
+      <CustomSynth />
+    </div>
+
     <!-- ── Bottom: Piano Roll panel ──────────────────────────────────── -->
     <div
       v-if="pianoRollOpen && mainView === 'sequencer'"
@@ -164,11 +213,13 @@ import StepGrid    from './StepGrid.vue'
 import Knob        from './Knob.vue'
 import RenderModal from './RenderModal.vue'
 import ThemeModal  from './ThemeModal.vue'
+import CustomSynth from './CustomSynth.vue'
 
 const {
   mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen, themeModalOpen,
   clearChannel, handleKeyDown, handleKeyUp,
   addDrumModule, removeDrumModule,
+  loadWasmForChannel,
 } = useStudio()
 
 // ── Module panel state ────────────────────────────────────────────────────────
@@ -197,6 +248,61 @@ watch(() => selectedChannel.value?.id, () => {
   showModulePicker.value = false
 })
 
+// ── WASM / JS plugin ──────────────────────────────────────────────────────────
+const WASM_EXAMPLES = [
+  // ── Wavetable synths (Serum-style) ─────────────────────────────────────────
+  { label: 'WT Morph',    file: 'wt-morph.js'    },
+  { label: 'WT Supersaw', file: 'wt-super.js'    },
+  { label: 'WT Pluck',    file: 'wt-pluck.js'    },
+  { label: 'WT Pad',      file: 'wt-pad.js'      },
+  { label: 'WT Wobble',   file: 'wt-wobble.js'   },
+  { label: 'WT Vowel',    file: 'wt-vowel.js'    },
+  { label: 'WT Hard',     file: 'wt-hard.js'     },
+  { label: 'WT Strings',  file: 'wt-strings.js'  },
+  // ── Basic synths ────────────────────────────────────────────────────────────
+  { label: 'Sine Poly',   file: 'sine-poly.js'   },
+  { label: 'Saw Lead',    file: 'saw-lead.js'     },
+  { label: 'FM Bell',     file: 'fm-bell.js'      },
+  { label: 'Acid Bass',   file: 'acid-bass.js'    },
+  { label: 'Noise Perc',  file: 'noise-perc.js'   },
+  { label: 'Pad Strings', file: 'pad-strings.js'  },
+]
+
+const wasmStatusLabel = computed(() => {
+  const s = selectedChannel.value?.wasmStatus
+  return s === 'idle'    ? 'No plugin loaded'
+       : s === 'loading' ? 'Loading…'
+       : s === 'ready'   ? 'Plugin ready'
+       : s === 'error'   ? 'Load failed'
+       : ''
+})
+
+function onWasmFile(e) {
+  const file = e.target.files?.[0]
+  if (!file) return
+  e.target.value = ''
+  const isJs = file.name.endsWith('.js')
+  const reader = new FileReader()
+  reader.onload = ev => {
+    loadWasmForChannel(selectedChannel.value.id, ev.target.result, file.name)
+  }
+  if (isJs) reader.readAsText(file)
+  else       reader.readAsArrayBuffer(file)
+}
+
+async function loadExample(fileName) {
+  const ch = selectedChannel.value
+  if (!ch) return
+  try {
+    const res  = await fetch(`/examples/${fileName}`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const code = await res.text()
+    loadWasmForChannel(ch.id, code, fileName)
+  } catch (err) {
+    console.error('[FreakyLoops] Failed to load example plugin:', err)
+  }
+}
+
 // ── Global keyboard listeners ────────────────────────────────────────────────
 onMounted(() => {
   window.addEventListener('keydown', handleKeyDown)
@@ -208,22 +314,37 @@ onBeforeUnmount(() => {
 })
 
 // ── Piano roll panel resize ──────────────────────────────────────────────────
-const prHeight = ref(240)
+const prHeight    = ref(240)
+const customSynthHeight = ref(500)
 let resizing = false
 let resizeStartY = 0
 let resizeStartH = 0
+let resizeTarget = null
 
 function startResize(e) {
   resizing      = true
   resizeStartY  = e.clientY
   resizeStartH  = prHeight.value
+  resizeTarget  = 'pr'
+  window.addEventListener('mousemove', onResize)
+  window.addEventListener('mouseup',   stopResize)
+}
+function startCustomSynthResize(e) {
+  resizing      = true
+  resizeStartY  = e.clientY
+  resizeStartH  = customSynthHeight.value
+  resizeTarget  = 'custom'
   window.addEventListener('mousemove', onResize)
   window.addEventListener('mouseup',   stopResize)
 }
 function onResize(e) {
   if (!resizing) return
   const dy = resizeStartY - e.clientY
-  prHeight.value = Math.max(120, Math.min(520, resizeStartH + dy))
+  if (resizeTarget === 'custom') {
+    customSynthHeight.value = Math.max(280, Math.min(720, resizeStartH + dy))
+  } else {
+    prHeight.value = Math.max(120, Math.min(520, resizeStartH + dy))
+  }
 }
 function stopResize() {
   resizing = false
@@ -315,6 +436,71 @@ function stopResize() {
   background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.12s;
 }
 .props-clr:hover { border-color: #9b59b6; color: #c084e0; }
+
+/* ── WASM plugin panel ───────────────────────────────────────────── */
+.wasm-panel {
+  display: flex; flex-direction: column; gap: 7px;
+  padding: 8px 10px; border-top: 1px solid var(--border-subtle);
+}
+.wasm-status-row {
+  display: flex; align-items: center; gap: 6px;
+}
+.wasm-dot {
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+}
+.wasm-dot--idle    { background: #404060; }
+.wasm-dot--loading { background: #f39c12; }
+.wasm-dot--ready   { background: #2ecc71; }
+.wasm-dot--error   { background: #e74c3c; }
+.wasm-status-label {
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted);
+}
+.wasm-filename {
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.wasm-error {
+  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #e74c3c;
+  word-break: break-word; line-height: 1.4;
+}
+.wasm-upload-btn {
+  display: block; text-align: center; padding: 5px 0;
+  border: 1px solid; border-radius: 4px; cursor: pointer;
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
+  letter-spacing: 0.08em; transition: opacity 0.12s;
+}
+.wasm-upload-btn:hover { opacity: 0.75; }
+.wasm-api-hint {
+  display: flex; flex-direction: column; gap: 1px;
+}
+.wasm-hint-title {
+  font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
+  color: #40405a; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 2px;
+}
+.wasm-api-hint code {
+  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #5a5a80;
+  background: var(--bg-base); padding: 1px 3px; border-radius: 2px;
+}
+.wasm-compat-note {
+  font-family: 'Share Tech Mono', monospace; font-size: 8px;
+  color: #6a4a20; line-height: 1.45;
+}
+.wasm-examples-title {
+  font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
+  letter-spacing: 0.15em; color: #40405a; text-transform: uppercase;
+  margin-top: 2px;
+}
+.wasm-examples {
+  display: flex; flex-wrap: wrap; gap: 4px;
+}
+.wasm-ex-btn {
+  font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.05em; padding: 3px 6px; border-radius: 4px;
+  border: 1px solid #4a2a88; background: #1a0a30; color: #b080ff;
+  cursor: pointer; transition: all 0.1s; white-space: nowrap;
+}
+.wasm-ex-btn:hover:not(:disabled) { background: #2a1048; border-color: #7b2fff; color: #d0a0ff; }
+.wasm-ex-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* ── Drum module panel ───────────────────────────────────────────── */
 .module-section {
@@ -410,7 +596,7 @@ function stopResize() {
 }
 
 /* ── Piano Roll bottom panel ─────────────────────────────────────── */
-.piano-roll-panel {
+.piano-roll-panel, .custom-synth-panel {
   display: flex; flex-direction: column;
   background: var(--bg-base);
   border-top: 1px solid var(--border-subtle);
@@ -418,6 +604,7 @@ function stopResize() {
   overflow: hidden;
   position: relative;
 }
+.custom-synth-panel { height: 480px; }
 
 .pr-resize-handle {
   height: 5px; cursor: ns-resize;

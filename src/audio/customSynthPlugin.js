@@ -1,21 +1,22 @@
-// Creates and manages the Serum AudioWorkletNode.
+// Creates and manages the Custom Synth AudioWorkletNode.
+// Each Custom Synth channel owns one persistent node.
 
 const loaded = new WeakSet()
 
-export async function createSerumNode(ctx) {
+export async function createCustomSynthNode(ctx) {
   if (!loaded.has(ctx)) {
-    await ctx.audioWorklet.addModule('/serum-worklet.js')
+    await ctx.audioWorklet.addModule('/custom-synth-worklet.js')
     loaded.add(ctx)
   }
-  return new AudioWorkletNode(ctx, 'serum-synth', {
-    numberOfInputs:  0,
-    numberOfOutputs: 1,
+  return new AudioWorkletNode(ctx, 'custom-synth', {
+    numberOfInputs:     0,
+    numberOfOutputs:    1,
     outputChannelCount: [2],
   })
 }
 
-export function makeSerumPlayFn(getNode) {
-  return function playSerumNote(ctx, time, { pitch = 60, velocity = 1, gate = null } = {}, _dest) {
+export function makeCustomSynthPlayFn(getNode) {
+  return function playCustomSynth(ctx, time, { pitch = 60, velocity = 1, gate = null } = {}, _dest) {
     const node = getNode()
     if (!node) return
     const delayMs = Math.max(0, (time - ctx.currentTime) * 1000)

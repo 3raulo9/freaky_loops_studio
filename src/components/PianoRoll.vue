@@ -233,7 +233,7 @@ const props = defineProps({ ch: { type: Object, required: true } })
 
 const {
   totalSteps, displayStep, channels, selectedChannelId, currentPatternId,
-  getPatData, playNote, snapScale, pushUndo,
+  getPatData, playNote, stopNote, snapScale, pushUndo,
 } = useStudio()
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -750,6 +750,7 @@ function onWindowMouseUp(e) {
   if (e.button === 2) { rDrag = false; rDragRefs = new Set(); return }
   if (selDrag) finalizeRubberBand()
   drag = null; paintStroke = null; selDrag = null
+  if (activePitch.value !== null) stopNote(targetCh.value, activePitch.value)
   keyHeld = false; activePitch.value = null
 }
 

@@ -1,5 +1,7 @@
 import { ref, reactive, computed } from 'vue'
 import { applyTheme } from '../themes.js'
+import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
+import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
@@ -482,6 +484,10 @@ const KB_SEMITONES = {
   KeyZ:0, KeyS:1, KeyX:2, KeyD:3, KeyC:4, KeyV:5, KeyG:6, KeyB:7, KeyH:8, KeyN:9, KeyJ:10, KeyM:11,
   KeyQ:12, Digit2:13, KeyW:14, Digit3:15, KeyE:16, KeyR:17, Digit5:18, KeyT:19, Digit6:20, KeyY:21, Digit7:22, KeyU:23, KeyI:24,
 }
+
+// ─── Audio node registry (AudioWorkletNode per channel, outside reactivity) ───
+const wasmNodes         = new Map()  // channelId -> AudioWorkletNode (WASM plugins)
+const customSynthNodes  = new Map()  // channelId -> AudioWorkletNode (Custom Synth)
 
 // ─── Channel factory ───────────────────────────────────────────────────────────
 let _cid = 0
@@ -998,6 +1004,8 @@ export function useStudio() {
 
   function rebuildGains() {
     if (!audioCtx || !masterGain) return
+    // Disconnect WASM nodes from old track gains before they are destroyed
+    wasmNodes.forEach(node => { try { node.disconnect() } catch (_) {} })
     trackGains.forEach(g => { try { g.disconnect() } catch (e) {} })
     trackPanners.forEach(p => { try { p.disconnect() } catch (e) {} })
     cutGains.forEach(cg => { if (cg) try { cg.disconnect() } catch (e) {} })
@@ -1019,6 +1027,17 @@ export function useStudio() {
         cutGains.push(cg)
       } else {
         cutGains.push(null)
+      }
+    })
+    // Reconnect plugin + custom-synth nodes to their new track gains
+    channels.forEach((ch, i) => {
+      if (ch.type === 'wasm') {
+        const node = wasmNodes.get(ch.id)
+        if (node) node.connect(trackGains[i])
+      }
+      if (ch.type === 'custom') {
+        const node = customSynthNodes.get(ch.id)
+        if (node) { try { node.disconnect() } catch(_){} ; node.connect(trackGains[i]) }
       }
     })
   }
@@ -1231,7 +1250,8 @@ export function useStudio() {
   function togglePlay() { isPlaying.value ? pausePlay() : startPlay() }
 
   // ── Keyboard live play ────────────────────────────────────────────────────────
-  const pressedKeys = new Set()
+  const pressedKeys     = new Set()
+  const pressedKeyPitch = new Map()  // key code → MIDI pitch (so keyUp knows what to stop)
 
   function playNote(ch, pitch) {
     if (!audioCtx) initAudio()
@@ -1239,6 +1259,21 @@ export function useStudio() {
     const dest = (ci >= 0 && trackGains[ci]) ? trackGains[ci] : audioCtx.destination
     const when = audioCtx.currentTime + 0.005
     ch.fn(audioCtx, when, { ...ch.params, pitch, velocity: 1 }, dest)
+  }
+
+  // Stop an active note — essential for WASM/JS/Custom Synth plugins which
+  // sustain until noteOff. For Web Audio (FM/melodic) channels the oscillators
+  // are already scheduled to stop on their own, so this is a no-op for them.
+  function stopNote(ch, pitch) {
+    if (!ch || !audioCtx) return
+    const t = audioCtx.currentTime + 0.005
+    if (ch.type === 'wasm') {
+      const node = wasmNodes.get(ch.id)
+      if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
+    } else if (ch.type === 'custom') {
+      const node = customSynthNodes.get(ch.id)
+      if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
+    }
   }
 
   function handleKeyDown(e) {
@@ -1249,10 +1284,19 @@ export function useStudio() {
     if (semi === undefined || pressedKeys.has(e.code)) return
     if (keyboardInputMode.value) e.preventDefault()
     pressedKeys.add(e.code)
-    playNote(selectedChannel.value, 12 * (kbOctave.value + 1) + semi)
+    const pitch = 12 * (kbOctave.value + 1) + semi
+    pressedKeyPitch.set(e.code, pitch)
+    playNote(selectedChannel.value, pitch)
   }
 
-  function handleKeyUp(e) { pressedKeys.delete(e.code) }
+  function handleKeyUp(e) {
+    pressedKeys.delete(e.code)
+    const pitch = pressedKeyPitch.get(e.code)
+    if (pitch !== undefined) {
+      stopNote(selectedChannel.value, pitch)
+      pressedKeyPitch.delete(e.code)
+    }
+  }
 
   // ── Pattern editing ───────────────────────────────────────────────────────────
   function toggleStep(channelId, step) {
@@ -1326,9 +1370,97 @@ export function useStudio() {
     selectedChannelId.value = ch.id
   }
 
+  function addWasmChannel() {
+    const ch = makeChannel({
+      name:  'PLUGIN ' + (channels.filter(c => c.type === 'wasm').length + 1),
+      color: '#7b2fff',
+      type:  'wasm',
+      mode:  'piano',
+      wasmStatus: 'idle',
+      wasmName:   '',
+      wasmError:  '',
+      knobs: [],
+      params: {},
+      fn: () => {},  // no-op until WASM is loaded
+    })
+    channels.push(ch)
+    if (audioCtx) rebuildGains()
+    selectedChannelId.value = ch.id
+  }
+
+  // Called from the UI when the user uploads a .wasm file.
+  // Loads the binary into a new AudioWorkletNode and wires it to the track gain.
+  // content: ArrayBuffer (WASM binary) or string (JS plugin source)
+  async function loadWasmForChannel(channelId, content, fileName) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch) return
+
+    ch.wasmStatus = 'loading'
+    ch.wasmError  = ''
+    ch.wasmName   = fileName
+
+    try {
+      initAudio()  // ensure AudioContext exists
+      const node = await createPluginNode(audioCtx, content)
+
+      // Disconnect any existing node for this channel
+      if (wasmNodes.has(channelId)) {
+        try { wasmNodes.get(channelId).disconnect() } catch (_) {}
+      }
+      wasmNodes.set(channelId, node)
+
+      // Connect node → track gain for this channel
+      const idx = channels.findIndex(c => c.id === channelId)
+      if (trackGains[idx]) node.connect(trackGains[idx])
+
+      // Assign the play function (getNode thunk keeps the reference live)
+      ch.fn = makeWasmPlayFn(() => wasmNodes.get(channelId))
+      ch.wasmStatus = 'ready'
+    } catch (err) {
+      ch.wasmStatus = 'error'
+      ch.wasmError  = err.message
+    }
+  }
+
+  function addCustomSynthChannel() {
+    const ch = makeChannel({
+      name:  'CUSTOM ' + (channels.filter(c => c.type === 'custom').length + 1),
+      color: '#00d4ff',
+      type:  'custom',
+      mode:  'piano',
+      knobs: [],
+      params: {},
+      fn: () => {},
+    })
+    channels.push(ch)
+    initAudio()
+    createCustomSynthNode(audioCtx).then(node => {
+      customSynthNodes.set(ch.id, node)
+      const idx = channels.findIndex(c => c.id === ch.id)
+      if (trackGains[idx]) node.connect(trackGains[idx])
+      ch.fn = makeCustomSynthPlayFn(() => customSynthNodes.get(ch.id))
+    }).catch(err => console.error('[CustomSynth] Node init failed:', err))
+    if (audioCtx) rebuildGains()
+    selectedChannelId.value = ch.id
+  }
+
+  function getCustomSynthNode(channelId) {
+    return customSynthNodes.get(channelId) ?? null
+  }
+
   function removeChannel(id) {
     const idx = channels.findIndex(c => c.id === id)
     if (idx < 0 || channels.length <= 1) return
+    // Clean up Custom Synth node
+    if (customSynthNodes.has(id)) {
+      try { customSynthNodes.get(id).disconnect() } catch (_) {}
+      customSynthNodes.delete(id)
+    }
+    // Clean up WASM node if this is a plugin channel
+    if (wasmNodes.has(id)) {
+      try { wasmNodes.get(id).disconnect() } catch (_) {}
+      wasmNodes.delete(id)
+    }
     channels.splice(idx, 1)
     if (audioCtx) rebuildGains()
     if (selectedChannelId.value === id) selectedChannelId.value = channels[0].id
@@ -1698,7 +1830,9 @@ export function useStudio() {
     pushUndo,
     // Channels
     channels, selectedChannelId, selectedChannel,
-    soloChannel, addChannel, addFMChannel, removeChannel, moveChannel,
+    soloChannel, addChannel, addFMChannel, addWasmChannel, loadWasmForChannel,
+    addCustomSynthChannel, getCustomSynthNode,
+    removeChannel, moveChannel,
     // Patterns
     patterns, currentPatternId, pickerPatternId, patternData,
     getPatData, getSteps, getPianoNotes,
@@ -1742,7 +1876,7 @@ export function useStudio() {
     // Undo / Redo
     canUndo, canRedo, undoAction, redoAction,
     // Keyboard
-    playNote, handleKeyDown, handleKeyUp,
+    playNote, stopNote, handleKeyDown, handleKeyUp,
     // Mixer
     mixerTracks,
     setMixerTrackVolume, setMixerTrackPan, setMixerEq,
