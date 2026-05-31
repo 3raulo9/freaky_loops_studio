@@ -1,47 +1,63 @@
 # Freaky Loops Studio
 
-A browser-based drum machine built with Vue 3 and the Web Audio API. No samples, no audio files — every sound is synthesized from scratch using oscillators, noise buffers, filters, and envelope generators. Think early FL Studio but running in a tab.
+A browser-based DAW built with Vue 3 and the Web Audio API. No samples, no audio files, no backend — every sound is synthesized from scratch and every feature runs client-side. 
 
 ---
 
 ## What's in it
 
-Four drum tracks: **Kick**, **Snare**, **Hi-Hat**, and **Clash** (crash cymbal). Each one has three knobs that actually change how the sound is constructed at the synthesis level, not just the volume or pan. Turning the Kick's Punch knob, for example, pushes more signal through a waveshaper distortion curve. The Hi-Hat's Tone knob shifts the cutoff of the highpass and bandpass filters shaping the inharmonic oscillator mix.
+### Channel Rack
+The core of the studio. Channels come in two types: **drum** and **melodic**. Each channel has its own color, mute/solo controls, volume fader, and a mixer routing selector. Patterns are named and navigable — you can duplicate, rename, delete, or split a pattern by channel. Each channel's steps open into a bottom piano roll panel that you can resize by dragging.
 
-The sequencer runs on the Web Audio clock (not `setInterval` for timing), so the groove stays tight even at high BPMs. There's a swing control in the header that nudges every odd 16th note slightly late.
+**Drum channels** are synthesized from scratch. The Kick is a sine wave with a falling pitch envelope and optional waveshaper crunch. The Snare is white noise through a bandpass filter plus a triangle wave body. The Hi-Hat uses six square oscillators tuned to the TR-909's inharmonic cymbal ratios. The Clash is based on the TR-808 crash, with ring modulation and a noise shimmer layer. Each drum channel supports plug-in style **effect modules** — add Distortion, Delay, Reverb, Compressor, Chorus, or Phaser per channel from the properties panel.
 
-You can also export whatever you've made as a WAV file. It uses `OfflineAudioContext` to render the audio faster than real time and encodes it as 16-bit PCM — so the export sounds identical to what you're hearing in the browser.
+**Melodic channels** use a wavetable oscillator with selectable waveshape (Sawtooth, Square, Sine, Triangle) and can be sequenced either in the step grid or in the piano roll. Notes are entered by mouse or played live from the keyboard (Z–M and Q–U rows, with `[`/`]` to shift octave).
+
+### Piano Roll
+A full piano roll editor for melodic channels. Tools: draw, paint, select (box or click), mute, and erase. Notes support velocity (shown as bottom fill), can be multi-selected and moved by drag or nudged with arrow keys. Snap grid goes from 1/64 down to 1 bar. Ghost notes overlay other channels in the background so you can compose in context. A channel picker dropdown lets you switch target channels without closing the panel.
+
+### Playlist
+An arrangement view for building full songs. Drag pattern clips and automation clips onto tracks across a scrollable timeline. Supports draw, select, and erase tools, a zoom slider, auto-scroll during playback, a minimap for navigation, markers, and multiple playlist tracks and automation tracks. A **PLAYLIST** toggle switches the transport between pattern-loop mode and song-arrangement mode.
+
+### Mixer
+Eight named insert tracks plus a master bus, all with per-track volume faders, mute, solo, and dB readout. Each channel in the rack routes to a mixer insert via a dropdown. Channel routing is visualized as colored dots on each mixer strip.
+
+### Automation
+Automation clips can be drawn in the Playlist and tied to any automatable parameter. The Playlist distinguishes between pattern clips and automation clips via a focus-mode toggle.
+
+### Transport & Global Controls
+- **BPM** — 40 to 220, slider-controlled
+- **Swing** — nudges odd 16th notes late for groove
+- **Steps** — 8, 16, or 32 steps per pattern
+- **Timecode display** — click to toggle between Bars:Beats:Ticks and Min:Sec:Ms
+- **PAT / SONG mode** — loop the current pattern or play the full playlist arrangement
+
+### Themes
+A theme picker modal lets you switch the entire UI color scheme without reloading.
+
+### Export
+Click **EXPORT WAV** to render your composition. Uses `OfflineAudioContext` to render faster than real time and encodes as 16-bit PCM WAV. The export matches exactly what you hear in the browser.
 
 ---
 
 ## Running it
 
-You need Node.js (v18 or later should be fine) and npm. Clone the repo, then:
+You need Node.js (v18 or later) and npm. Clone the repo, then:
 
 ```bash
 npm install
 npm run dev
 ```
 
-That'll start a Vite dev server. Open `http://localhost:5173` in your browser and you're good to go.
+That starts a Vite dev server at `http://localhost:5173`.
 
-If you want to build a static version for hosting somewhere:
+To build a static version for hosting:
 
 ```bash
 npm run build
 ```
 
-The output goes into `dist/`. You can preview it locally with `npm run preview` before deploying.
-
----
-
-## How to use it
-
-Hit **▶ PLAY** to start the sequencer. Click any of the small squares on a track to toggle that step on or off. The white cell that moves across the grid shows you where the playhead currently is.
-
-The circular knobs respond to click-and-drag — drag upward to increase the value, downward to decrease. Each track also has a vertical volume fader on the left side and a small round on/off button inside the name plate. Muting a track dims everything and silences it without clearing the pattern, so you can bring it back later exactly as it was.
-
-To export, pick how many bars you want in the BARS dropdown, then click **⬇ EXPORT WAV**. The button will pulse amber while it renders (usually just a second or two), then your browser will download a `.wav` file named with the BPM and bar count.
+Output goes into `dist/`. Preview locally with `npm run preview`.
 
 ---
 
@@ -49,14 +65,6 @@ To export, pick how many bars you want in the BARS dropdown, then click **⬇ EX
 
 - Vue 3 (Composition API)
 - Vite
-- Web Audio API — all synthesis, scheduling, and rendering happens here, no external audio libraries
+- Web Audio API — all synthesis, scheduling, effect processing, and rendering happens here
 
-No backend, no dependencies beyond Vue and Vite. Opens straight from the file system if you build it.
-
----
-
-## A note on the sounds
-
-The kick is a sine wave with a falling pitch envelope and an optional waveshaper for crunch. The snare is white noise through a bandpass filter combined with a triangle wave body and a short sub thump. The hi-hat uses six square wave oscillators tuned to the inharmonic frequency ratios of the TR-909's cymbal circuit. The clash is similar but based on the TR-808 crash ratios, with an added ring modulation layer and a noise shimmer on top.
-
-All of this runs in `src/audio/synths.js` if you want to dig in or tweak things.
+No backend. No external audio libraries. Opens straight from the file system if you build it.
