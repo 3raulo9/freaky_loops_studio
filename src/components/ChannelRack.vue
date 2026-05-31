@@ -58,6 +58,12 @@
           </div>
         </div>
       </div>
+      <div class="op-item" @click="addCustomSynthChannel(); closeAllMenus()">
+        <span class="op-dot" style="background:#00d4ff"/>◈ Custom Synth
+      </div>
+      <div class="op-item" @click="addWasmChannel(); closeAllMenus()">
+        <span class="op-dot" style="background:#7b2fff"/>⬡ WASM Plugin
+      </div>
 
       <div class="op-sep"/>
 
@@ -163,6 +169,13 @@
             <div v-for="(preset, key) in FM_PRESETS" :key="key" class="synth-pick-item"
               @click="addFMChannel(key); showSynthPicker = false">
               <span class="synth-pick-dot" :style="{ background: preset.color }"/>{{ preset.name }}
+            </div>
+            <div class="synth-pick-section">PLUGINS</div>
+            <div class="synth-pick-item" @click="addCustomSynthChannel(); showSynthPicker = false">
+              <span class="synth-pick-dot" style="background:#00d4ff"/>◈ Custom Synth
+            </div>
+            <div class="synth-pick-item" @click="addWasmChannel(); showSynthPicker = false">
+              <span class="synth-pick-dot" style="background:#7b2fff"/>⬡ WASM Plugin
             </div>
           </div>
         </div>
@@ -467,7 +480,7 @@ const {
   pianoRollOpen, kbOctave,
   patterns, currentPatternId, getSteps, getPianoNotes,
   addPattern, removePattern, duplicatePattern,
-  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, removeChannel, moveChannel,
+  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, addWasmChannel, addCustomSynthChannel, removeChannel, moveChannel,
   channelGroups, addGroup, removeGroup, renameGroup, assignChannelsToGroup,
   graphEditorOpen, graphParam,
   getStepVelocities, setStepVelocity, getStepPans, setStepPan, getStepPitches, setStepPitch,
