@@ -190,6 +190,7 @@ export const PIANO_LOW   = 0
 export const PIANO_HIGH  = 127
 export const NOTE_NAMES  = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 export const PIANO_KEYS  = Array.from({ length: PIANO_HIGH - PIANO_LOW + 1 }, (_, i) => PIANO_HIGH - i)
+export const TICKS_PER_STEP = 120   // 1/16 note at 480 PPQ
 export const PLAYLIST_BARS  = 32
 export const PLAYLIST_CELLS = 32
 
@@ -212,6 +213,12 @@ export const NUM_MX_INSERTS = 8
 
 export function midiToLabel(m) { return NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1) }
 export function isBlackKey(m)  { return [1, 3, 6, 8, 10].includes(m % 12) }
+
+// Migrate a note from old step-based format to tick-based format (backward compat for saved projects)
+function migrateNote(n) {
+  if (n.startTick !== undefined) return { ...n }
+  return { ...n, startTick: (n.step ?? 0) * TICKS_PER_STEP, durationTicks: (n.duration ?? 1) * TICKS_PER_STEP }
+}
 
 const KB_SEMITONES = {
   KeyZ:0, KeyS:1, KeyX:2, KeyD:3, KeyC:4, KeyV:5, KeyG:6, KeyB:7, KeyH:8, KeyN:9, KeyJ:10, KeyM:11,
@@ -881,10 +888,16 @@ export function useStudio() {
             ch.fn(audioCtx, when, { ...ch.params, velocity: vel }, cutDest)
           }
         } else {
-          d.pianoNotes.filter(n => Math.round(n.step) === step && !n.muted).forEach(note => {
-            const secPerStep = (60 / bpm.value) / 4
-            const gate = Math.max(0.05, ((note.duration ?? 1) * secPerStep) - 0.02)
-            ch.fn(audioCtx, when, { ...ch.params, pitch: note.pitch, velocity: note.velocity ?? 1, gate }, dest)
+          // Schedule all piano notes whose startTick falls within this step's window.
+          // Using a range check (not rounding) means two notes within the same 1/16-note
+          // window (e.g. at tick 0 and tick 60) both fire, at their precise sub-step offset.
+          const secPerTick   = (60 / bpm.value) / 4 / TICKS_PER_STEP
+          const stepStartTick = step * TICKS_PER_STEP
+          const stepEndTick   = stepStartTick + TICKS_PER_STEP
+          d.pianoNotes.filter(n => n.startTick >= stepStartTick && n.startTick < stepEndTick && !n.muted).forEach(note => {
+            const noteWhen = when + (note.startTick - stepStartTick) * secPerTick
+            const gate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
+            ch.fn(audioCtx, noteWhen, { ...ch.params, pitch: note.pitch, velocity: note.velocity ?? 1, gate }, dest)
           })
         }
       })
@@ -990,14 +1003,16 @@ export function useStudio() {
 
   function togglePianoNote(channelId, step, pitch) {
     pushUndo()
-    const d   = getPatData(channelId)
-    const idx = d.pianoNotes.findIndex(n => n.step === step && n.pitch === pitch)
+    const d = getPatData(channelId)
+    const startTick = step * TICKS_PER_STEP
+    const idx = d.pianoNotes.findIndex(n => n.startTick === startTick && n.pitch === pitch)
     if (idx >= 0) d.pianoNotes.splice(idx, 1)
-    else          d.pianoNotes.push({ step, pitch, velocity: 1 })
+    else          d.pianoNotes.push({ startTick, pitch, velocity: 1, durationTicks: TICKS_PER_STEP })
   }
 
   function hasNote(channelId, step, pitch) {
-    return getPatData(channelId).pianoNotes.some(n => n.step === step && n.pitch === pitch)
+    const startTick = step * TICKS_PER_STEP
+    return getPatData(channelId).pianoNotes.some(n => n.startTick === startTick && n.pitch === pitch)
   }
 
   function clearChannel(channelId) {
@@ -1371,7 +1386,7 @@ export function useStudio() {
         const d = p.patternData[pid][cid]
         patternData[pid][cid] = reactive({
           steps:          [...(d.steps          ?? Array(32).fill(false))],
-          pianoNotes:     (d.pianoNotes ?? []).map(n => ({ ...n })),
+          pianoNotes:     (d.pianoNotes ?? []).map(migrateNote),
           stepVelocities: [...(d.stepVelocities ?? Array(32).fill(0.8))],
           stepPans:       [...(d.stepPans       ?? Array(32).fill(0))],
           stepPitches:    [...(d.stepPitches    ?? Array(32).fill(0))],
