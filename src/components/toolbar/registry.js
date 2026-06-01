@@ -15,6 +15,7 @@ import StepsPanel     from './StepsPanel.vue'
 import ModePanel      from './ModePanel.vue'
 import SnapPanel      from './SnapPanel.vue'
 import MetronomePanel from './MetronomePanel.vue'
+import PatternPanel   from './PatternPanel.vue'
 import MeterPanel     from './MeterPanel.vue'
 import ToolsPanel     from './ToolsPanel.vue'
 import WindowsPanel   from './WindowsPanel.vue'
@@ -34,6 +35,7 @@ export const PANELS = {
   mode:      { label: 'Pat / Song',  component: ModePanel      },
   metro:     { label: 'Metronome',   component: MetronomePanel },
   snap:      { label: 'Snap',        component: SnapPanel      },
+  pattern:   { label: 'Pattern',     component: PatternPanel   },
   meter:     { label: 'System Monitor', component: MeterPanel },
   tools:     { label: 'Tools',       component: ToolsPanel     },
   windows:   { label: 'Windows',     component: WindowsPanel   },
@@ -60,4 +62,5 @@ export const DEFAULT_LAYOUT = [
   { id: 'windows',   visible: true, row: 0 },
   // ── Secondary row ──────────────────────────────────────────────────────────
   { id: 'hint',      visible: true, row: 1 },
+  { id: 'pattern',   visible: true, row: 1 },
 ]

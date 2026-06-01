@@ -21,6 +21,8 @@ export const HINTS = {
   'steps':             'Steps per pattern',
   'mode.pat':          'Pattern mode — loop a single pattern',
   'mode.song':         'Song mode — arrange patterns on the playlist',
+  'pattern':           'Active pattern — drag/scroll to switch, F2 to rename',
+  'pattern.menu':      'Pattern menu — new, duplicate, split by channel, delete',
   'metro':             'Metronome — right-click to pick the click sound',
   'snap':              'Global grid snap',
   'sysmon':            'System monitor — audio load, memory, active voices, dropouts',
