@@ -34,7 +34,7 @@ export const PANELS = {
   mode:      { label: 'Pat / Song',  component: ModePanel      },
   metro:     { label: 'Metronome',   component: MetronomePanel },
   snap:      { label: 'Snap',        component: SnapPanel      },
-  meter:     { label: 'CPU / Scope', component: MeterPanel     },
+  meter:     { label: 'System Monitor', component: MeterPanel },
   tools:     { label: 'Tools',       component: ToolsPanel     },
   windows:   { label: 'Windows',     component: WindowsPanel   },
 }

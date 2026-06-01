@@ -23,6 +23,7 @@ export const HINTS = {
   'mode.song':         'Song mode — arrange patterns on the playlist',
   'metro':             'Metronome — right-click to pick the click sound',
   'snap':              'Global grid snap',
+  'sysmon':            'System monitor — audio load, memory, active voices, dropouts',
   'tools.kb':          'QWERTY → MIDI typing keyboard',
   'tools.undo':        'Undo last action',
   'tools.redo':        'Redo',
