@@ -1,0 +1,205 @@
+/* ──────────────────────────────────────────────────────────────────────────
+   Shared toolbar panel styles (global, un-scoped on purpose).
+   Each panel is a self-contained micro-component; these classes are the
+   common visual vocabulary they all draw from.
+   ────────────────────────────────────────────────────────────────────────── */
+
+/* ── Separators / spacer ───────────────────────────────────────────────────── */
+.tb-sep {
+  width: 1px;
+  height: 32px;
+  background: var(--border-subtle);
+  flex-shrink: 0;
+  margin: 0 7px;
+}
+.tb-spacer-panel { flex: 1; min-width: 8px; align-self: stretch; }
+
+/* ── Logo ──────────────────────────────────────────────────────────────────── */
+.tb-logo {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  margin-right: 2px;
+}
+.tb-hex {
+  font-size: 22px;
+  color: #e74c3c;
+  filter: drop-shadow(0 0 6px #e74c3c77);
+  line-height: 1;
+}
+.tb-logo-text { display: flex; flex-direction: column; line-height: 1.15; }
+.tb-logo-main {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 13px; font-weight: 700; letter-spacing: 0.11em; color: #c8c8e0;
+}
+.tb-logo-main em { font-style: normal; color: #e74c3c; }
+.tb-logo-sub {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 7px; color: #28283c; letter-spacing: 0.28em;
+}
+
+/* ── Groups ────────────────────────────────────────────────────────────────── */
+.tb-group { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
+.tb-group-label {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 7px; font-weight: 700; letter-spacing: 0.2em;
+  color: #28283c; text-transform: uppercase;
+}
+.tb-row { display: flex; gap: 3px; align-items: center; }
+
+/* ── Transport buttons ─────────────────────────────────────────────────────── */
+.tb-btn {
+  width: 32px; height: 28px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Rajdhani', sans-serif; font-size: 13px; font-weight: 700;
+  border: 1px solid; border-radius: 5px; cursor: pointer;
+  transition: all 0.1s; outline: none; flex-shrink: 0;
+}
+.tb-stop {
+  background: #150808; border-color: #3c1212; color: #602020; font-size: 11px;
+}
+.tb-stop:hover {
+  border-color: #e74c3c; color: #e74c3c; background: #200a0a;
+  box-shadow: 0 0 9px #e74c3c44;
+}
+.tb-play {
+  background: #071408; border-color: #1a3a1e; color: #2a7035; font-size: 12px;
+}
+.tb-play:hover  { border-color: #2ecc71; color: #2ecc71; }
+.tb-play.active {
+  background: #081a09; border-color: #2ecc71; color: #2ecc71;
+  box-shadow: 0 0 10px #2ecc7166;
+}
+.tb-rec {
+  background: #150808; border-color: #2a1010; color: #441818;
+  font-size: 11px; opacity: 0.35; cursor: not-allowed;
+}
+
+/* ── Timecode ──────────────────────────────────────────────────────────────── */
+.tb-timecode {
+  display: flex; flex-direction: column; align-items: center;
+  cursor: pointer; padding: 3px 10px;
+  border: 1px solid var(--border-subtle); border-radius: 4px; background: var(--bg-deeper);
+  transition: border-color 0.15s; flex-shrink: 0;
+}
+.tb-timecode:hover { border-color: var(--border); }
+.tb-timecode-val {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 21px; color: #e74c3c; letter-spacing: 0.04em; line-height: 1;
+  filter: drop-shadow(0 0 5px #e74c3c44);
+}
+.tb-timecode-mode {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 7px; font-weight: 600; letter-spacing: 0.2em; color: #22223a; margin-top: 1px;
+}
+
+/* ── Control groups (BPM, Swing, Steps, Snap) ──────────────────────────────── */
+.tb-ctrl {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 2px; flex-shrink: 0; padding: 0 5px;
+}
+.tb-ctrl-label {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 8px; font-weight: 700; letter-spacing: 0.18em;
+  color: #28283c; text-transform: uppercase; line-height: 1;
+}
+.tb-ctrl-val {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 16px; color: #6060a0; min-width: 34px; text-align: center; line-height: 1;
+}
+.tb-red { color: #e74c3c; filter: drop-shadow(0 0 3px #e74c3c44); }
+.tb-slider { width: 68px; accent-color: #e74c3c; height: 3px; cursor: pointer; }
+.tb-select {
+  background: var(--bg-control); border: 1px solid var(--border-subtle); color: var(--text-muted);
+  padding: 3px 5px; border-radius: 4px;
+  font-family: 'Share Tech Mono', monospace; font-size: 11px;
+  cursor: pointer; outline: none; height: 22px;
+}
+.tb-select:focus { border-color: #e74c3c; }
+
+/* ── PAT / SONG ────────────────────────────────────────────────────────────── */
+.tb-mode-btn {
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
+  letter-spacing: 0.12em; padding: 4px 9px; height: 24px;
+  border: 1px solid var(--border-subtle); border-radius: 4px; cursor: pointer;
+  background: transparent; color: #30304a;
+  transition: all 0.12s; display: flex; align-items: center;
+}
+.tb-mode-btn:hover { border-color: #404068; color: #6060a0; }
+.tb-mode-btn.active {
+  border-color: #f39c12; color: #f39c12; background: #140e00;
+  box-shadow: 0 0 8px #f39c1233;
+}
+
+/* ── Oscilloscope + CPU ────────────────────────────────────────────────────── */
+.tb-meter { display: flex; flex-direction: column; gap: 3px; align-items: center; flex-shrink: 0; }
+.tb-scope {
+  display: block; border: 1px solid var(--border-subtle); border-radius: 3px; background: var(--bg-deeper);
+}
+.tb-cpu-row {
+  display: flex; align-items: center; gap: 4px; width: 100%;
+}
+.tb-cpu-lbl {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 7px; font-weight: 700; letter-spacing: 0.12em; color: #202030;
+  flex-shrink: 0;
+}
+.tb-cpu-bar {
+  flex: 1; height: 4px; background: var(--bg-control);
+  border-radius: 2px; overflow: hidden; border: 1px solid var(--border-subtle);
+}
+.tb-cpu-fill {
+  height: 100%; border-radius: 2px;
+  transition: width 0.12s ease, background 0.3s;
+}
+.tb-cpu-val {
+  font-family: 'Share Tech Mono', monospace;
+  font-size: 7px; color: #252535; min-width: 22px; text-align: right;
+}
+
+/* ── Tool buttons (keyboard, undo/redo) ────────────────────────────────────── */
+.tb-tools { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.tb-tools-sep { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 2px; }
+.tb-tool {
+  width: 27px; height: 26px;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Share Tech Mono', monospace; font-size: 14px;
+  background: transparent; border: 1px solid var(--border-subtle); border-radius: 4px;
+  color: #35354a; cursor: pointer; transition: all 0.1s; outline: none;
+}
+.tb-tool:hover:not(:disabled) { border-color: #404068; color: #8080b0; }
+.tb-tool.active {
+  border-color: #1abc9c; color: #1abc9c; background: #001a14;
+  box-shadow: 0 0 7px #1abc9c33;
+}
+.tb-tool:disabled { opacity: 0.22; cursor: not-allowed; }
+.tb-tool-save:hover:not(:disabled) { border-color: #2ecc71; color: #2ecc71; }
+.tb-tool-open:hover:not(:disabled) { border-color: #3498db; color: #3498db; }
+
+/* ── Window Manager ────────────────────────────────────────────────────────── */
+.tb-windows { display: flex; gap: 3px; flex-shrink: 0; }
+.tb-win {
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 4px 8px; min-width: 42px;
+  border: 1px solid var(--border-subtle); border-radius: 5px; cursor: pointer;
+  background: transparent; color: #30304a;
+  transition: all 0.12s; outline: none;
+}
+.tb-win:hover { border-color: #404068; color: #7070a0; }
+.tb-win.active { border-color: #9b59b6; background: #120820; box-shadow: 0 0 8px #9b59b633; }
+.tb-win-icon { font-size: 12px; line-height: 1; }
+.tb-win-lbl {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 8px; font-weight: 700; letter-spacing: 0.1em; color: inherit;
+}
+.tb-win.active .tb-win-lbl { color: #9b59b6; }
+.tb-win-mixer:hover { border-color: #3498db; color: #3498db; }
+.tb-win-mixer.active { border-color: #3498db; background: #04121e; box-shadow: 0 0 8px #3498db33; }
+.tb-win-mixer.active .tb-win-lbl { color: #3498db; }
+.tb-win-render:hover { border-color: #e74c3c; color: #e74c3c; }
+.tb-win-render.active { border-color: #e74c3c; background: #1a0808; box-shadow: 0 0 8px #e74c3c33; }
+.tb-win-render.active .tb-win-lbl { color: #e74c3c; }
+.tb-win-theme:hover { border-color: #9b59b6; color: #9b59b6; }
+.tb-win-theme.active { border-color: #9b59b6; background: #160e20; box-shadow: 0 0 8px #9b59b633; }
+.tb-win-theme.active .tb-win-lbl { color: #9b59b6; }
