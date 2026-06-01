@@ -1,578 +1,437 @@
 <template>
-  <header class="topbar">
-
-    <!-- ── Logo ───────────────────────────────────────────────────────────────── -->
-    <div class="tb-logo">
-      <span class="tb-hex">⬡</span>
-      <div class="tb-logo-text">
-        <span class="tb-logo-main">FREAKY<em>LOOPS</em></span>
-        <span class="tb-logo-sub">STUDIO</span>
-      </div>
-    </div>
-
-    <div class="tb-sep" />
-
-    <!-- ── Transport ──────────────────────────────────────────────────────────── -->
-    <div class="tb-group">
-      <div class="tb-group-label">TRANSPORT</div>
-      <div class="tb-row">
-        <button
-          class="tb-btn tb-stop"
-          @click="stopPlay"
-          title="Stop & reset to start (destructive)"
-        >■</button>
-        <button
-          class="tb-btn tb-play"
-          :class="{ active: isPlaying }"
-          @click="togglePlay"
-          :title="isPlaying ? 'Pause — hold position' : 'Play'"
-        >{{ isPlaying ? '⏸' : '▶' }}</button>
-        <button
-          class="tb-btn tb-rec"
-          title="Record (coming soon)"
-          disabled
-        >⏺</button>
-      </div>
-    </div>
-
-    <div class="tb-sep" />
-
-    <!-- ── Timecode Display ────────────────────────────────────────────────────── -->
+  <!-- ── Root drop-zone grid ────────────────────────────────────────────────
+       Two stacked rows of standalone micro-panels. In edit mode it becomes a
+       live drag surface: panels quantize onto boundaries and can move freely
+       between the primary and secondary rows. -->
+  <header
+    ref="barEl"
+    class="topbar"
+    :class="{ 'topbar--bottom': dock === 'bottom', 'topbar--edit': editMode }"
+    @contextmenu.prevent="openMenu"
+  >
     <div
-      class="tb-timecode"
-      @click="timecodeAsMins = !timecodeAsMins"
-      :title="timecodeAsMins ? 'Click → Bars:Beats:Ticks' : 'Click → Min:Sec:Ms'"
+      v-for="row in [0, 1]"
+      :key="row"
+      class="tb-line"
+      :class="[
+        row === 0 ? 'tb-line--primary' : 'tb-line--secondary',
+        { 'tb-line--edit': editMode },
+      ]"
+      @dragover="onDragOver($event, row)"
+      @drop.prevent="onDrop"
     >
-      <div class="tb-timecode-val">{{ timecodeDisplay }}</div>
-      <div class="tb-timecode-mode">{{ timecodeAsMins ? 'MIN · SEC · MS' : 'BAR · BEAT · TICK' }}</div>
-    </div>
+      <template v-for="(slot, vi) in slotsByRow[row]" :key="slot.id">
+        <!-- Ghost placeholder shows the quantized landing spot before commit -->
+        <div v-if="editMode && ghostRow === row && ghostIndex === vi" class="tb-ghost" />
 
-    <div class="tb-sep" />
+        <!-- Auto separator between two adjacent real panels -->
+        <div
+          v-if="vi > 0 && slot.id !== SPACER_ID && slotsByRow[row][vi - 1].id !== SPACER_ID"
+          class="tb-sep"
+        />
 
-    <!-- ── BPM ────────────────────────────────────────────────────────────────── -->
-    <div class="tb-ctrl">
-      <div class="tb-ctrl-label">BPM</div>
-      <div class="tb-ctrl-val tb-red">{{ bpm }}</div>
-      <input type="range" v-model.number="bpm" min="40" max="220" step="1" class="tb-slider" />
-    </div>
-
-    <!-- ── Swing ─────────────────────────────────────────────────────────────── -->
-    <div class="tb-ctrl">
-      <div class="tb-ctrl-label">SWING</div>
-      <div class="tb-ctrl-val" style="font-size:12px">{{ Math.round(swing * 100) }}%</div>
-      <input type="range" v-model.number="swing" min="0" max="0.25" step="0.01" class="tb-slider" />
-    </div>
-
-    <!-- ── Steps ─────────────────────────────────────────────────────────────── -->
-    <div class="tb-ctrl">
-      <div class="tb-ctrl-label">STEPS</div>
-      <select v-model.number="totalSteps" class="tb-select">
-        <option :value="8">8</option>
-        <option :value="16">16</option>
-        <option :value="32">32</option>
-      </select>
-    </div>
-
-    <div class="tb-sep" />
-
-    <!-- ── PAT / SONG ─────────────────────────────────────────────────────────── -->
-    <div class="tb-group">
-      <div class="tb-group-label">MODE</div>
-      <div class="tb-row">
-        <button
-          class="tb-mode-btn"
-          :class="{ active: !usePlaylist }"
-          @click="setPAT"
-          title="Pattern mode — loop a single pattern"
-        >PAT</button>
-        <button
-          class="tb-mode-btn"
-          :class="{ active: usePlaylist }"
-          @click="setSONG"
-          title="Song mode — arrange patterns on the playlist"
-        >SONG</button>
-      </div>
-    </div>
-
-    <div class="tb-sep" />
-
-    <!-- ── Global Snap ────────────────────────────────────────────────────────── -->
-    <div class="tb-ctrl">
-      <div class="tb-ctrl-label">🧲 SNAP</div>
-      <select v-model="gridSnap" class="tb-select">
-        <option value="bar">Bar</option>
-        <option value="1/2">1/2</option>
-        <option value="1/4">1/4</option>
-        <option value="1/8">1/8</option>
-        <option value="1/16">1/16</option>
-        <option value="none">None</option>
-      </select>
-    </div>
-
-    <!-- ── Push everything right ─────────────────────────────────────────────── -->
-    <div class="tb-spacer" />
-
-    <!-- ── Oscilloscope + CPU Meter ───────────────────────────────────────────── -->
-    <div class="tb-meter">
-      <canvas ref="scopeCanvas" class="tb-scope" :width="SCOPE_W" :height="SCOPE_H" />
-      <div class="tb-cpu-row">
-        <span class="tb-cpu-lbl">CPU</span>
-        <div class="tb-cpu-bar">
-          <div class="tb-cpu-fill" :style="{ width: audioLoad + '%', background: cpuColor }" />
+        <!-- Flex-filler pseudo-panel -->
+        <div
+          v-if="slot.id === SPACER_ID"
+          class="tb-slot tb-slot--spacer tb-spacer-panel"
+          :class="{ 'tb-slot--edit': editMode, 'tb-slot--dragging': dragId === slot.id }"
+          :draggable="editMode"
+          @dragstart="onDragStart(slot.id, $event)"
+          @dragend="onDragEnd"
+        >
+          <span v-if="editMode" class="tb-slot-tag">⟷ flex</span>
+          <span v-if="editMode" class="tb-slot-hide" @click.stop="hide(slot.id)" title="Hide">×</span>
         </div>
-        <span class="tb-cpu-val">{{ audioLoad }}%</span>
+
+        <!-- Real micro-panel -->
+        <div
+          v-else
+          class="tb-slot"
+          :class="{
+            'tb-slot--edit': editMode,
+            'tb-slot--dragging': dragId === slot.id,
+            'tb-slot--grow': PANELS[slot.id].grow,
+          }"
+          :draggable="editMode"
+          @dragstart="onDragStart(slot.id, $event)"
+          @dragend="onDragEnd"
+        >
+          <div class="tb-slot-content" :class="{ 'tb-slot-content--locked': editMode }">
+            <component :is="PANELS[slot.id].component" />
+          </div>
+          <span v-if="editMode" class="tb-slot-tag">{{ PANELS[slot.id].label }}</span>
+          <span v-if="editMode" class="tb-slot-hide" @click.stop="hide(slot.id)" title="Hide panel">×</span>
+        </div>
+      </template>
+
+      <!-- Trailing ghost (drop at far end of this row) -->
+      <div v-if="editMode && ghostRow === row && ghostIndex === slotsByRow[row].length" class="tb-ghost" />
+
+      <!-- Empty-row drop hint -->
+      <div v-if="editMode && !slotsByRow[row].length" class="tb-line-empty">
+        drop a panel here · {{ row === 0 ? 'primary row' : 'secondary row' }}
       </div>
     </div>
-
-    <div class="tb-sep" />
-
-    <!-- ── Keyboard toggle + Undo/Redo ────────────────────────────────────────── -->
-    <div class="tb-tools">
-      <button
-        class="tb-tool"
-        :class="{ active: keyboardInputMode }"
-        @click="keyboardInputMode = !keyboardInputMode"
-        title="QWERTY keyboard → MIDI (intercepts browser shortcuts when on)"
-      >⌨</button>
-      <div class="tb-tools-sep" />
-      <button
-        class="tb-tool"
-        @click="undoAction"
-        :disabled="!canUndo"
-        title="Undo"
-      >↶</button>
-      <button
-        class="tb-tool"
-        @click="redoAction"
-        :disabled="!canRedo"
-        title="Redo"
-      >↷</button>
-      <div class="tb-tools-sep" />
-      <button
-        class="tb-tool tb-tool-save"
-        @click="onSave"
-        title="Save project (.freak)"
-      >↓</button>
-      <button
-        class="tb-tool tb-tool-open"
-        @click="fileInput.click()"
-        title="Open project (.freak)"
-      >↑</button>
-      <input
-        ref="fileInput"
-        type="file"
-        accept=".freak,.json"
-        style="display:none"
-        @change="onFileChange"
-      />
-    </div>
-
-    <div class="tb-sep" />
-
-    <!-- ── Window Manager ─────────────────────────────────────────────────────── -->
-    <div class="tb-windows">
-      <button
-        class="tb-win"
-        :class="{ active: mainView === 'sequencer' }"
-        @click="mainView = 'sequencer'"
-        title="Channel Rack"
-      >
-        <span class="tb-win-icon">▦</span>
-        <span class="tb-win-lbl">RACK</span>
-      </button>
-      <button
-        class="tb-win"
-        :class="{ active: pianoRollOpen && mainView === 'sequencer' }"
-        @click="togglePianoRoll"
-        title="Piano Roll"
-      >
-        <span class="tb-win-icon">𝅘𝅥𝅮</span>
-        <span class="tb-win-lbl">PIANO</span>
-      </button>
-      <button
-        class="tb-win"
-        :class="{ active: mainView === 'playlist' }"
-        @click="setSONG"
-        title="Playlist / Song editor"
-      >
-        <span class="tb-win-icon">▤</span>
-        <span class="tb-win-lbl">PLAYLIST</span>
-      </button>
-      <button
-        class="tb-win tb-win-mixer"
-        :class="{ active: mainView === 'mixer' }"
-        @click="mainView = 'mixer'"
-        title="Mixer"
-      >
-        <span class="tb-win-icon">⊟</span>
-        <span class="tb-win-lbl">MIXER</span>
-      </button>
-      <button
-        class="tb-win tb-win-render"
-        @click="renderModalOpen = true"
-        title="Render / Export audio"
-      >
-        <span class="tb-win-icon">⬡</span>
-        <span class="tb-win-lbl">RENDER</span>
-      </button>
-      <button
-        class="tb-win tb-win-theme"
-        @click="themeModalOpen = true"
-        title="Theme settings"
-      >
-        <span class="tb-win-icon">◑</span>
-        <span class="tb-win-lbl">THEME</span>
-      </button>
-    </div>
-
   </header>
+
+  <!-- ── Edit-mode tray ─────────────────────────────────────────────────────
+       Re-mount hidden panels, reset, flip dock, or leave edit mode. -->
+  <div v-if="editMode" class="tb-editbar" :class="{ 'tb-editbar--bottom': dock === 'bottom' }">
+    <span class="tb-editbar-title">EDIT TOOLBAR</span>
+    <span class="tb-editbar-hint">drag panels to rearrange or move between rows · drag toward the window edge to re-dock</span>
+    <div class="tb-editbar-hidden" v-if="hiddenSlots.length">
+      <span class="tb-editbar-lbl">HIDDEN</span>
+      <button
+        v-for="slot in hiddenSlots"
+        :key="slot.id"
+        class="tb-chip"
+        @click="show(slot.id)"
+        title="Re-add panel"
+      >+ {{ slot.id === SPACER_ID ? 'Flex' : PANELS[slot.id].label }}</button>
+    </div>
+    <div class="tb-editbar-spacer" />
+    <button class="tb-editbar-btn" @click="toggleDock">DOCK {{ dock === 'top' ? '▼ BOTTOM' : '▲ TOP' }}</button>
+    <button class="tb-editbar-btn" @click="resetLayout">RESET</button>
+    <button class="tb-editbar-btn tb-editbar-done" @click="editMode = false">DONE</button>
+  </div>
+
+  <!-- ── Context menu ───────────────────────────────────────────────────────-->
+  <div
+    v-if="menu.open"
+    class="tb-menu"
+    :style="{ left: menu.x + 'px', top: menu.y + 'px' }"
+  >
+    <div class="tb-menu-item" @click="editMode = !editMode; menu.open = false">
+      {{ editMode ? '✓ ' : '' }}Edit…
+    </div>
+    <div class="tb-menu-item" @click="toggleDock(); menu.open = false">
+      Dock to {{ dock === 'top' ? 'bottom' : 'top' }}
+    </div>
+    <div class="tb-menu-sep" />
+    <div class="tb-menu-item" @click="resetLayout(); menu.open = false">Reset layout</div>
+  </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { useStudio } from '../store/studio.js'
+import { PANELS, DEFAULT_LAYOUT, SPACER_ID } from './toolbar/registry.js'
+import './toolbar/toolbar.css'
 
-const {
-  bpm, swing, totalSteps, isPlaying,
-  mainView, pianoRollOpen, renderModalOpen, themeModalOpen,
-  usePlaylist, gridSnap, keyboardInputMode, audioLoad,
-  togglePlay, stopPlay, getPlayheadTimeSeconds,
-  canUndo, canRedo, undoAction, redoAction, getAnalyser,
-  saveProject, loadProjectFile,
-} = useStudio()
+const LS_KEY = 'fl.toolbar.layout.v2'
 
-// ── File save / open ──────────────────────────────────────────────────────────
-const fileInput = ref(null)
+// ── Layout state ──────────────────────────────────────────────────────────────
+const layout   = ref(loadLayout())
+const dock     = ref(loadDock())
+const editMode = ref(false)
+const barEl    = ref(null)
 
-function onSave() {
-  saveProject('project')
+const visibleSlots = computed(() => layout.value.filter(s => s.visible))
+const hiddenSlots  = computed(() => layout.value.filter(s => !s.visible))
+
+// Visible slots bucketed by row, preserving their relative order.
+const slotsByRow = computed(() => ({
+  0: visibleSlots.value.filter(s => (s.row ?? 0) === 0),
+  1: visibleSlots.value.filter(s => (s.row ?? 0) === 1),
+}))
+
+// ── Persistence (serialize coords + visibility + row, reconcile on load) ──────
+function loadLayout() {
+  let saved = null
+  try { saved = JSON.parse(localStorage.getItem(LS_KEY))?.layout } catch {}
+  const known  = new Set([...Object.keys(PANELS), SPACER_ID])
+  const defRow = Object.fromEntries(DEFAULT_LAYOUT.map(d => [d.id, d.row ?? 0]))
+  if (!Array.isArray(saved)) return DEFAULT_LAYOUT.map(s => ({ ...s }))
+  // Keep saved order/row, drop unknown ids.
+  const result = saved.filter(s => s && known.has(s.id)).map(s => ({
+    id: s.id,
+    visible: s.visible !== false,
+    row: s.row === 1 ? 1 : (s.row === 0 ? 0 : (defRow[s.id] ?? 0)),
+  }))
+  const seen = new Set(result.map(s => s.id))
+  // Splice panels added since the layout was saved in at their default index.
+  DEFAULT_LAYOUT.forEach((def, i) => {
+    if (!seen.has(def.id)) result.splice(Math.min(i, result.length), 0, { ...def })
+  })
+  return result
+}
+function loadDock() {
+  try { return JSON.parse(localStorage.getItem(LS_KEY))?.dock === 'bottom' ? 'bottom' : 'top' }
+  catch { return 'top' }
+}
+function persist() {
+  try { localStorage.setItem(LS_KEY, JSON.stringify({ layout: layout.value, dock: dock.value })) } catch {}
 }
 
-function onFileChange(e) {
-  const file = e.target.files?.[0]
-  if (file) loadProjectFile(file)
-  e.target.value = ''
+// ── Show / hide panels ────────────────────────────────────────────────────────
+function hide(id) {
+  const s = layout.value.find(p => p.id === id)
+  if (s) { s.visible = false; persist() }
+}
+function show(id) {
+  const s = layout.value.find(p => p.id === id)
+  if (s) { s.visible = true; persist() }
 }
 
-// ── PAT / SONG ────────────────────────────────────────────────────────────────
-function setPAT() {
-  usePlaylist.value = false
-  mainView.value = 'sequencer'
-}
-function setSONG() {
-  usePlaylist.value = true
-  mainView.value = 'playlist'
-}
-function togglePianoRoll() {
-  if (mainView.value !== 'sequencer') mainView.value = 'sequencer'
-  pianoRollOpen.value = !pianoRollOpen.value
+// ── Drag-to-reorder with quantized boundary snapping (row-aware) ──────────────
+const dragId     = ref(null)
+const ghostRow   = ref(-1)
+const ghostIndex = ref(-1)
+
+function onDragStart(id, e) {
+  dragId.value = id
+  e.dataTransfer.effectAllowed = 'move'
+  // Firefox requires data to be set for a drag to start.
+  try { e.dataTransfer.setData('text/plain', id) } catch {}
 }
 
-// ── Timecode ──────────────────────────────────────────────────────────────────
-const timecodeAsMins = ref(false)
-const currentTimeSec = ref(0)
-let timecodeRaf = null
+function onDragOver(e, row) {
+  if (!editMode.value || !dragId.value) return
+  e.preventDefault()
+  e.dataTransfer.dropEffect = 'move'
 
-function tickTimecode() {
-  currentTimeSec.value = getPlayheadTimeSeconds()
-  timecodeRaf = requestAnimationFrame(tickTimecode)
-}
-
-const timecodeDisplay = computed(() => {
-  const t = currentTimeSec.value
-  if (timecodeAsMins.value) {
-    const min = Math.floor(t / 60)
-    const sec = Math.floor(t % 60)
-    const ms  = Math.floor((t % 1) * 100)
-    return `${String(min).padStart(2, '0')}:${String(sec).padStart(2, '0')}:${String(ms).padStart(2, '0')}`
+  // Quantize the pointer X onto the nearest slot boundary within this row.
+  const slots = [...e.currentTarget.querySelectorAll('.tb-slot')]
+  let idx = slots.length
+  for (let i = 0; i < slots.length; i++) {
+    const r = slots[i].getBoundingClientRect()
+    if (e.clientX < r.left + r.width / 2) { idx = i; break }
   }
-  const spb  = 60 / bpm.value
-  const spbar = 4 * spb
-  const bar  = Math.floor(t / spbar) + 1
-  const beat = Math.floor((t % spbar) / spb) + 1
-  const tick = Math.floor(((t % spb) / spb) * totalSteps.value) + 1
-  return `${String(bar).padStart(3, '0')}:${beat}:${String(tick).padStart(2, '0')}`
-})
+  ghostRow.value   = row
+  ghostIndex.value = idx
 
-// ── Oscilloscope ──────────────────────────────────────────────────────────────
-const SCOPE_W = 112
-const SCOPE_H = 28
-const scopeCanvas = ref(null)
-let scopeRaf = null
-let scopeBuf = null
-
-function drawScope() {
-  const canvas = scopeCanvas.value
-  if (!canvas) { scopeRaf = requestAnimationFrame(drawScope); return }
-  const ctx = canvas.getContext('2d')
-  const w = canvas.width
-  const h = canvas.height
-
-  const style = getComputedStyle(document.documentElement)
-  ctx.fillStyle = style.getPropertyValue('--bg-deeper').trim() || '#07070f'
-  ctx.fillRect(0, 0, w, h)
-
-  const analyser = getAnalyser()
-  if (!analyser) {
-    ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2)
-    ctx.strokeStyle = style.getPropertyValue('--border-subtle').trim() || '#1a1a28'; ctx.lineWidth = 1; ctx.stroke()
-    scopeRaf = requestAnimationFrame(drawScope)
-    return
-  }
-
-  if (!scopeBuf || scopeBuf.length !== analyser.fftSize) {
-    scopeBuf = new Float32Array(analyser.fftSize)
-  }
-  analyser.getFloatTimeDomainData(scopeBuf)
-
-  const peak = scopeBuf.reduce((m, v) => Math.max(m, Math.abs(v)), 0)
-  const waveColor = peak > 0.8 ? '#e74c3c' : peak > 0.5 ? '#f39c12' : '#2ecc71'
-
-  // Subtle peak glow
-  if (peak > 0.05) {
-    ctx.fillStyle = `rgba(46,204,113,${Math.min(0.07, peak * 0.06)})`
-    ctx.fillRect(0, 0, w, h)
-  }
-
-  ctx.beginPath()
-  ctx.strokeStyle = waveColor
-  ctx.lineWidth = 1.5
-  const sl = w / scopeBuf.length
-  for (let i = 0; i < scopeBuf.length; i++) {
-    const x = i * sl
-    const y = (1 - (scopeBuf[i] + 1) / 2) * h
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
-  }
-  ctx.stroke()
-
-  scopeRaf = requestAnimationFrame(drawScope)
+  // Boundary-collision re-docking: dragging into the window's top/bottom flips it.
+  const h = window.innerHeight
+  if (e.clientY > h * 0.9 && dock.value !== 'bottom') { dock.value = 'bottom' }
+  else if (e.clientY < h * 0.1 && dock.value !== 'top') { dock.value = 'top' }
 }
 
-// ── CPU color ─────────────────────────────────────────────────────────────────
-const cpuColor = computed(() => {
-  const l = audioLoad.value
-  return l > 75 ? '#e74c3c' : l > 45 ? '#f39c12' : '#2ecc71'
-})
+function onDrop() {
+  if (!dragId.value || ghostIndex.value < 0) return onDragEnd()
+  const item = layout.value.find(s => s.id === dragId.value)
+  if (!item) return onDragEnd()
 
-// ── Lifecycle ─────────────────────────────────────────────────────────────────
-onMounted(() => { tickTimecode(); drawScope() })
-onBeforeUnmount(() => {
-  cancelAnimationFrame(timecodeRaf)
-  cancelAnimationFrame(scopeRaf)
-})
+  const targetRow = ghostRow.value
+  const fromRow   = item.row ?? 0
+
+  // The target row as the user saw it (still includes the dragged item).
+  const rendered = visibleSlots.value.filter(s => (s.row ?? 0) === targetRow)
+  let idx = Math.max(0, Math.min(rendered.length, ghostIndex.value))
+  const curPos = rendered.findIndex(s => s.id === item.id)
+  if (fromRow === targetRow && curPos !== -1 && curPos < idx) idx--   // account for self-removal
+
+  const target = rendered.filter(s => s.id !== item.id)
+  item.row = targetRow
+  target.splice(Math.max(0, Math.min(target.length, idx)), 0, item)
+
+  const otherRow = targetRow === 0 ? 1 : 0
+  const other  = visibleSlots.value.filter(s => (s.row ?? 0) === otherRow && s.id !== item.id)
+  const hidden = layout.value.filter(s => !s.visible)
+  layout.value = targetRow === 0 ? [...target, ...other, ...hidden] : [...other, ...target, ...hidden]
+  persist()
+  onDragEnd()
+}
+
+function onDragEnd() {
+  dragId.value = null
+  ghostRow.value = -1
+  ghostIndex.value = -1
+}
+
+// ── Docking ───────────────────────────────────────────────────────────────────
+function toggleDock() {
+  dock.value = dock.value === 'top' ? 'bottom' : 'top'
+  persist()
+}
+
+// ── Reset ─────────────────────────────────────────────────────────────────────
+function resetLayout() {
+  layout.value = DEFAULT_LAYOUT.map(s => ({ ...s }))
+  dock.value = 'top'
+  persist()
+}
+
+// ── Context menu ──────────────────────────────────────────────────────────────
+const menu = ref({ open: false, x: 0, y: 0 })
+function openMenu(e) {
+  menu.value = { open: true, x: e.clientX, y: e.clientY }
+}
+function closeMenu() { menu.value.open = false }
+
+onMounted(() => window.addEventListener('pointerdown', onGlobalDown, true))
+onBeforeUnmount(() => window.removeEventListener('pointerdown', onGlobalDown, true))
+function onGlobalDown(e) {
+  if (menu.value.open && !e.target.closest('.tb-menu')) closeMenu()
+}
 </script>
 
 <style scoped>
-/* ── Root ──────────────────────────────────────────────────────────────────── */
+/* ── Root drop-zone grid (two stacked rows) ────────────────────────────────── */
 .topbar {
   display: flex;
-  align-items: center;
-  height: 56px;
-  padding: 0 10px;
+  flex-direction: column;
   background: linear-gradient(180deg, var(--bg-panel) 0%, var(--bg-deeper) 100%);
   border-bottom: 1px solid var(--border-subtle);
   flex-shrink: 0;
   overflow: hidden;
-  gap: 0;
   user-select: none;
+  position: relative;
+  z-index: 50;            /* toolbar keeps z-index supremacy over the body */
+}
+/* Re-docked to the floor: flip border + flex ordering. */
+.topbar--bottom {
+  order: 99;
+  border-bottom: none;
+  border-top: 1px solid var(--border-subtle);
+  background: linear-gradient(0deg, var(--bg-panel) 0%, var(--bg-deeper) 100%);
+}
+.topbar--edit {
+  background: linear-gradient(180deg, #14101e 0%, #0c0a14 100%);
+  overflow: visible;
 }
 
-.tb-sep {
-  width: 1px;
-  height: 32px;
-  background: var(--border-subtle);
-  flex-shrink: 0;
-  margin: 0 7px;
-}
-.tb-spacer { flex: 1; min-width: 8px; }
-
-/* ── Logo ──────────────────────────────────────────────────────────────────── */
-.tb-logo {
+/* ── Rows ──────────────────────────────────────────────────────────────────── */
+.tb-line {
   display: flex;
   align-items: center;
-  gap: 7px;
-  flex-shrink: 0;
-  margin-right: 2px;
+  gap: 0;
+  padding: 0 10px;
+  position: relative;
 }
-.tb-hex {
-  font-size: 22px;
-  color: #e74c3c;
-  filter: drop-shadow(0 0 6px #e74c3c77);
-  line-height: 1;
+.tb-line--primary   { min-height: 48px; }
+.tb-line--secondary {
+  min-height: 30px;
+  border-top: 1px solid var(--border-subtle);   /* the FL inter-row divider */
+  background: linear-gradient(180deg, var(--bg-deeper) 0%, var(--bg-base) 100%);
 }
-.tb-logo-text { display: flex; flex-direction: column; line-height: 1.15; }
-.tb-logo-main {
-  font-family: 'Rajdhani', sans-serif;
-  font-size: 13px; font-weight: 700; letter-spacing: 0.11em; color: #c8c8e0;
-}
-.tb-logo-main em { font-style: normal; color: #e74c3c; }
-.tb-logo-sub {
-  font-family: 'Share Tech Mono', monospace;
-  font-size: 7px; color: #28283c; letter-spacing: 0.28em;
+.topbar--bottom .tb-line--secondary { background: linear-gradient(0deg, var(--bg-deeper) 0%, var(--bg-base) 100%); }
+.tb-line--edit { padding-top: 4px; padding-bottom: 4px; }
+.tb-line-empty {
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #3a3a55;
+  padding: 6px 4px; pointer-events: none;
 }
 
-/* ── Groups ────────────────────────────────────────────────────────────────── */
-.tb-group { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
-.tb-group-label {
-  font-family: 'Rajdhani', sans-serif;
-  font-size: 7px; font-weight: 700; letter-spacing: 0.2em;
-  color: #28283c; text-transform: uppercase;
-}
-.tb-row { display: flex; gap: 3px; align-items: center; }
-
-/* ── Transport buttons ─────────────────────────────────────────────────────── */
-.tb-btn {
-  width: 32px; height: 28px;
-  display: flex; align-items: center; justify-content: center;
-  font-family: 'Rajdhani', sans-serif; font-size: 13px; font-weight: 700;
-  border: 1px solid; border-radius: 5px; cursor: pointer;
-  transition: all 0.1s; outline: none; flex-shrink: 0;
-}
-.tb-stop {
-  background: #150808; border-color: #3c1212; color: #602020; font-size: 11px;
-}
-.tb-stop:hover {
-  border-color: #e74c3c; color: #e74c3c; background: #200a0a;
-  box-shadow: 0 0 9px #e74c3c44;
-}
-.tb-play {
-  background: #071408; border-color: #1a3a1e; color: #2a7035; font-size: 12px;
-}
-.tb-play:hover  { border-color: #2ecc71; color: #2ecc71; }
-.tb-play.active {
-  background: #081a09; border-color: #2ecc71; color: #2ecc71;
-  box-shadow: 0 0 10px #2ecc7166;
-}
-.tb-rec {
-  background: #150808; border-color: #2a1010; color: #441818;
-  font-size: 11px; opacity: 0.35; cursor: not-allowed;
-}
-
-/* ── Timecode ──────────────────────────────────────────────────────────────── */
-.tb-timecode {
-  display: flex; flex-direction: column; align-items: center;
-  cursor: pointer; padding: 3px 10px;
-  border: 1px solid var(--border-subtle); border-radius: 4px; background: var(--bg-deeper);
-  transition: border-color 0.15s; flex-shrink: 0;
-}
-.tb-timecode:hover { border-color: var(--border); }
-.tb-timecode-val {
-  font-family: 'Share Tech Mono', monospace;
-  font-size: 21px; color: #e74c3c; letter-spacing: 0.04em; line-height: 1;
-  filter: drop-shadow(0 0 5px #e74c3c44);
-}
-.tb-timecode-mode {
-  font-family: 'Rajdhani', sans-serif;
-  font-size: 7px; font-weight: 600; letter-spacing: 0.2em; color: #22223a; margin-top: 1px;
-}
-
-/* ── Control groups (BPM, Swing, Steps, Snap) ──────────────────────────────── */
-.tb-ctrl {
-  display: flex; flex-direction: column; align-items: center;
-  gap: 2px; flex-shrink: 0; padding: 0 5px;
-}
-.tb-ctrl-label {
-  font-family: 'Rajdhani', sans-serif;
-  font-size: 8px; font-weight: 700; letter-spacing: 0.18em;
-  color: #28283c; text-transform: uppercase; line-height: 1;
-}
-.tb-ctrl-val {
-  font-family: 'Share Tech Mono', monospace;
-  font-size: 16px; color: #6060a0; min-width: 34px; text-align: center; line-height: 1;
-}
-.tb-red { color: #e74c3c; filter: drop-shadow(0 0 3px #e74c3c44); }
-.tb-slider { width: 68px; accent-color: #e74c3c; height: 3px; cursor: pointer; }
-.tb-select {
-  background: var(--bg-control); border: 1px solid var(--border-subtle); color: var(--text-muted);
-  padding: 3px 5px; border-radius: 4px;
-  font-family: 'Share Tech Mono', monospace; font-size: 11px;
-  cursor: pointer; outline: none; height: 22px;
-}
-.tb-select:focus { border-color: #e74c3c; }
-
-/* ── PAT / SONG ────────────────────────────────────────────────────────────── */
-.tb-mode-btn {
-  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
-  letter-spacing: 0.12em; padding: 4px 9px; height: 24px;
-  border: 1px solid var(--border-subtle); border-radius: 4px; cursor: pointer;
-  background: transparent; color: #30304a;
-  transition: all 0.12s; display: flex; align-items: center;
-}
-.tb-mode-btn:hover { border-color: #404068; color: #6060a0; }
-.tb-mode-btn.active {
-  border-color: #f39c12; color: #f39c12; background: #140e00;
-  box-shadow: 0 0 8px #f39c1233;
-}
-
-/* ── Oscilloscope + CPU ────────────────────────────────────────────────────── */
-.tb-meter { display: flex; flex-direction: column; gap: 3px; align-items: center; flex-shrink: 0; }
-.tb-scope {
-  display: block; border: 1px solid var(--border-subtle); border-radius: 3px; background: var(--bg-deeper);
-}
-.tb-cpu-row {
-  display: flex; align-items: center; gap: 4px; width: 100%;
-}
-.tb-cpu-lbl {
-  font-family: 'Rajdhani', sans-serif;
-  font-size: 7px; font-weight: 700; letter-spacing: 0.12em; color: #202030;
+/* ── Slots (panel wrappers) ────────────────────────────────────────────────── */
+.tb-slot {
+  position: relative;
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
 }
-.tb-cpu-bar {
-  flex: 1; height: 4px; background: var(--bg-control);
-  border-radius: 2px; overflow: hidden; border: 1px solid var(--border-subtle);
-}
-.tb-cpu-fill {
-  height: 100%; border-radius: 2px;
-  transition: width 0.12s ease, background 0.3s;
-}
-.tb-cpu-val {
-  font-family: 'Share Tech Mono', monospace;
-  font-size: 7px; color: #252535; min-width: 22px; text-align: right;
-}
+.tb-slot--spacer { flex: 1; min-width: 8px; }
+.tb-slot--grow { flex: 1; min-width: 160px; max-width: 520px; }
+.tb-slot--grow .tb-slot-content { width: 100%; display: flex; }
 
-/* ── Tool buttons (keyboard, undo/redo) ────────────────────────────────────── */
-.tb-tools { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
-.tb-tools-sep { width: 1px; height: 16px; background: var(--border-subtle); margin: 0 2px; }
-.tb-tool {
-  width: 27px; height: 26px;
-  display: flex; align-items: center; justify-content: center;
-  font-family: 'Share Tech Mono', monospace; font-size: 14px;
-  background: transparent; border: 1px solid var(--border-subtle); border-radius: 4px;
-  color: #35354a; cursor: pointer; transition: all 0.1s; outline: none;
+.tb-slot--edit {
+  cursor: grab;
+  border: 1px dashed #3a2f55;
+  border-radius: 6px;
+  padding: 2px 4px;
+  margin: 0 2px;
+  transition: border-color 0.12s, background 0.12s;
 }
-.tb-tool:hover:not(:disabled) { border-color: #404068; color: #8080b0; }
-.tb-tool.active {
-  border-color: #1abc9c; color: #1abc9c; background: #001a14;
-  box-shadow: 0 0 7px #1abc9c33;
+.tb-slot--edit:hover { border-color: #7b4dd6; background: #16102444; }
+.tb-slot--spacer.tb-slot--edit {
+  justify-content: center;
+  min-height: 30px;
+  background: repeating-linear-gradient(45deg, #140e22, #140e22 6px, #0e0a18 6px, #0e0a18 12px);
 }
-.tb-tool:disabled { opacity: 0.22; cursor: not-allowed; }
-.tb-tool-save:hover:not(:disabled) { border-color: #2ecc71; color: #2ecc71; }
-.tb-tool-open:hover:not(:disabled) { border-color: #3498db; color: #3498db; }
+.tb-slot--dragging { opacity: 0.35; }
 
-/* ── Window Manager ────────────────────────────────────────────────────────── */
-.tb-windows { display: flex; gap: 3px; flex-shrink: 0; }
-.tb-win {
-  display: flex; flex-direction: column; align-items: center; gap: 1px;
-  padding: 4px 8px; min-width: 42px;
-  border: 1px solid var(--border-subtle); border-radius: 5px; cursor: pointer;
-  background: transparent; color: #30304a;
-  transition: all 0.12s; outline: none;
-}
-.tb-win:hover { border-color: #404068; color: #7070a0; }
-.tb-win.active { border-color: #9b59b6; background: #120820; box-shadow: 0 0 8px #9b59b633; }
-.tb-win-icon { font-size: 12px; line-height: 1; }
-.tb-win-lbl {
+/* Panel contents are inert while editing so drags don't trigger controls. */
+.tb-slot-content--locked { pointer-events: none; }
+
+/* Slot chrome (only visible in edit mode) */
+.tb-slot-tag {
+  position: absolute;
+  left: 50%;
+  top: -11px;
+  transform: translateX(-50%);
   font-family: 'Rajdhani', sans-serif;
-  font-size: 8px; font-weight: 700; letter-spacing: 0.1em; color: inherit;
+  font-size: 7px; font-weight: 700; letter-spacing: 0.1em;
+  color: #7b4dd6; white-space: nowrap; pointer-events: none;
+  text-transform: uppercase;
 }
-.tb-win.active .tb-win-lbl { color: #9b59b6; }
-.tb-win-mixer:hover { border-color: #3498db; color: #3498db; }
-.tb-win-mixer.active { border-color: #3498db; background: #04121e; box-shadow: 0 0 8px #3498db33; }
-.tb-win-mixer.active .tb-win-lbl { color: #3498db; }
-.tb-win-render:hover { border-color: #e74c3c; color: #e74c3c; }
-.tb-win-render.active { border-color: #e74c3c; background: #1a0808; box-shadow: 0 0 8px #e74c3c33; }
-.tb-win-render.active .tb-win-lbl { color: #e74c3c; }
-.tb-win-theme:hover { border-color: #9b59b6; color: #9b59b6; }
-.tb-win-theme.active { border-color: #9b59b6; background: #160e20; box-shadow: 0 0 8px #9b59b633; }
-.tb-win-theme.active .tb-win-lbl { color: #9b59b6; }
+.tb-slot-hide {
+  position: absolute;
+  top: -8px; right: -6px;
+  width: 15px; height: 15px;
+  display: flex; align-items: center; justify-content: center;
+  background: #2a1010; border: 1px solid #e74c3c; border-radius: 50%;
+  color: #e74c3c; font-size: 12px; line-height: 1; cursor: pointer; z-index: 2;
+  transition: background 0.1s;
+}
+.tb-slot-hide:hover { background: #e74c3c; color: #fff; }
+
+/* Quantized drop placeholder */
+.tb-ghost {
+  width: 4px;
+  align-self: stretch;
+  margin: 8px 3px;
+  border-radius: 3px;
+  background: #7b4dd6;
+  box-shadow: 0 0 10px #7b4dd6aa;
+  flex-shrink: 0;
+}
+
+/* ── Edit-mode tray ────────────────────────────────────────────────────────── */
+.tb-editbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 30px;
+  padding: 0 12px;
+  background: #0c0a14;
+  border-bottom: 1px solid #2a2040;
+  flex-shrink: 0;
+  z-index: 49;
+}
+.tb-editbar--bottom { order: 98; border-bottom: none; border-top: 1px solid #2a2040; }
+.tb-editbar-title {
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.2em; color: #7b4dd6;
+}
+.tb-editbar-hint {
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #3a3a55;
+}
+.tb-editbar-hidden { display: flex; align-items: center; gap: 5px; }
+.tb-editbar-lbl {
+  font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
+  letter-spacing: 0.15em; color: #40405a;
+}
+.tb-editbar-spacer { flex: 1; }
+.tb-chip {
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.05em; padding: 2px 8px; border-radius: 10px;
+  border: 1px solid #4a2a88; background: #1a0a30; color: #b080ff;
+  cursor: pointer; transition: all 0.1s;
+}
+.tb-chip:hover { background: #2a1048; border-color: #7b2fff; color: #d0a0ff; }
+.tb-editbar-btn {
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em; padding: 3px 10px; border-radius: 4px;
+  border: 1px solid var(--border); background: transparent; color: var(--text-muted);
+  cursor: pointer; transition: all 0.12s;
+}
+.tb-editbar-btn:hover { border-color: #7b4dd6; color: #c8a0ff; }
+.tb-editbar-done { border-color: #2ecc71; color: #2ecc71; }
+.tb-editbar-done:hover { background: #081a09; border-color: #2ecc71; color: #2ecc71; }
+
+/* ── Context menu ──────────────────────────────────────────────────────────── */
+.tb-menu {
+  position: fixed;
+  z-index: 9999;
+  min-width: 150px;
+  background: var(--bg-control);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  box-shadow: 0 6px 24px #000000a0;
+}
+.tb-menu-item {
+  padding: 6px 10px;
+  font-family: 'Rajdhani', sans-serif; font-size: 12px; font-weight: 600;
+  letter-spacing: 0.04em; color: #9090b0; cursor: pointer; border-radius: 4px;
+}
+.tb-menu-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.tb-menu-sep { height: 1px; background: var(--border-subtle); margin: 4px 2px; }
 </style>

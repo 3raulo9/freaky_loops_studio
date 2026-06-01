@@ -896,6 +896,38 @@ export function useStudio() {
   const displayCell      = ref(0)
   const playbackStartCell = ref(0)
 
+  // ── Transport status (one-directional: UI dispatches intent, engine acks) ──────
+  //   'stopped' | 'arming' | 'playing' | 'paused'. The Play button only
+  //   illuminates once the audio clock has actually started running, never on
+  //   the raw click — this keeps the UI from desyncing if the engine stalls.
+  const transportState = ref('stopped')
+  //   Increments once per beat off the audio-locked playhead. The Record button
+  //   subscribes to this to flash in time with the metronome.
+  const beatTick = ref(0)
+
+  // ── Record arm + capture-filter bitmask ───────────────────────────────────────
+  //   Record is not a plain boolean — it's a filter mask over what gets captured.
+  const RECORD_FLAGS   = { NOTES: 1, AUDIO: 2, AUTOMATION: 4, CLIPS: 8 }
+  const recordFilters  = ref(RECORD_FLAGS.NOTES | RECORD_FLAGS.AUTOMATION)
+  const recordArmed    = ref(false)
+  const recordWarning  = ref(false)
+  let   recordWarnTimer = null
+
+  function toggleRecordFilter(flag) {
+    recordFilters.value ^= flag
+    if (recordFilters.value === 0) recordArmed.value = false   // can't stay armed empty
+  }
+  function toggleRecordArm() {
+    if (recordArmed.value) { recordArmed.value = false; return }
+    if (recordFilters.value === 0) {           // refuse to arm with no capture filters
+      recordWarning.value = true
+      clearTimeout(recordWarnTimer)
+      recordWarnTimer = setTimeout(() => { recordWarning.value = false }, 1400)
+      return
+    }
+    recordArmed.value = true
+  }
+
   // ── Undo / Redo ───────────────────────────────────────────────────────────────
   const undoStack = reactive([])
   const redoStack = reactive([])
@@ -1123,6 +1155,7 @@ export function useStudio() {
   const noteQueue    = []
   let playbackStartAudioTime   = 0
   let playbackStartCellSeconds = 0
+  let _lastBeat = -1   // last beat index emitted to beatTick (metronome pulse)
 
   function getPatternsForCell(cell) {
     if (!usePlaylist.value) return [currentPatternId.value]
@@ -1215,26 +1248,52 @@ export function useStudio() {
     while (noteQueue.length && noteQueue[0].time <= now + 0.01) {
       displayStep.value = noteQueue[0].step
       displayCell.value = noteQueue[0].cell
+      // Emit a metronome pulse when the audio-locked playhead crosses a beat.
+      const beat = Math.floor(noteQueue[0].step / 4)
+      if (beat !== _lastBeat) { _lastBeat = beat; beatTick.value++ }
       noteQueue.shift()
     }
     requestAnimationFrame(drawLoop)
   }
 
-  function startPlay() {
+  // Dispatch a "start" intent and wait for the engine to acknowledge (the audio
+  // clock actually running) before committing isPlaying. Strict one-way flow.
+  async function startPlay() {
+    if (transportState.value === 'arming' || transportState.value === 'playing') return
     initAudio()
-    isPlaying.value = true
+    transportState.value = 'arming'
+
+    // Engine acknowledgment: the click is only an intent — the transport does
+    // not illuminate until the soundcard clock confirms it is producing audio.
+    try { await audioCtx.resume() } catch (_) {}
+    if (audioCtx.state !== 'running') {
+      await new Promise(resolve => {
+        const onChange = () => {
+          if (audioCtx.state === 'running') { audioCtx.removeEventListener('statechange', onChange); resolve() }
+        }
+        audioCtx.addEventListener('statechange', onChange)
+        setTimeout(resolve, 250)   // safety: never hang the UI on a stuck driver
+      })
+    }
+    // Aborted mid-handshake (user hit Stop while arming)?
+    if (transportState.value !== 'arming') return
+
     const startCell = playbackStartCell.value
     schedStep = 0; schedCell = startCell
     nextNoteTime = audioCtx.currentTime + 0.05
     playbackStartAudioTime   = audioCtx.currentTime
     playbackStartCellSeconds = startCell * getSecPerCell()
     noteQueue.length = 0; displayStep.value = -1; displayCell.value = startCell
+    _lastBeat = -1
+    isPlaying.value = true              // engine confirmed → transport state syncs
+    transportState.value = 'playing'
     schedulerTimer = setInterval(tick, TICK_MS)
     requestAnimationFrame(drawLoop)
   }
 
   function pausePlay() {
     isPlaying.value = false
+    transportState.value = 'paused'
     clearInterval(schedulerTimer); schedulerTimer = null
     noteQueue.length = 0; displayStep.value = -1
     // Playhead stays at current position (pause)
@@ -1242,12 +1301,17 @@ export function useStudio() {
 
   function stopPlay() {
     isPlaying.value = false
+    transportState.value = 'stopped'
     clearInterval(schedulerTimer); schedulerTimer = null
     noteQueue.length = 0; displayStep.value = -1
     displayCell.value = 0; playbackStartCell.value = 0
+    _lastBeat = -1
   }
 
-  function togglePlay() { isPlaying.value ? pausePlay() : startPlay() }
+  function togglePlay() {
+    if (transportState.value === 'arming') return   // ignore clicks mid-handshake
+    isPlaying.value ? pausePlay() : startPlay()
+  }
 
   // ── Keyboard live play ────────────────────────────────────────────────────────
   const pressedKeys     = new Set()
@@ -1913,6 +1977,10 @@ export function useStudio() {
     bpm, totalSteps, swing, isPlaying, displayStep,
     togglePlay, startPlay, stopPlay, pausePlay,
     getPlayheadTimeSeconds, audioLoad,
+    // Transport status + record
+    transportState, beatTick,
+    RECORD_FLAGS, recordFilters, recordArmed, recordWarning,
+    toggleRecordFilter, toggleRecordArm,
     getAnalyser: () => analyserNode,
     // Undo / Redo
     canUndo, canRedo, undoAction, redoAction,
