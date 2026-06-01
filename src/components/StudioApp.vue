@@ -6,15 +6,25 @@
     <!-- ── Main body ──────────────────────────────────────────────────── -->
     <div class="studio-body">
 
+      <!-- ── Browser sidebar ───────────────────────────────────────── -->
+      <aside v-if="browserOpen && !detachedWindows.browser" class="browser-sidebar">
+        <BrowserPanel />
+      </aside>
+
       <!-- ── Left: Channel Rack / Playlist / Mixer ─────────────────── -->
       <div class="main-area">
-        <ChannelRack v-if="mainView === 'sequencer'" />
-        <Playlist    v-else-if="mainView === 'playlist'" />
-        <Mixer       v-else-if="mainView === 'mixer'" />
+        <ChannelRack v-if="mainView === 'sequencer' && !detachedWindows.rack" />
+        <Playlist    v-else-if="mainView === 'playlist' && !detachedWindows.playlist" />
+        <Mixer       v-else-if="mainView === 'mixer' && !detachedWindows.mixer" />
+        <div v-else class="detached-placeholder">
+          <span class="dp-icon">⇱</span>
+          <span class="dp-text">{{ mainViewTitle }} is detached</span>
+          <button class="dp-btn" @click="redockWindow(detachedIdForView)">Re-dock</button>
+        </div>
       </div>
 
       <!-- ── Right: Properties panel (sequencer only) ────────────────── -->
-      <aside class="props-panel" v-if="mainView === 'sequencer'" @click="showModulePicker = false">
+      <aside class="props-panel" v-if="mainView === 'sequencer' && !detachedWindows.rack" @click="showModulePicker = false">
         <div class="props-header" :style="{ borderColor: selectedChannel.color }">
           <span class="props-name" :style="{ color: selectedChannel.color }">{{ selectedChannel.name }}</span>
           <span class="props-type">{{ selectedChannel.type }}</span>
@@ -166,7 +176,7 @@
 
     <!-- ── Bottom: Piano Roll panel ──────────────────────────────────── -->
     <div
-      v-if="pianoRollOpen && mainView === 'sequencer'"
+      v-if="pianoRollOpen && mainView === 'sequencer' && !detachedWindows.piano"
       class="piano-roll-panel"
       :style="{ height: prHeight + 'px' }"
     >
@@ -197,6 +207,13 @@
       <StepGrid  v-else :ch="selectedChannel" />
     </div>
 
+    <!-- ── Detached (floating) windows layer ─────────────────────────── -->
+    <FloatWindow v-if="detachedWindows.rack"     id="rack"     title="CHANNEL RACK" accent="#9b59b6"><ChannelRack /></FloatWindow>
+    <FloatWindow v-if="detachedWindows.playlist" id="playlist" title="PLAYLIST"     accent="#3498db"><Playlist /></FloatWindow>
+    <FloatWindow v-if="detachedWindows.mixer"    id="mixer"    title="MIXER"        accent="#3498db"><Mixer /></FloatWindow>
+    <FloatWindow v-if="detachedWindows.piano"    id="piano"    title="PIANO ROLL"   :accent="selectedChannel.color"><PianoRoll :ch="selectedChannel" /></FloatWindow>
+    <FloatWindow v-if="detachedWindows.browser"  id="browser"  title="BROWSER"      accent="#f1c40f"><BrowserPanel /></FloatWindow>
+
   </div>
 </template>
 
@@ -214,13 +231,22 @@ import Knob        from './Knob.vue'
 import RenderModal from './RenderModal.vue'
 import ThemeModal  from './ThemeModal.vue'
 import CustomSynth from './CustomSynth.vue'
+import FloatWindow from './FloatWindow.vue'
+import BrowserPanel from './BrowserPanel.vue'
 
 const {
   mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen, themeModalOpen,
   clearChannel, handleKeyDown, handleKeyUp,
   addDrumModule, removeDrumModule,
+  browserOpen, detachedWindows, redockWindow,
   loadWasmForChannel,
 } = useStudio()
+
+// ── Detached main-view placeholder ────────────────────────────────────────────
+const VIEW_ID    = { sequencer: 'rack', playlist: 'playlist', mixer: 'mixer' }
+const VIEW_TITLE = { sequencer: 'Channel Rack', playlist: 'Playlist', mixer: 'Mixer' }
+const detachedIdForView = computed(() => VIEW_ID[mainView.value])
+const mainViewTitle     = computed(() => VIEW_TITLE[mainView.value] ?? 'Window')
 
 // ── Module panel state ────────────────────────────────────────────────────────
 const activeModuleTab   = ref(null)
@@ -374,6 +400,33 @@ function stopResize() {
   display: flex;
   flex-direction: column;
 }
+
+/* ── Browser sidebar ─────────────────────────────────────────────── */
+.browser-sidebar {
+  width: 190px; min-width: 190px;
+  border-right: 1px solid var(--border-subtle);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+/* ── Detached-window placeholder ─────────────────────────────────── */
+.detached-placeholder {
+  flex: 1;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; color: #3a3a55;
+}
+.dp-icon { font-size: 40px; color: #1abc9c88; }
+.dp-text {
+  font-family: 'Rajdhani', sans-serif; font-size: 14px; font-weight: 600;
+  letter-spacing: 0.08em;
+}
+.dp-btn {
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
+  letter-spacing: 0.1em; padding: 6px 16px;
+  border: 1px solid #1abc9c; border-radius: 5px;
+  background: transparent; color: #1abc9c; cursor: pointer; transition: all 0.12s;
+}
+.dp-btn:hover { background: #06201b; box-shadow: 0 0 9px #1abc9c44; }
 
 /* ── Properties panel ────────────────────────────────────────────── */
 .props-panel {

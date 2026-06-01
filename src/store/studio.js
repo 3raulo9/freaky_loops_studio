@@ -864,6 +864,66 @@ export function useStudio() {
   const gridSnap           = ref('1/4')
   const keyboardInputMode  = ref(false)
 
+  // ── Window manager (MDI-style orchestration) ──────────────────────────────────
+  //   The toolbar's shortcut panel is the master orchestrator. Each window has a
+  //   tri-state lifecycle (hidden → obscured → focused) and may be "detached"
+  //   into a free-floating window. mainView remains the docked main pane.
+  const browserOpen       = ref(false)
+  const activeArrangement = ref('default')
+  const detachedWindows   = reactive({})   // id → { x, y, w, h, z }
+  let   _winZ        = 200
+  let   _prevMainView = 'sequencer'
+  const WINDOW_VIEW  = { rack: 'sequencer', playlist: 'playlist', mixer: 'mixer' }
+
+  // Resolve a window's current lifecycle state for the shortcut LED.
+  function windowState(id) {
+    if (detachedWindows[id]) return 'detached'
+    if (id === 'piano')   return !pianoRollOpen.value ? 'hidden' : (mainView.value === 'sequencer' ? 'focused' : 'obscured')
+    if (id === 'browser') return browserOpen.value ? 'focused' : 'hidden'
+    if (id in WINDOW_VIEW) return mainView.value === WINDOW_VIEW[id] ? 'focused' : 'hidden'
+    return 'hidden'
+  }
+
+  // Tri-state click: hidden → show+focus, obscured → bring-to-front, focused → hide.
+  function activateWindow(id) {
+    if (detachedWindows[id]) { detachedWindows[id].z = ++_winZ; return }   // detached → focus
+    if (id === 'piano') {
+      if (!pianoRollOpen.value)            { mainView.value = 'sequencer'; pianoRollOpen.value = true }
+      else if (mainView.value !== 'sequencer') mainView.value = 'sequencer'   // obscured → reveal
+      else                                  pianoRollOpen.value = false       // focused → hide
+      return
+    }
+    if (id === 'browser') { browserOpen.value = !browserOpen.value; return }
+    if (id in WINDOW_VIEW) {
+      const target = WINDOW_VIEW[id]
+      if (mainView.value === target) {                                        // focused → restore prior
+        mainView.value = _prevMainView !== target ? _prevMainView : 'sequencer'
+      } else {                                                               // hidden → show+focus
+        _prevMainView = mainView.value
+        mainView.value = target
+      }
+    }
+  }
+
+  function detachWindow(id) {
+    if (detachedWindows[id]) return
+    const n = Object.keys(detachedWindows).length
+    detachedWindows[id] = { x: 140 + n * 28, y: 96 + n * 28, w: 720, h: 380, z: ++_winZ }
+    if (id === 'piano')   pianoRollOpen.value = true
+    if (id === 'browser') browserOpen.value   = true
+  }
+  function redockWindow(id) { delete detachedWindows[id] }
+  function toggleDetach(id) { detachedWindows[id] ? redockWindow(id) : detachWindow(id) }
+  function focusWindow(id)  { if (detachedWindows[id]) detachedWindows[id].z = ++_winZ }
+
+  // Layout hydration presets — reshape several windows in one shot.
+  function applyArrangement(name) {
+    activeArrangement.value = name
+    if (name === 'default')      { mainView.value = 'sequencer'; pianoRollOpen.value = false; browserOpen.value = false }
+    else if (name === 'clean')   { mainView.value = 'playlist';  pianoRollOpen.value = false; browserOpen.value = false }
+    else if (name === 'browser-mixer') { mainView.value = 'mixer'; browserOpen.value = true }
+  }
+
   // ── Mixer tracks (0 = master, 1-8 = inserts) ─────────────────────────────
   const mixerTracks = reactive([
     { id: 'mx0', name: 'MASTER', color: '#e74c3c', volume: 1.0, pan: 0, muted: false, _soloed: false, eq: { low: 0, mid: 0, high: 0 } },
@@ -2063,6 +2123,9 @@ export function useStudio() {
     // UI state
     mainView, pianoRollOpen, renderModalOpen, themeModalOpen, currentTheme, kbOctave,
     gridSnap, keyboardInputMode,
+    // Window manager
+    browserOpen, activeArrangement, detachedWindows,
+    windowState, activateWindow, toggleDetach, redockWindow, focusWindow, applyArrangement,
     // Sequencer
     bpm, totalSteps, swing, isPlaying, displayStep,
     togglePlay, startPlay, stopPlay, pausePlay,

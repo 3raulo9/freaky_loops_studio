@@ -31,12 +31,14 @@ export const HINTS = {
   'tools.redo':        'Redo',
   'tools.save':        'Save project (.freak)',
   'tools.open':        'Open project (.freak)',
-  'win.rack':          'Channel Rack',
-  'win.piano':         'Piano Roll',
-  'win.playlist':      'Playlist / Song editor',
-  'win.mixer':         'Mixer',
+  'win.playlist':      'Playlist / Song editor  ·  F5',
+  'win.rack':          'Channel Rack  ·  F6',
+  'win.piano':         'Piano Roll  ·  F7',
+  'win.browser':       'Browser  ·  Alt+F8  ·  drag a file here to peek',
+  'win.mixer':         'Mixer  ·  F9',
   'win.render':        'Render / export audio',
   'win.theme':         'Theme settings',
+  'win.layout':        'Workspace layout presets',
 }
 
 const _id  = ref(null)
