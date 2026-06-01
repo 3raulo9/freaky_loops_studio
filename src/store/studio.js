@@ -999,12 +999,33 @@ export function useStudio() {
   let audioCtx        = null
   let masterGain      = null
   let analyserNode    = null
+  let scopeAnalyserL  = null   // dedicated per-channel scope taps (stereo visualizer)
+  let scopeAnalyserR  = null
   let trackGains      = []
   let trackPanners    = []
   let cutGains        = []   // per-channel cut-self GainNode (null when cutSelf=false)
   let mixerInsertNodes = []  // [{ eqLow, eqMid, eqHigh, gain, panner, analyser }] per insert
-  const audioLoad     = ref(0)
-  let _loadSmooth     = 0
+  const audioLoad      = ref(0)   // audio-processing load: T_process / T_window (%)
+  const audioUnderruns = ref(0)   // buffer-deadline misses (dropouts)
+  let _loadSmooth      = 0
+
+  // ── Polyphonic voice table ────────────────────────────────────────────────────
+  //   Each scheduled/live generator registers an audio-time [start, end) window.
+  //   The System Monitor polls getVoiceCount() to read how many are sounding now.
+  const _voices = []
+  function registerVoice(start, dur) {
+    _voices.push({ start, end: start + Math.max(0.05, Math.min(4, dur || 0.28)) })
+  }
+  function getVoiceCount() {
+    if (!audioCtx) return 0
+    const now = audioCtx.currentTime
+    let n = 0
+    for (let i = _voices.length - 1; i >= 0; i--) {
+      if (_voices[i].end <= now) _voices.splice(i, 1)        // free decayed voice
+      else if (_voices[i].start <= now) n++                  // currently outputting
+    }
+    return n
+  }
 
   function initAudio() {
     if (!audioCtx) {
@@ -1015,6 +1036,14 @@ export function useStudio() {
       analyserNode.fftSize = 256
       masterGain.connect(analyserNode)
       analyserNode.connect(audioCtx.destination)
+      // Stereo scope taps: split the master into L/R analysers so the visualizer
+      // can draw a true stereo waveform / spectrum, independent of fftSize tweaks.
+      const split = audioCtx.createChannelSplitter(2)
+      scopeAnalyserL = audioCtx.createAnalyser(); scopeAnalyserL.fftSize = 2048
+      scopeAnalyserR = audioCtx.createAnalyser(); scopeAnalyserR.fftSize = 2048
+      masterGain.connect(split)
+      split.connect(scopeAnalyserL, 0)
+      split.connect(scopeAnalyserR, 1)
       buildMixerInserts()
     }
     if (audioCtx.state === 'suspended') audioCtx.resume()
@@ -1205,6 +1234,7 @@ export function useStudio() {
               cutGains[ci].gain.setValueAtTime(1.0,    when + 0.001)
             }
             ch.fn(audioCtx, when, { ...ch.params, velocity: vel }, cutDest)
+            registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
           }
         } else {
           // Schedule all piano notes whose startTick falls within this step's window.
@@ -1217,6 +1247,7 @@ export function useStudio() {
             const noteWhen = when + (note.startTick - stepStartTick) * secPerTick
             const gate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
             ch.fn(audioCtx, noteWhen, { ...ch.params, pitch: note.pitch, velocity: note.velocity ?? 1, gate }, dest)
+            registerVoice(noteWhen, gate + 0.12)
           })
         }
       })
@@ -1263,6 +1294,9 @@ export function useStudio() {
     const secPerBeat = 60 / bpm.value
     const secPerStep = secPerBeat / 4
     const steps = totalSteps.value
+    // Buffer-deadline miss: if the next event is already in the past, the
+    // scheduler fell behind its window → register a dropout (underrun).
+    if (nextNoteTime < audioCtx.currentTime - 0.001) audioUnderruns.value++
     while (nextNoteTime < audioCtx.currentTime + LOOK_AHEAD) {
       // Pass base grid time — per-channel swing applied inside scheduleStep
       scheduleStep(schedStep % steps, nextNoteTime, schedCell)
@@ -1274,8 +1308,11 @@ export function useStudio() {
       schedStep++
       if (schedStep % steps === 0) schedCell++
     }
+    // Audio processing load = compute time of this block / its time-window deadline.
     const elapsed = performance.now() - t0
-    _loadSmooth = _loadSmooth * 0.85 + (elapsed * 40) * 0.15
+    const load = (elapsed / TICK_MS) * 100
+    if (load >= 100) audioUnderruns.value++          // compute overran its slice
+    _loadSmooth = _loadSmooth * 0.8 + load * 0.2
     audioLoad.value = Math.min(100, Math.round(_loadSmooth))
   }
 
@@ -1375,6 +1412,7 @@ export function useStudio() {
     const dest = (ci >= 0 && trackGains[ci]) ? trackGains[ci] : audioCtx.destination
     const when = audioCtx.currentTime + 0.005
     ch.fn(audioCtx, when, { ...ch.params, pitch, velocity: 1 }, dest)
+    registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.35) + 0.15)
   }
 
   // Stop an active note — essential for WASM/JS/Custom Synth plugins which
@@ -2029,6 +2067,8 @@ export function useStudio() {
     bpm, totalSteps, swing, isPlaying, displayStep,
     togglePlay, startPlay, stopPlay, pausePlay,
     getPlayheadTimeSeconds, audioLoad,
+    // System telemetry
+    audioUnderruns, getVoiceCount,
     // Transport status + record
     transportState, beatTick, beatAccent,
     RECORD_FLAGS, recordFilters, recordArmed, recordWarning,
@@ -2036,6 +2076,7 @@ export function useStudio() {
     // Metronome
     metronomeOn, metronomeSound, metroAccent,
     getAnalyser: () => analyserNode,
+    getScopeAnalysers: () => ({ L: scopeAnalyserL, R: scopeAnalyserR }),
     // Undo / Redo
     canUndo, canRedo, undoAction, redoAction,
     // Keyboard
