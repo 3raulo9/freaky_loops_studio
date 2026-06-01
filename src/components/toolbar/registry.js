@@ -14,6 +14,7 @@ import SwingPanel     from './SwingPanel.vue'
 import StepsPanel     from './StepsPanel.vue'
 import ModePanel      from './ModePanel.vue'
 import SnapPanel      from './SnapPanel.vue'
+import MetronomePanel from './MetronomePanel.vue'
 import MeterPanel     from './MeterPanel.vue'
 import ToolsPanel     from './ToolsPanel.vue'
 import WindowsPanel   from './WindowsPanel.vue'
@@ -31,6 +32,7 @@ export const PANELS = {
   swing:     { label: 'Swing',       component: SwingPanel     },
   steps:     { label: 'Steps',       component: StepsPanel     },
   mode:      { label: 'Pat / Song',  component: ModePanel      },
+  metro:     { label: 'Metronome',   component: MetronomePanel },
   snap:      { label: 'Snap',        component: SnapPanel      },
   meter:     { label: 'CPU / Scope', component: MeterPanel     },
   tools:     { label: 'Tools',       component: ToolsPanel     },
@@ -50,6 +52,7 @@ export const DEFAULT_LAYOUT = [
   { id: 'swing',     visible: true, row: 0 },
   { id: 'steps',     visible: true, row: 0 },
   { id: 'mode',      visible: true, row: 0 },
+  { id: 'metro',     visible: true, row: 0 },
   { id: 'snap',      visible: true, row: 0 },
   { id: SPACER_ID,   visible: true, row: 0 },
   { id: 'meter',     visible: true, row: 0 },
