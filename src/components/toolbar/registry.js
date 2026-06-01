@@ -16,6 +16,7 @@ import ModePanel      from './ModePanel.vue'
 import SnapPanel      from './SnapPanel.vue'
 import MetronomePanel from './MetronomePanel.vue'
 import PatternPanel   from './PatternPanel.vue'
+import MasterPanel    from './MasterPanel.vue'
 import MeterPanel     from './MeterPanel.vue'
 import ToolsPanel     from './ToolsPanel.vue'
 import WindowsPanel   from './WindowsPanel.vue'
@@ -36,6 +37,7 @@ export const PANELS = {
   metro:     { label: 'Metronome',   component: MetronomePanel },
   snap:      { label: 'Snap',        component: SnapPanel      },
   pattern:   { label: 'Pattern',     component: PatternPanel   },
+  master:    { label: 'Master Vol / Pitch', component: MasterPanel },
   meter:     { label: 'System Monitor', component: MeterPanel },
   tools:     { label: 'Tools',       component: ToolsPanel     },
   windows:   { label: 'Windows',     component: WindowsPanel   },
@@ -57,6 +59,7 @@ export const DEFAULT_LAYOUT = [
   { id: 'metro',     visible: true, row: 0 },
   { id: 'snap',      visible: true, row: 0 },
   { id: SPACER_ID,   visible: true, row: 0 },
+  { id: 'master',    visible: true, row: 0 },
   { id: 'meter',     visible: true, row: 0 },
   { id: 'tools',     visible: true, row: 0 },
   { id: 'windows',   visible: true, row: 0 },
