@@ -1059,9 +1059,30 @@ export function useStudio() {
   let audioCtx        = null
   let masterGain      = null
   let analyserNode    = null
+  let outputGain      = null   // terminal Main Volume stage (global output trim)
   let scopeAnalyserL  = null   // dedicated per-channel scope taps (stereo visualizer)
   let scopeAnalyserR  = null
   let trackGains      = []
+
+  // ── Main Volume & Master Pitch (terminal scaling operators) ───────────────────
+  //   Volume value is normalized [0,1] with 0 dB unity hard-wired at 0.8; the
+  //   top 20% gives extra headroom. Pitch is bipolar [-1,1] scaled by a
+  //   configurable semitone range, applied as a global cents offset to pitched
+  //   generators just before they're scheduled.
+  const masterVolume     = ref(0.8)   // 0.8 = unity (0 dB)
+  const masterPitch      = ref(0)     // [-1, 1], 0 = neutral
+  const masterPitchRange = ref(2)     // semitones, 1–48
+  const masterPitchSemis = computed(() => masterPitch.value * masterPitchRange.value)
+
+  // Perceptual mapping: linear amplitude = (v / 0.8) so that 0.8→1.0 (0 dB),
+  // 1.0→1.25 (+1.9 dB). dB = 20·log10(amplitude).
+  function volToGain(v) { return Math.max(0, v / 0.8) }
+  function setMasterVolume(v) {
+    masterVolume.value = Math.max(0, Math.min(1, v))
+    if (outputGain) outputGain.gain.value = volToGain(masterVolume.value)
+  }
+  function setMasterPitch(v)      { masterPitch.value = Math.max(-1, Math.min(1, v)) }
+  function setMasterPitchRange(r) { masterPitchRange.value = Math.max(1, Math.min(48, Math.round(r))) }
   let trackPanners    = []
   let cutGains        = []   // per-channel cut-self GainNode (null when cutSelf=false)
   let mixerInsertNodes = []  // [{ eqLow, eqMid, eqHigh, gain, panner, analyser }] per insert
@@ -1094,8 +1115,13 @@ export function useStudio() {
       masterGain.gain.value = mixerTracks[0].volume
       analyserNode = audioCtx.createAnalyser()
       analyserNode.fftSize = 256
+      // Terminal output trim — the global Main Volume scales the whole mix just
+      // before it exits to the hardware driver. Independent of the mixer master.
+      outputGain = audioCtx.createGain()
+      outputGain.gain.value = volToGain(masterVolume.value)
       masterGain.connect(analyserNode)
-      analyserNode.connect(audioCtx.destination)
+      analyserNode.connect(outputGain)
+      outputGain.connect(audioCtx.destination)
       // Stereo scope taps: split the master into L/R analysers so the visualizer
       // can draw a true stereo waveform / spectrum, independent of fftSize tweaks.
       const split = audioCtx.createChannelSplitter(2)
@@ -1306,7 +1332,7 @@ export function useStudio() {
           d.pianoNotes.filter(n => n.startTick >= stepStartTick && n.startTick < stepEndTick && !n.muted).forEach(note => {
             const noteWhen = when + (note.startTick - stepStartTick) * secPerTick
             const gate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
-            ch.fn(audioCtx, noteWhen, { ...ch.params, pitch: note.pitch, velocity: note.velocity ?? 1, gate }, dest)
+            ch.fn(audioCtx, noteWhen, { ...ch.params, pitch: note.pitch + masterPitchSemis.value, velocity: note.velocity ?? 1, gate }, dest)
             registerVoice(noteWhen, gate + 0.12)
           })
         }
@@ -1471,7 +1497,7 @@ export function useStudio() {
     const ci   = channels.indexOf(ch)
     const dest = (ci >= 0 && trackGains[ci]) ? trackGains[ci] : audioCtx.destination
     const when = audioCtx.currentTime + 0.005
-    ch.fn(audioCtx, when, { ...ch.params, pitch, velocity: 1 }, dest)
+    ch.fn(audioCtx, when, { ...ch.params, pitch: pitch + masterPitchSemis.value, velocity: 1 }, dest)
     registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.35) + 0.15)
   }
 
@@ -2132,6 +2158,9 @@ export function useStudio() {
     getPlayheadTimeSeconds, audioLoad,
     // System telemetry
     audioUnderruns, getVoiceCount,
+    // Main volume & master pitch
+    masterVolume, masterPitch, masterPitchRange, masterPitchSemis,
+    setMasterVolume, setMasterPitch, setMasterPitchRange,
     // Transport status + record
     transportState, beatTick, beatAccent,
     RECORD_FLAGS, recordFilters, recordArmed, recordWarning,
