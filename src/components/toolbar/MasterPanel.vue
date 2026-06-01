@@ -46,7 +46,7 @@
 <script setup>
 import { computed, onBeforeUnmount } from 'vue'
 import { useStudio } from '../../store/studio.js'
-import { setHintRaw, clearHint } from './hintBus.js'
+import { setHintRich, clearHint } from './hintBus.js'
 
 const {
   masterVolume, masterPitch, masterPitchRange,
@@ -65,10 +65,12 @@ const volDb = computed(() => {
 })
 const pitchCents = computed(() => Math.round(masterPitch.value * masterPitchRange.value * 100))
 
-function hintVol()   { setHintRaw(`Main volume: ${volPercent.value}% (${volDb.value} dB)`) }
+function hintVol() {
+  setHintRich({ label: 'Main Volume', value: `${volPercent.value}% (${volDb.value} dB)` })
+}
 function hintPitch() {
   const c = pitchCents.value
-  setHintRaw(`Master pitch: ${c >= 0 ? '+' : ''}${c} cents (range ±${masterPitchRange.value} st)`)
+  setHintRich({ label: 'Master Pitch', value: `${c >= 0 ? '+' : ''}${c} cents · range ±${masterPitchRange.value} st` })
 }
 
 // ── Drag (relative pixel delta, Ctrl = ×0.1 fine) ─────────────────────────────

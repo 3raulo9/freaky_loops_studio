@@ -864,6 +864,14 @@ export function useStudio() {
   const gridSnap           = ref('1/4')
   const keyboardInputMode  = ref(false)
 
+  // ── Title bar state ───────────────────────────────────────────────────────────
+  //   isDirty flips on any project mutation (asterisk in the title); cleared on
+  //   save / load. extendedHudOpen toggles the detachable Extended Hint Panel.
+  const projectName     = ref('Untitled')
+  const projectDirty    = ref(false)
+  const extendedHudOpen = ref(false)
+  function markDirty() { projectDirty.value = true }
+
   // ── Window manager (MDI-style orchestration) ──────────────────────────────────
   //   The toolbar's shortcut panel is the master orchestrator. Each window has a
   //   tri-state lifecycle (hidden → obscured → focused) and may be "detached"
@@ -1041,6 +1049,7 @@ export function useStudio() {
     undoStack.push(snapshotState())
     if (undoStack.length > MAX_UNDO) undoStack.shift()
     redoStack.length = 0
+    projectDirty.value = true   // any undoable edit dirties the project
   }
 
   function undoAction() {
@@ -2037,6 +2046,8 @@ export function useStudio() {
   }
 
   function saveProject(name = 'project') {
+    projectName.value = name
+    projectDirty.value = false   // saved → clean
     const project = {
       version: 1,
       bpm:        bpm.value,
@@ -2115,6 +2126,8 @@ export function useStudio() {
     reader.onload = e => {
       try {
         _applyProject(JSON.parse(e.target.result))
+        projectName.value  = file.name.replace(/\.(freak|json)$/i, '')
+        projectDirty.value = false   // freshly loaded → clean
       } catch (err) {
         console.error('[FreakyLoops] Failed to load project:', err)
         alert('Failed to load project. The file may be corrupted or in an unsupported format.')
@@ -2262,6 +2275,8 @@ export function useStudio() {
     // UI state
     mainView, pianoRollOpen, renderModalOpen, themeModalOpen, currentTheme, kbOctave,
     gridSnap, keyboardInputMode,
+    // Title bar
+    projectName, projectDirty, extendedHudOpen,
     // Window manager
     browserOpen, activeArrangement, detachedWindows,
     windowState, activateWindow, toggleDetach, redockWindow, focusWindow, applyArrangement,
