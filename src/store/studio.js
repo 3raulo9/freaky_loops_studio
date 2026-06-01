@@ -902,8 +902,16 @@ export function useStudio() {
   //   the raw click — this keeps the UI from desyncing if the engine stalls.
   const transportState = ref('stopped')
   //   Increments once per beat off the audio-locked playhead. The Record button
-  //   subscribes to this to flash in time with the metronome.
-  const beatTick = ref(0)
+  //   and Metronome subscribe to this to flash in time with the beat.
+  const beatTick   = ref(0)
+  const beatAccent = ref(false)   // true when the just-emitted beat is a downbeat
+
+  // ── Metronome ─────────────────────────────────────────────────────────────────
+  //   A toggle that injects a click into the mix on every beat. The click sound
+  //   is a swappable asset pointer changed live without interrupting playback.
+  const metronomeOn    = ref(false)
+  const metronomeSound = ref('beep')   // 'beep' | 'tick' | 'cowbell' | 'hat'
+  const metroAccent    = ref(true)     // accent the bar downbeat
 
   // ── Record arm + capture-filter bitmask ───────────────────────────────────────
   //   Record is not a plain boolean — it's a filter mask over what gets captured.
@@ -1215,6 +1223,40 @@ export function useStudio() {
     })
   }
 
+  // Metronome click — a swappable click asset rendered straight into the master
+  // bus. Switching `metronomeSound` just repoints which synth path this takes.
+  function scheduleMetroClick(when, accent) {
+    if (!audioCtx || !masterGain) return
+    const sound = metronomeSound.value
+    const g = audioCtx.createGain()
+    g.connect(masterGain)
+    const vol = accent ? 0.34 : 0.2
+
+    if (sound === 'hat') {
+      const dur = 0.03
+      const buf = audioCtx.createBuffer(1, Math.ceil(audioCtx.sampleRate * dur), audioCtx.sampleRate)
+      const data = buf.getChannelData(0)
+      for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1
+      const src = audioCtx.createBufferSource(); src.buffer = buf
+      const hp  = audioCtx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = accent ? 9000 : 7000
+      src.connect(hp); hp.connect(g)
+      g.gain.setValueAtTime(vol, when)
+      g.gain.exponentialRampToValueAtTime(0.0001, when + dur)
+      src.start(when); src.stop(when + dur + 0.01)
+      return
+    }
+
+    const osc = audioCtx.createOscillator()
+    if      (sound === 'cowbell') { osc.type = 'square'; osc.frequency.value = accent ? 845 : 560 }
+    else if (sound === 'tick')    { osc.type = 'square'; osc.frequency.value = accent ? 2100 : 1400 }
+    else                          { osc.type = 'sine';   osc.frequency.value = accent ? 1600 : 1000 }
+    osc.connect(g)
+    g.gain.setValueAtTime(0.0001, when)
+    g.gain.exponentialRampToValueAtTime(vol, when + 0.002)
+    g.gain.exponentialRampToValueAtTime(0.0001, when + 0.05)
+    osc.start(when); osc.stop(when + 0.06)
+  }
+
   function tick() {
     if (!audioCtx) return
     const t0 = performance.now()
@@ -1224,6 +1266,10 @@ export function useStudio() {
     while (nextNoteTime < audioCtx.currentTime + LOOK_AHEAD) {
       // Pass base grid time — per-channel swing applied inside scheduleStep
       scheduleStep(schedStep % steps, nextNoteTime, schedCell)
+      // Metronome: one click per beat (4 steps/beat), accent on the cell downbeat.
+      if (metronomeOn.value && schedStep % 4 === 0) {
+        scheduleMetroClick(nextNoteTime, metroAccent.value && schedStep % steps === 0)
+      }
       nextNoteTime += secPerStep
       schedStep++
       if (schedStep % steps === 0) schedCell++
@@ -1248,9 +1294,15 @@ export function useStudio() {
     while (noteQueue.length && noteQueue[0].time <= now + 0.01) {
       displayStep.value = noteQueue[0].step
       displayCell.value = noteQueue[0].cell
-      // Emit a metronome pulse when the audio-locked playhead crosses a beat.
+      // Emit a beat pulse when the audio-locked playhead crosses a beat. This is
+      // read off the look-ahead queue (already latency-compensated) so the visual
+      // flash lands with the audible click, not after it.
       const beat = Math.floor(noteQueue[0].step / 4)
-      if (beat !== _lastBeat) { _lastBeat = beat; beatTick.value++ }
+      if (beat !== _lastBeat) {
+        _lastBeat = beat
+        beatAccent.value = noteQueue[0].step === 0   // downbeat of the cell
+        beatTick.value++
+      }
       noteQueue.shift()
     }
     requestAnimationFrame(drawLoop)
@@ -1978,9 +2030,11 @@ export function useStudio() {
     togglePlay, startPlay, stopPlay, pausePlay,
     getPlayheadTimeSeconds, audioLoad,
     // Transport status + record
-    transportState, beatTick,
+    transportState, beatTick, beatAccent,
     RECORD_FLAGS, recordFilters, recordArmed, recordWarning,
     toggleRecordFilter, toggleRecordArm,
+    // Metronome
+    metronomeOn, metronomeSound, metroAccent,
     getAnalyser: () => analyserNode,
     // Undo / Redo
     canUndo, canRedo, undoAction, redoAction,

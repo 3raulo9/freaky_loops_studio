@@ -15,11 +15,13 @@ export const HINTS = {
   'transport.rec':     'Arm record  ·  right-click to choose what to capture',
   'transport.recwarn': '⚠ Nothing armed to record — right-click to pick a filter',
   'timecode':          'Song position  ·  click to switch Bars/Beats ↔ Min/Sec',
-  'bpm':               'Project tempo (BPM)',
+  'bpm':               'Tempo — drag to change, Ctrl-drag to fine-tune, scroll to nudge',
+  'bpm.tap':           'Tap tempo — click in time, or right-click the readout',
   'swing':             'Global swing amount',
   'steps':             'Steps per pattern',
   'mode.pat':          'Pattern mode — loop a single pattern',
   'mode.song':         'Song mode — arrange patterns on the playlist',
+  'metro':             'Metronome — right-click to pick the click sound',
   'snap':              'Global grid snap',
   'tools.kb':          'QWERTY → MIDI typing keyboard',
   'tools.undo':        'Undo last action',
@@ -34,13 +36,18 @@ export const HINTS = {
   'win.theme':         'Theme settings',
 }
 
-const _id = ref(null)
+const _id  = ref(null)
+const _raw = ref('')   // ad-hoc text for hints assembled at hover time (e.g. snap mode + shortcut)
 
 export const hintId   = _id
-export const hintText = computed(() => (_id.value && HINTS[_id.value]) || '')
+export const hintText = computed(() => _raw.value || (_id.value && HINTS[_id.value]) || '')
 
-export function setHint(id)   { _id.value = id }
-export function clearHint(id) { if (!id || _id.value === id) _id.value = null }
+export function setHint(id)   { _raw.value = ''; _id.value = id }
+export function setHintRaw(text) { _id.value = null; _raw.value = text }   // dynamic string
+export function clearHint(id) {
+  if (!id || _id.value === id) _id.value = null
+  _raw.value = ''
+}
 
 // `v-hint="'transport.play'"` — the global hover delegation primitive.
 export const vHint = {
