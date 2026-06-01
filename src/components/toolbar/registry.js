@@ -17,6 +17,7 @@ import SnapPanel      from './SnapPanel.vue'
 import MetronomePanel from './MetronomePanel.vue'
 import PatternPanel   from './PatternPanel.vue'
 import MasterPanel    from './MasterPanel.vue'
+import MidiSyncPanel  from './MidiSyncPanel.vue'
 import MeterPanel     from './MeterPanel.vue'
 import ToolsPanel     from './ToolsPanel.vue'
 import WindowsPanel   from './WindowsPanel.vue'
@@ -37,6 +38,7 @@ export const PANELS = {
   metro:     { label: 'Metronome',   component: MetronomePanel },
   snap:      { label: 'Snap',        component: SnapPanel      },
   pattern:   { label: 'Pattern',     component: PatternPanel   },
+  midi:      { label: 'MIDI Sync',   component: MidiSyncPanel  },
   master:    { label: 'Master Vol / Pitch', component: MasterPanel },
   meter:     { label: 'System Monitor', component: MeterPanel },
   tools:     { label: 'Tools',       component: ToolsPanel     },
@@ -66,4 +68,5 @@ export const DEFAULT_LAYOUT = [
   // ── Secondary row ──────────────────────────────────────────────────────────
   { id: 'hint',      visible: true, row: 1 },
   { id: 'pattern',   visible: true, row: 1 },
+  { id: 'midi',      visible: true, row: 1 },
 ]

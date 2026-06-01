@@ -1083,6 +1083,119 @@ export function useStudio() {
   }
   function setMasterPitch(v)      { masterPitch.value = Math.max(-1, Math.min(1, v)) }
   function setMasterPitchRange(r) { masterPitchRange.value = Math.max(1, Math.min(48, Math.round(r))) }
+
+  // ── MIDI input, sync telemetry & Multilink ────────────────────────────────────
+  //   Sync LED states: idle(grey) | unhandled(green) | volatile(orange) | global(blue).
+  //   Incoming CC is bound to internal params via a Multilink table; the 7-bit
+  //   integer is run through a transfer curve + parameter smoothing before apply.
+  const midiEnabled     = ref(false)
+  const midiSyncState   = ref('idle')
+  const midiActivity    = ref(0)          // bumps on every inbound message → blink
+  const midiLastLabel   = ref('')         // e.g. "CC10 = 64"
+  const midiLearnTarget = ref(null)       // target id awaiting a CC to bind
+  const midiLinks       = reactive([])    // { cc, ch, target, mode, smoothing, global, target_n, cur }
+
+  const MIDI_TARGETS = {
+    'master.volume': { label: 'Main Volume',  apply: v => setMasterVolume(v) },
+    'master.pitch':  { label: 'Master Pitch', apply: v => setMasterPitch(v * 2 - 1) },
+    'tempo':         { label: 'Tempo',        apply: v => { bpm.value = Math.round(40 + v * 180) } },
+  }
+
+  const MIDI_LS = 'fl.midi.links'
+  function saveMidiLinks() {
+    try {
+      localStorage.setItem(MIDI_LS, JSON.stringify(
+        midiLinks.filter(l => l.global).map(({ cc, ch, target, mode, smoothing, global }) => ({ cc, ch, target, mode, smoothing, global }))
+      ))
+    } catch (_) {}
+  }
+  function loadMidiLinks() {
+    try { (JSON.parse(localStorage.getItem(MIDI_LS)) || []).forEach(l => midiLinks.push({ ...l, target_n: 0, cur: 0 })) } catch (_) {}
+  }
+
+  async function initMidi() {
+    if (!navigator.requestMIDIAccess) return false
+    try {
+      const access = await navigator.requestMIDIAccess()
+      midiEnabled.value = true
+      const attach = () => access.inputs.forEach(inp => { inp.onmidimessage = handleMidi })
+      attach()
+      access.onstatechange = attach
+      return true
+    } catch (_) { return false }
+  }
+
+  // Transfer curve: linear 1:1, or log (low-end sensitivity, compressed top).
+  function midiCurve(mode, x) {
+    return mode === 'log' ? Math.log10(1 + 9 * x) : x
+  }
+
+  function handleMidi(e) {
+    const [status, d1, d2] = e.data
+    const type = status & 0xf0
+    const ch   = status & 0x0f
+    midiActivity.value++
+
+    if (type === 0xb0) {                              // Control Change
+      midiLastLabel.value = `CC${d1} = ${d2}`
+      if (midiLearnTarget.value) {                   // learn mode: bind this CC
+        addMidiLink(midiLearnTarget.value, d1, ch)
+        midiLearnTarget.value = null
+        return
+      }
+      const link = midiLinks.find(l => l.cc === d1 && (l.ch == null || l.ch === ch))
+      if (link) {
+        link.target_n = d2 / 127
+        startMidiSmoothing()
+        midiSyncState.value = link.global ? 'global' : 'volatile'
+      } else {
+        midiSyncState.value = 'unhandled'            // valid packet, no registered target
+      }
+    } else if (type === 0x90 && d2 > 0) {            // Note On
+      midiLastLabel.value = `Note ${d1}`
+      midiSyncState.value = 'unhandled'
+    } else {
+      midiSyncState.value = 'unhandled'
+    }
+  }
+
+  function addMidiLink(target, cc, ch) {
+    let l = midiLinks.find(x => x.target === target)
+    if (l) { l.cc = cc; l.ch = ch }
+    else { midiLinks.push({ cc, ch, target, mode: 'linear', smoothing: 0.3, global: false, target_n: 0, cur: 0 }) }
+    saveMidiLinks()
+  }
+  function removeMidiLink(target) {
+    const i = midiLinks.findIndex(l => l.target === target)
+    if (i >= 0) midiLinks.splice(i, 1)
+    saveMidiLinks()
+  }
+  function setLinkMode(target, mode)  { const l = midiLinks.find(x => x.target === target); if (l) { l.mode = mode; saveMidiLinks() } }
+  function toggleLinkGlobal(target)   { const l = midiLinks.find(x => x.target === target); if (l) { l.global = !l.global; saveMidiLinks() } }
+  function armMidiLearn(target)       { midiLearnTarget.value = target; if (!midiEnabled.value) initMidi() }
+  function cancelMidiLearn()          { midiLearnTarget.value = null }
+
+  // Parameter smoothing: a low-pass glide from cur → target_n so a violent knob
+  // snap eases to its value rather than teleporting (prevents engine clicks).
+  let _midiSmoothRaf = null
+  function startMidiSmoothing() { if (!_midiSmoothRaf) _midiSmoothRaf = requestAnimationFrame(midiSmoothTick) }
+  function midiSmoothTick() {
+    let active = false
+    midiLinks.forEach(l => {
+      const diff = l.target_n - l.cur
+      if (Math.abs(diff) > 0.0005) { l.cur += diff * (1 - l.smoothing); active = true }
+      else l.cur = l.target_n
+      const t = MIDI_TARGETS[l.target]
+      if (t) t.apply(Math.max(0, Math.min(1, midiCurve(l.mode, l.cur))))
+    })
+    _midiSmoothRaf = active ? requestAnimationFrame(midiSmoothTick) : null
+  }
+
+  // Feed a raw MIDI byte array (used by virtual input / tests).
+  function injectMidi(bytes) { handleMidi({ data: bytes }) }
+
+  loadMidiLinks()
+
   let trackPanners    = []
   let cutGains        = []   // per-channel cut-self GainNode (null when cutSelf=false)
   let mixerInsertNodes = []  // [{ eqLow, eqMid, eqHigh, gain, panner, analyser }] per insert
@@ -2161,6 +2274,9 @@ export function useStudio() {
     // Main volume & master pitch
     masterVolume, masterPitch, masterPitchRange, masterPitchSemis,
     setMasterVolume, setMasterPitch, setMasterPitchRange,
+    // MIDI sync + Multilink
+    midiEnabled, midiSyncState, midiActivity, midiLastLabel, midiLearnTarget, midiLinks, MIDI_TARGETS,
+    initMidi, armMidiLearn, cancelMidiLearn, addMidiLink, removeMidiLink, setLinkMode, toggleLinkGlobal, injectMidi,
     // Transport status + record
     transportState, beatTick, beatAccent,
     RECORD_FLAGS, recordFilters, recordArmed, recordWarning,
