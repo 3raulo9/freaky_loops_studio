@@ -214,6 +214,9 @@
     <FloatWindow v-if="detachedWindows.piano"    id="piano"    title="PIANO ROLL"   :accent="selectedChannel.color"><PianoRoll :ch="selectedChannel" /></FloatWindow>
     <FloatWindow v-if="detachedWindows.browser"  id="browser"  title="BROWSER"      accent="#f1c40f"><BrowserPanel /></FloatWindow>
 
+    <!-- ── Extended Hint Panel (floating HUD) ────────────────────────── -->
+    <ExtendedHud v-if="extendedHudOpen" />
+
   </div>
 </template>
 
@@ -233,12 +236,13 @@ import ThemeModal  from './ThemeModal.vue'
 import CustomSynth from './CustomSynth.vue'
 import FloatWindow from './FloatWindow.vue'
 import BrowserPanel from './BrowserPanel.vue'
+import ExtendedHud from './ExtendedHud.vue'
 
 const {
   mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen, themeModalOpen,
   clearChannel, handleKeyDown, handleKeyUp,
   addDrumModule, removeDrumModule,
-  browserOpen, detachedWindows, redockWindow,
+  browserOpen, detachedWindows, redockWindow, extendedHudOpen,
   loadWasmForChannel,
 } = useStudio()
 

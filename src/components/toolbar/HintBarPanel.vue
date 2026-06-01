@@ -1,13 +1,22 @@
 <template>
-  <!-- The sole renderer for hover hints across the whole toolbar. -->
-  <div class="tb-hintbar" :class="{ 'tb-hintbar--idle': !hintText }">
-    <span class="tb-hintbar-icon">›</span>
+  <!-- The sole renderer for hover hints across the whole toolbar.
+       Right-click toggles the detachable Extended Hint Panel (HUD). -->
+  <div
+    class="tb-hintbar"
+    :class="{ 'tb-hintbar--idle': !hintText, 'tb-hintbar--hud': extendedHudOpen }"
+    title="Hint bar — right-click for the Extended Hint Panel"
+    @contextmenu.prevent.stop="extendedHudOpen = !extendedHudOpen"
+  >
+    <span class="tb-hintbar-icon">{{ extendedHudOpen ? '◎' : '›' }}</span>
     <span class="tb-hintbar-text">{{ hintText || 'Hover a control for a hint' }}</span>
   </div>
 </template>
 
 <script setup>
 import { hintText } from './hintBus.js'
+import { useStudio } from '../../store/studio.js'
+
+const { extendedHudOpen } = useStudio()
 </script>
 
 <style scoped>
@@ -31,4 +40,6 @@ import { hintText } from './hintBus.js'
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .tb-hintbar--idle .tb-hintbar-text { color: #3a3a55; }
+.tb-hintbar--hud { border-color: #2ecc7155; }
+.tb-hintbar--hud .tb-hintbar-icon { color: #2ecc71; filter: drop-shadow(0 0 5px #2ecc7166); }
 </style>

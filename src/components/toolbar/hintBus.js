@@ -10,6 +10,7 @@
 import { ref, computed } from 'vue'
 
 export const HINTS = {
+  'title':             'Project — * marks unsaved changes',
   'transport.play':    'Play / Pause  ·  Space',
   'transport.stop':    'Stop & rewind to the start',
   'transport.rec':     'Arm record  ·  right-click to choose what to capture',
@@ -42,18 +43,52 @@ export const HINTS = {
   'win.layout':        'Workspace layout presets',
 }
 
-const _id  = ref(null)
-const _raw = ref('')   // ad-hoc text for hints assembled at hover time (e.g. snap mode + shortcut)
+// ── Centralized hint broker ───────────────────────────────────────────────────
+//  One reactive packet, broadcast to every visualization module (toolbar Hint
+//  Bar + Extended HUD). label = control description, value = live-parsed reading
+//  during a drag, shortcut = key binding.
+const _id       = ref(null)
+const _raw      = ref('')
+const _label    = ref('')   // control name (HUD)
+const _value    = ref('')   // live formatted value (HUD)
+const _shortcut = ref('')
 
-export const hintId   = _id
-export const hintText = computed(() => _raw.value || (_id.value && HINTS[_id.value]) || '')
+export const hintId       = _id
+export const hintText     = computed(() => _raw.value || (_id.value && HINTS[_id.value]) || '')
+export const hintLabel    = computed(() => _label.value || (_id.value && HINTS[_id.value]) || '')
+export const hintValue    = _value
+export const hintShortcut = _shortcut
+export const hintActive   = computed(() => !!hintText.value)
 
-export function setHint(id)   { _raw.value = ''; _id.value = id }
-export function setHintRaw(text) { _id.value = null; _raw.value = text }   // dynamic string
+export function setHint(id) {
+  _raw.value = ''; _value.value = ''; _shortcut.value = ''
+  _label.value = ''
+  _id.value = id
+}
+export function setHintRaw(text) {                      // dynamic string only
+  _id.value = null; _value.value = ''; _shortcut.value = ''
+  _label.value = text; _raw.value = text
+}
+// Rich packet: { label, value, shortcut } → bar shows "label: value", HUD splits them.
+export function setHintRich({ label = '', value = '', shortcut = '' } = {}) {
+  _id.value = null
+  _label.value = label
+  _value.value = value
+  _shortcut.value = shortcut
+  _raw.value = value ? `${label}: ${value}${shortcut ? '  (' + shortcut + ')' : ''}` : label
+}
 export function clearHint(id) {
   if (!id || _id.value === id) _id.value = null
-  _raw.value = ''
+  _raw.value = ''; _label.value = ''; _value.value = ''; _shortcut.value = ''
 }
+
+// ── Live-interpolation value parsers (allocation-light) ───────────────────────
+export function fmtFreq(v) {                            // v∈[0,1] → exponential Hz
+  const hz = 20 * Math.pow(1000, Math.max(0, Math.min(1, v)))
+  return hz >= 1000 ? (hz / 1000).toFixed(2) + ' kHz' : Math.round(hz) + ' Hz'
+}
+export function fmtDb(db) { return (db >= 0 ? '+' : '') + db.toFixed(1) + ' dB' }
+export function fmtPct(v) { return Math.round(v * 100) + '%' }
 
 // `v-hint="'transport.play'"` — the global hover delegation primitive.
 export const vHint = {
