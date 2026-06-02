@@ -865,6 +865,54 @@ export function useStudio() {
   const gridSnap           = ref('1/4')
   const keyboardInputMode  = ref(false)
 
+  // ── Snap-to-grid / quantization engine (PPQ time base) ────────────────────────
+  //   All canvas mouse vectors quantize to internal Ticks. The tick duration and
+  //   grid-cell size derive from tempo + PPQ. Alt holds → freeform (1-tick) mode.
+  const ppq         = ref(96)        // pulses per quarter note (96–960)
+  const altFreeform = ref(false)     // Alt held during a drag → bypass snapping
+  function tickDurationSec() { return 60 / (bpm.value * ppq.value) }
+
+  // τ (TicksPerGridCell) for a snap mode. gridSnap is bar-relative — a Playlist
+  // "cell" = 1 bar = 4 beats = ppq·4 ticks.
+  function ticksPerGridCell(mode = gridSnap.value, ppqv = ppq.value) {
+    const bar = ppqv * 4
+    switch (mode) {
+      case 'bar':  case 'cell': return bar
+      case '1/2':  return bar / 2
+      case '1/3':  return bar / 3        // triplet
+      case '1/4':  case 'line': return bar / 4   // beat (line defaults here)
+      case '1/6':  return bar / 6
+      case '1/8':  return bar / 8
+      case '1/16': return bar / 16
+      case '1/32': return bar / 32
+      case 'none': return 1
+      default:     return bar
+    }
+  }
+
+  // Magnet collision clamp: round to nearest grid line (Line/divisions) or floor
+  // to the cell start (Cell). Alt/None → freeform at single-tick resolution.
+  function snapTicks(rawTicks, mode = gridSnap.value, tauOverride) {
+    if (altFreeform.value || mode === 'none') return Math.max(0, Math.round(rawTicks))
+    const tau = tauOverride ?? ticksPerGridCell(mode)
+    const fn = mode === 'cell' ? Math.floor : Math.round
+    return Math.max(0, fn(rawTicks / tau) * tau)
+  }
+
+  // Convenience for bar-unit consumers (Playlist). `lineTau` lets the view pass a
+  // zoom-adaptive τ for Line mode (Level-of-Detail grid).
+  function snapBars(rawBars, mode = gridSnap.value, lineTau) {
+    const bar = ppq.value * 4
+    return snapTicks(rawBars * bar, mode, mode === 'line' ? lineTau : undefined) / bar
+  }
+
+  // Continuously track the Alt modifier so any active drag can go freeform.
+  if (typeof window !== 'undefined') {
+    window.addEventListener('keydown', e => { if (e.altKey) altFreeform.value = true })
+    window.addEventListener('keyup',   e => { if (e.key === 'Alt' || !e.altKey) altFreeform.value = false })
+    window.addEventListener('blur',    () => { altFreeform.value = false })
+  }
+
   // ── Title bar state ───────────────────────────────────────────────────────────
   //   isDirty flips on any project mutation (asterisk in the title); cleared on
   //   save / load. extendedHudOpen toggles the detachable Extended Hint Panel.
@@ -2360,6 +2408,8 @@ export function useStudio() {
     // UI state
     mainView, pianoRollOpen, renderModalOpen, themeModalOpen, currentTheme, kbOctave,
     gridSnap, keyboardInputMode,
+    // Snap / quantization engine
+    ppq, altFreeform, tickDurationSec, ticksPerGridCell, snapTicks, snapBars,
     // Title bar
     projectName, projectDirty, extendedHudOpen,
     // Browser preview + docking + sample drop

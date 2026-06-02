@@ -399,7 +399,7 @@ const {
   patternData, channels,
   playlistTracks, playlistClips, automationClips, timeMarkers, usePlaylist,
   playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell, isPlaying,
-  bpm, totalSteps, getPlayheadTimeSeconds, gridSnap,
+  bpm, totalSteps, getPlayheadTimeSeconds, gridSnap, ppq, snapBars,
   addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
   placeClip, removeClip, moveClip, resizeClip, splitClip, makeUniqueClip,
   addTimeMarker, removeTimeMarker,
@@ -625,17 +625,16 @@ function addAutoTrack() {
   pickerTab.value     = 'automation'
 }
 
-// ── Snap helper (uses global gridSnap from toolbar) ───────────────────────────
+// ── Snap helper — routes through the global PPQ quantization engine ───────────
+//   1 playlist cell = 1 bar. Line mode adapts its division to the zoom level.
+function lineTau() {
+  const bar = ppq.value * 4
+  const px = cellWidth.value                       // pixels per bar
+  const frac = px > 240 ? 16 : px > 120 ? 8 : px > 60 ? 4 : px > 30 ? 2 : 1
+  return bar / frac
+}
 function snapCell(raw) {
-  switch (gridSnap.value) {
-    case 'bar':  return Math.floor(raw)
-    case '1/2':  return Math.round(raw * 2) / 2
-    case '1/4':  return Math.round(raw * 4) / 4
-    case '1/8':  return Math.round(raw * 8) / 8
-    case '1/16': return Math.round(raw * 16) / 16
-    case 'none': return raw
-    default:     return Math.floor(raw)
-  }
+  return snapBars(raw, gridSnap.value, gridSnap.value === 'line' ? lineTau() : undefined)
 }
 function cellFromX(x) { return snapCell(x / cellWidth.value) }
 
