@@ -1123,6 +1123,7 @@ export function useStudio() {
   let masterGain      = null
   let analyserNode    = null
   let outputGain      = null   // terminal Main Volume stage (global output trim)
+  let masterLimiter   = null   // brickwall limiter before output (anti-clip)
   let scopeAnalyserL  = null   // dedicated per-channel scope taps (stereo visualizer)
   let scopeAnalyserR  = null
   let trackGains      = []
@@ -1368,8 +1369,20 @@ export function useStudio() {
       // before it exits to the hardware driver. Independent of the mixer master.
       outputGain = audioCtx.createGain()
       outputGain.gain.value = volToGain(masterVolume.value)
+      // Brickwall limiter — catches the summed peaks when several voices land on
+      // the same step so the mix can't exceed full-scale and hard-clip at the
+      // hardware output (the gritty "particle" crackle on dense patterns).
+      masterLimiter = audioCtx.createDynamicsCompressor()
+      masterLimiter.threshold.value = -3      // engage just below full scale
+      masterLimiter.knee.value      = 0       // hard knee → true limiting
+      masterLimiter.ratio.value     = 20      // 20:1 ≈ brickwall
+      masterLimiter.attack.value    = 0.002
+      masterLimiter.release.value   = 0.1
+      // Meters tap pre-limiter (analyserNode) so the user still sees true levels;
+      // the limiter sits last, just before the output trim and destination.
       masterGain.connect(analyserNode)
-      analyserNode.connect(outputGain)
+      analyserNode.connect(masterLimiter)
+      masterLimiter.connect(outputGain)
       outputGain.connect(audioCtx.destination)
       // Stereo scope taps: split the master into L/R analysers so the visualizer
       // can draw a true stereo waveform / spectrum, independent of fftSize tweaks.
@@ -1515,6 +1528,31 @@ export function useStudio() {
     const ch = channels.find(c => c.id === channelId); if (!ch) return
     ch.mixerTrack = Math.max(0, Math.min(NUM_MX_INSERTS, trackIdx))
     if (audioCtx) rebuildGains()
+  }
+
+  // Swap an insert track with its neighbour (drag / Alt+arrow reorder). The track
+  // descriptor + its routed channels move together; node settings are re-applied
+  // to the new positions and the routing graph rebuilt.
+  function moveMixerTrack(idx, dir) {
+    const a = idx, b = idx + dir
+    if (a < 1 || b < 1 || a > NUM_MX_INSERTS || b > NUM_MX_INSERTS) return false
+    const t = mixerTracks[a]; mixerTracks[a] = mixerTracks[b]; mixerTracks[b] = t   // swap descriptors
+    // Channels routed to either lane follow their track to its new slot.
+    channels.forEach(ch => { if (ch.mixerTrack === a) ch.mixerTrack = -b; else if (ch.mixerTrack === b) ch.mixerTrack = -a })
+    channels.forEach(ch => { if (ch.mixerTrack < 0) ch.mixerTrack = -ch.mixerTrack })
+    // Re-apply each swapped descriptor's settings to the node living at that slot.
+    ;[a, b].forEach(i => {
+      const mt = mixerTracks[i], n = mixerInsertNodes[i - 1]
+      if (!n) return
+      n.gain.value   = mt.muted ? 0 : mt.volume
+      n.panner.pan.value = mt.pan
+      n.eqLow.gain.value  = mt.eq.low
+      n.eqMid.gain.value  = mt.eq.mid
+      n.eqHigh.gain.value = mt.eq.high
+    })
+    if (audioCtx) rebuildGains()
+    markDirty()
+    return true
   }
 
   // ── Scheduler ─────────────────────────────────────────────────────────────────
@@ -2476,7 +2514,7 @@ export function useStudio() {
     mixerTracks,
     setMixerTrackVolume, setMixerTrackPan, setMixerEq,
     muteMixerTrack, soloMixerTrack, renameMixerTrack,
-    getMixerAnalyser, assignChannelToMixerTrack,
+    getMixerAnalyser, assignChannelToMixerTrack, moveMixerTrack,
     // Scale snap
     snapScale,
     // Project save / load

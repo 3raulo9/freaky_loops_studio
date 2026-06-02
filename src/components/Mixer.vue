@@ -25,8 +25,9 @@
           v-for="(track, i) in insertTracks"
           :key="track.id"
           class="mx-strip"
-          :class="{ 'mx-muted': track.muted, 'mx-soloed': track._soloed }"
+          :class="{ 'mx-muted': track.muted, 'mx-soloed': track._soloed, 'mx-selected': selectedTrack === i + 1 }"
           :style="{ '--accent': track.color }"
+          @mousedown="selectTrack(i + 1)"
         >
           <!-- Color accent bar -->
           <div class="mx-accent" :style="{ background: track.color }" />
@@ -60,9 +61,11 @@
               :title="'Double-click to rename'">{{ track.name }}</div>
           </div>
 
-          <!-- Peak meter -->
+          <!-- Peak meter (ballistics + hold + clip latch) -->
           <div class="mx-meter">
-            <div class="mx-meter-bg">
+            <div class="mx-meter-bg" @click.stop="clearClip(i + 1)"
+              :title="clipped[i + 1] ? 'Clipped — click to reset' : 'Peak meter'">
+              <div class="mx-meter-clip" :class="{ on: clipped[i + 1] }" />
               <div class="mx-meter-fill"
                 :style="{ height: peakPct(i + 1) + '%', background: peakColor(peakLevels[i + 1]) }"
               />
@@ -133,9 +136,11 @@
               @click.stop="soloMixerTrack(i + 1)" title="Solo">S</button>
           </div>
 
-          <!-- Track number -->
+          <!-- Track number + reorder -->
           <div class="mx-track-num" :style="{ color: track.color }">
-            {{ String(i + 1).padStart(2, '0') }}
+            <button class="mx-move-btn" @click.stop="moveTrack(i + 1, -1)" :disabled="i === 0" title="Move left (Alt+←)">◄</button>
+            <span class="mx-num-txt">{{ String(i + 1).padStart(2, '0') }}</span>
+            <button class="mx-move-btn" @click.stop="moveTrack(i + 1, 1)" :disabled="i === insertTracks.length - 1" title="Move right (Alt+→)">►</button>
           </div>
         </div>
 
@@ -165,7 +170,9 @@
 
           <!-- Master peak meter -->
           <div class="mx-meter">
-            <div class="mx-meter-bg">
+            <div class="mx-meter-bg" @click.stop="clearClip(0)"
+              :title="clipped[0] ? 'Clipped — click to reset' : 'Master peak meter'">
+              <div class="mx-meter-clip" :class="{ on: clipped[0] }" />
               <div class="mx-meter-fill"
                 :style="{ height: peakPct(0) + '%', background: peakColor(peakLevels[0]) }"
               />
@@ -221,7 +228,7 @@ import { useStudio } from '../store/studio.js'
 const {
   channels, mixerTracks,
   setMixerTrackVolume, setMixerTrackPan, setMixerEq,
-  muteMixerTrack, soloMixerTrack, getMixerAnalyser,
+  muteMixerTrack, soloMixerTrack, getMixerAnalyser, moveMixerTrack,
 } = useStudio()
 
 const EQ_BANDS = [
@@ -248,52 +255,64 @@ function routeTitle(idx) {
   return chs.length ? chs.map(c => c.name).join(', ') : 'No channels routed here'
 }
 
-// ── Peak meters ────────────────────────────────────────────────────────────
+// ── Peak meters with ballistics + peak-hold + clip latch ───────────────────
 const NUM_TRACKS = mixerTracks.length   // master + 8 inserts
 const peakLevels = ref(Array(NUM_TRACKS).fill(0))
 const peakHolds  = ref(Array(NUM_TRACKS).fill(0))
+const clipped    = ref(Array(NUM_TRACKS).fill(false))
 const holdTimers = Array(NUM_TRACKS).fill(0)
+const clipTimers = Array(NUM_TRACKS).fill(0)
+
+const DECAY_DB_S = 20      // ballistic fall rate (dB/sec)
+const HOLD_MS    = 1500    // peak-hold dwell before release
+const CLIP_MS    = 1500    // clip indicator minimum pin time
 
 let meterBufs = null
 let meterRaf  = null
+let lastT     = performance.now()
 
 function updateMeters() {
+  const now = performance.now()
+  const dt  = Math.min(0.1, (now - lastT) / 1000); lastT = now
+  const decay = Math.pow(10, -(DECAY_DB_S * dt) / 20)   // dB/s → per-frame linear factor
   if (!meterBufs) meterBufs = Array(NUM_TRACKS).fill(null)
 
   for (let i = 0; i < NUM_TRACKS; i++) {
-    const analyser = getMixerAnalyser(i)
-    if (!analyser) continue
-    if (!meterBufs[i] || meterBufs[i].length !== analyser.fftSize) {
-      meterBufs[i] = new Float32Array(analyser.fftSize)
-    }
-    analyser.getFloatTimeDomainData(meterBufs[i])
-    const peak = meterBufs[i].reduce((m, v) => Math.max(m, Math.abs(v)), 0)
-    peakLevels.value[i] = peak
+    const an = getMixerAnalyser(i)
+    if (!an) continue
+    if (!meterBufs[i] || meterBufs[i].length !== an.fftSize) meterBufs[i] = new Float32Array(an.fftSize)
+    an.getFloatTimeDomainData(meterBufs[i])
+    const buf = meterBufs[i]
+    let peak = 0
+    for (let s = 0; s < buf.length; s++) { const a = Math.abs(buf[s]); if (a > peak) peak = a }
 
-    // Hold peak for 1.5s
-    if (peak > peakHolds.value[i]) {
-      peakHolds.value[i] = peak
-      holdTimers[i] = Date.now()
-    } else if (Date.now() - holdTimers[i] > 1500) {
-      peakHolds.value[i] = Math.max(0, peakHolds.value[i] - 0.005)
-    }
+    // Ballistics: instant attack, exponential decay (no jitter).
+    peakLevels.value[i] = Math.max(peak, peakLevels.value[i] * decay)
+    // Peak-hold: pin the max, release after the dwell.
+    if (peak >= peakHolds.value[i]) { peakHolds.value[i] = peak; holdTimers[i] = now }
+    else if (now - holdTimers[i] > HOLD_MS) peakHolds.value[i] = Math.max(0, peakHolds.value[i] * decay)
+    // Clip latch at 0 dBFS — pinned for CLIP_MS or until the user clears it.
+    if (peak > 1.0) { clipped.value[i] = true; clipTimers[i] = now }
+    else if (clipped.value[i] && now - clipTimers[i] > CLIP_MS) clipped.value[i] = false
   }
-
   meterRaf = requestAnimationFrame(updateMeters)
 }
+function clearClip(idx) { clipped.value[idx] = false }
 
-onMounted(() => { meterRaf = requestAnimationFrame(updateMeters) })
-onBeforeUnmount(() => { cancelAnimationFrame(meterRaf) })
+onMounted(() => { meterRaf = requestAnimationFrame(updateMeters); window.addEventListener('keydown', onKey) })
+onBeforeUnmount(() => { cancelAnimationFrame(meterRaf); window.removeEventListener('keydown', onKey) })
 
-// ── Meter helpers ──────────────────────────────────────────────────────────
-function peakPct(idx) {
-  return Math.min(100, peakLevels.value[idx] * 100).toFixed(1)
+// ── dB-scaled meter geometry ───────────────────────────────────────────────
+const DB_MIN = -48, DB_MAX = 6
+function dbToPct(v) {
+  if (v <= 0) return 0
+  const db = 20 * Math.log10(v)
+  return Math.max(0, Math.min(100, (db - DB_MIN) / (DB_MAX - DB_MIN) * 100))
 }
-function peakHoldPct(idx) {
-  return Math.min(100, peakHolds.value[idx] * 100).toFixed(1)
-}
+function peakPct(idx)     { return dbToPct(peakLevels.value[idx]).toFixed(1) }
+function peakHoldPct(idx) { return dbToPct(peakHolds.value[idx]).toFixed(1) }
 function peakColor(level) {
-  if (level > 0.85) return '#e74c3c'
+  if (level > 0.9)  return '#e74c3c'
   if (level > 0.55) return '#f39c12'
   return '#2ecc71'
 }
@@ -301,6 +320,18 @@ function peakDb(idx) {
   const v = peakLevels.value[idx]
   if (v <= 0.001) return '-∞'
   return (20 * Math.log10(v)).toFixed(1)
+}
+
+// ── Track re-ordering (drag / Alt+←→) ───────────────────────────────────────
+const selectedTrack = ref(-1)
+function selectTrack(i) { selectedTrack.value = i }
+function moveTrack(i, dir) { if (moveMixerTrack(i, dir)) selectedTrack.value = i + dir }
+function onKey(e) {
+  if (selectedTrack.value < 1) return
+  if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    e.preventDefault()
+    moveTrack(selectedTrack.value, e.key === 'ArrowLeft' ? -1 : 1)
+  }
 }
 
 // ── Volume / Pan helpers ───────────────────────────────────────────────────
@@ -489,6 +520,18 @@ function panLabel(p) {
   height: 2px;
   background: rgba(255,255,255,0.4);
 }
+/* Clip-indicator box pinned at 0 dBFS (top of the meter). */
+.mx-meter-bg { cursor: pointer; }
+.mx-meter-clip {
+  position: absolute; top: 0; left: 0; right: 0;
+  height: 5px; z-index: 2;
+  background: #1a0505; border-bottom: 1px solid var(--border-subtle);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.mx-meter-clip.on {
+  background: #ff2222;
+  box-shadow: 0 0 7px #ff2222cc, inset 0 0 2px #fff6;
+}
 .mx-meter-db {
   font-family: 'Share Tech Mono', monospace;
   font-size: 7px; color: var(--text-muted); text-align: center;
@@ -641,12 +684,26 @@ function panLabel(p) {
   box-shadow: 0 0 6px #f39c1244;
 }
 
-/* ── Track number ───────────────────────────────────────────────────────── */
+/* ── Track number + reorder ─────────────────────────────────────────────── */
 .mx-track-num {
+  display: flex; align-items: center; justify-content: center; gap: 3px;
   font-family: 'Share Tech Mono', monospace;
   font-size: 9px; letter-spacing: 0.05em;
-  opacity: 0.7;
+  opacity: 0.85;
 }
+.mx-num-txt { min-width: 16px; text-align: center; }
+.mx-move-btn {
+  width: 13px; height: 13px;
+  display: flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid var(--border-subtle); border-radius: 2px;
+  color: var(--text-muted); font-size: 7px; cursor: pointer; padding: 0; line-height: 1;
+  transition: all 0.1s;
+}
+.mx-move-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.mx-move-btn:disabled { opacity: 0.25; cursor: default; }
+
+/* Selected strip (target of Alt+←→ reorder). */
+.mx-strip.mx-selected { background: var(--bg-hover); box-shadow: inset 0 0 0 1px var(--accent); }
 
 /* ── Master separator ───────────────────────────────────────────────────── */
 .mx-sep {
