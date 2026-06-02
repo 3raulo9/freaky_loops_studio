@@ -292,9 +292,11 @@ function onGlobalDown(e) {
 /* ── Rows ──────────────────────────────────────────────────────────────────── */
 .tb-line {
   display: flex;
+  flex-wrap: wrap;                /* narrow window → overflow panels wrap to a new sub-row */
   align-items: center;
-  gap: 0;
-  padding: 0 10px;
+  align-content: center;
+  gap: 4px 0;                     /* row-gap for wrapped sub-rows; columns use separators */
+  padding: 3px 10px;
   position: relative;
 }
 .tb-line--primary   { min-height: 48px; }

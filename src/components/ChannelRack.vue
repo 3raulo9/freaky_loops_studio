@@ -1,5 +1,6 @@
 <template>
   <div
+    ref="rackEl"
     class="channel-rack"
     :class="{ 'rack-drop': dropActive }"
     @click="closeAllMenus"
@@ -283,7 +284,7 @@
           <div class="ch-seq" @click.stop>
             <!-- Step buttons -->
             <template v-if="ch.mode === 'steps'">
-              <div class="inline-steps" :style="{ '--cols': totalSteps }">
+              <div class="inline-steps" :class="{ compact: compactSteps }" :style="{ '--cols': stepCols }">
                 <button v-for="s in totalSteps" :key="s-1" class="istep"
                   :class="{
                     lit:     stepLit(ch, s-1),
@@ -377,6 +378,12 @@
       <div class="ctx-item" @click="ctxAction('rename')">Rename</div>
       <div class="ctx-item" @click="ctxAction('clone')">Clone</div>
       <div class="ctx-item" @click="ctxAction('clear')">Clear Pattern</div>
+      <template v-if="ctxMenu.channel?.mode === 'steps'">
+        <div class="ctx-sep"/>
+        <div class="ctx-item" @click="ctxAction('shift-left')">Shift steps ◄</div>
+        <div class="ctx-item" @click="ctxAction('shift-right')">Shift steps ►</div>
+        <div class="ctx-item" @click="ctxAction('invert')">Invert steps</div>
+      </template>
       <div class="ctx-sep"/>
       <!-- Fill steps submenu -->
       <div class="ctx-sub-trigger"
@@ -498,7 +505,18 @@ const {
   fillSteps, cloneChannel, sortChannelsBy, colorChannelsRandom, colorChannelsGradient,
   assignChannelToMixerTrack, mixerTracks,
   setCutSelf, splitByChannel, addSampleChannel,
+  rotateSteps, invertSteps,
 } = useStudio()
+
+// ── Step-length layout reflow (stack into 2 rows when steps get too narrow) ────
+const rackEl = ref(null)
+const rackWidth = ref(1000)
+const CONTROLS_W = 280            // name + mute + pan/vol + mixer columns (+ gaps)
+const STEP_MIN_PX = 12            // legibility threshold per step button
+const stepPx = computed(() => Math.max(2, (rackWidth.value - CONTROLS_W) / Math.max(1, totalSteps.value)))
+const compactSteps = computed(() => stepPx.value < STEP_MIN_PX)
+const stepCols = computed(() => compactSteps.value ? Math.ceil(totalSteps.value / 2) : totalSteps.value)
+let _rackRO = null
 
 // ── Sample drag-and-drop from the Browser ─────────────────────────────────────
 const dropActive = ref(false)
@@ -552,8 +570,18 @@ function onDocClick() {
   optionsOpen.value = false
   dfOpen.value = false
 }
-onMounted(() => document.addEventListener('click', onDocClick, true))
-onUnmounted(() => document.removeEventListener('click', onDocClick, true))
+onMounted(() => {
+  document.addEventListener('click', onDocClick, true)
+  if (rackEl.value) {
+    rackWidth.value = rackEl.value.clientWidth
+    _rackRO = new ResizeObserver(es => { rackWidth.value = es[0].contentRect.width })
+    _rackRO.observe(rackEl.value)
+  }
+})
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClick, true)
+  _rackRO?.disconnect()
+})
 
 // ── Pattern navigator helpers ─────────────────────────────────────────────────
 const patternIndex   = computed(() => patterns.findIndex(p => p.id === currentPatternId.value))
@@ -866,6 +894,9 @@ function ctxAction(action) {
   if (action === 'zip')          ch.zipped = !ch.zipped
   if (action === 'color-random') colorChannelsRandom([ch.id])
   if (action === 'cut-self')     setCutSelf(ch.id, !ch.cutSelf)
+  if (action === 'shift-left')   rotateSteps(ch.id, -1)
+  if (action === 'shift-right')  rotateSteps(ch.id, +1)
+  if (action === 'invert')       invertSteps(ch.id)
 }
 function ctxFill(every) {
   ctxSubOpen.value = null
@@ -1235,6 +1266,10 @@ function commitRename() {
   grid-template-columns: repeat(var(--cols), 1fr);
   gap: 2px;
 }
+/* Reflow: when steps get too narrow they stack onto a second row (grid auto-wrap
+   fills the first half on row 1, the rest on row 2). */
+.inline-steps.compact { gap: 2px; }
+.inline-steps.compact .istep { height: 13px; border-radius: 2px; }
 .istep {
   height: 24px; border: 1px solid var(--border-subtle);
   border-radius: 3px; background: var(--bg-base);
