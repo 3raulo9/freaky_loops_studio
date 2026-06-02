@@ -772,6 +772,28 @@ export function useStudio() {
     if (idx >= 0) playlistClips.splice(idx, 1)
   }
 
+  // Track consolidation: collapse runs of adjacent/overlapping same-pattern clips
+  // on a lane into single unified blocks (the in-box analog of an offline bounce).
+  function consolidateTrack(trackId) {
+    const lane = playlistClips.filter(c => c.trackId === trackId).sort((a, b) => a.cell - b.cell)
+    if (lane.length < 2) return 0
+    pushUndo()
+    const merged = []
+    for (const c of lane) {
+      const last = merged[merged.length - 1]
+      const w = c.width || 1
+      if (last && last.patternId === c.patternId && c.cell <= last.cell + last.width) {
+        last.width = Math.max(last.width, c.cell + w - last.cell)   // extend the block
+      } else {
+        merged.push({ patternId: c.patternId, cell: c.cell, width: w, muted: c.muted, slipOffset: c.slipOffset ?? 0 })
+      }
+    }
+    for (let i = playlistClips.length - 1; i >= 0; i--) if (playlistClips[i].trackId === trackId) playlistClips.splice(i, 1)
+    merged.forEach(m => playlistClips.push({ id: 'c' + (++_clipId), trackId, ...m }))
+    markDirty()
+    return lane.length - merged.length            // how many clips were absorbed
+  }
+
   function addTimeMarker(cell, label = 'Marker') {
     timeMarkers.push({ id: 'm' + (++_markerId), cell, label })
   }
@@ -2426,7 +2448,7 @@ export function useStudio() {
     playlistTracks, playlistClips, timeMarkers, usePlaylist,
     playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell,
     addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
-    placeClip, removeClip, moveClip, resizeClip, splitClip, makeUniqueClip,
+    placeClip, removeClip, moveClip, resizeClip, splitClip, makeUniqueClip, consolidateTrack,
     addTimeMarker, removeTimeMarker,
     PLAYLIST_CELLS,
     // Track groups/lock
