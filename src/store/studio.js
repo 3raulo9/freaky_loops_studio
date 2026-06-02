@@ -1545,12 +1545,13 @@ export function useStudio() {
     noteQueue.push({ step, time: baseWhen, cell: cell % PLAYLIST_CELLS })
     syncVolumes()
     const secPerBeat = 60 / bpm.value
+    const secPerStep = secPerBeat / 4                 // Δstep (a 16th note)
     const pids = getPatternsForCell(cell)
     channels.forEach((ch, ci) => {
       if (ch.muted) return
-      // Per-channel swing: multiply global swing by this channel's swingMix (0–1)
+      // Global swing (S∈[0,1]): even steps delayed by up to Δstep/3 → triplet groove.
       const swingMix = ch.swingMix ?? 1.0
-      const swingOff = step % 2 === 1 ? swing.value * swingMix * secPerBeat * 0.5 : 0
+      const swingOff = step % 2 === 1 ? swing.value * swingMix * (secPerStep / 3) : 0
       const when = baseWhen + swingOff
       const dest     = trackGains[ci] ?? audioCtx.destination
       const cutDest  = cutGains[ci]   ?? dest   // route through cutGain if cutSelf
@@ -1851,6 +1852,34 @@ export function useStudio() {
   function clearChannel(channelId) {
     pushUndo()
     const d = getPatData(channelId); d.steps.fill(false); d.pianoNotes.length = 0
+  }
+
+  // ── Step-state bitmask ops (compact channel-lane representation) ───────────────
+  //   A lane's on/off state maps to one integer bitmask; pattern transforms are
+  //   pure bitwise ops. BigInt scales the mask cleanly past 32 steps.
+  function getStepMask(channelId, len = totalSteps.value, patternId) {
+    const s = getSteps(channelId, patternId)
+    let m = 0n
+    for (let i = 0; i < len; i++) if (s[i]) m |= (1n << BigInt(i))
+    return m
+  }
+  function setStepMask(channelId, mask, len = totalSteps.value, patternId) {
+    const s = getSteps(channelId, patternId)
+    for (let i = 0; i < len; i++) s[i] = ((mask >> BigInt(i)) & 1n) === 1n
+  }
+  function rotateSteps(channelId, dir = 1, len = totalSteps.value) {
+    pushUndo()
+    const full = (1n << BigInt(len)) - 1n
+    let m = getStepMask(channelId, len) & full
+    m = dir > 0
+      ? ((m << 1n) | (m >> BigInt(len - 1))) & full     // shift → (wrap top to bottom)
+      : ((m >> 1n) | (m << BigInt(len - 1))) & full     // shift ← (wrap bottom to top)
+    setStepMask(channelId, m, len)
+  }
+  function invertSteps(channelId, len = totalSteps.value) {
+    pushUndo()
+    const full = (1n << BigInt(len)) - 1n
+    setStepMask(channelId, (~getStepMask(channelId, len)) & full, len)
   }
 
   function clearAll() {
@@ -2379,6 +2408,8 @@ export function useStudio() {
     addPattern, removePattern, duplicatePattern,
     // Pattern editing
     toggleStep, togglePianoNote, hasNote, clearChannel, clearAll,
+    // Step bitmask ops
+    getStepMask, setStepMask, rotateSteps, invertSteps,
     // Step graph
     getStepVelocities, setStepVelocity,
     getStepPans, setStepPan,
