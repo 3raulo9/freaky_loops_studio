@@ -1,5 +1,6 @@
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, watch } from 'vue'
 import { applyTheme } from '../themes.js'
+import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
@@ -876,7 +877,12 @@ export function useStudio() {
   //   The toolbar's shortcut panel is the master orchestrator. Each window has a
   //   tri-state lifecycle (hidden → obscured → focused) and may be "detached"
   //   into a free-floating window. mainView remains the docked main pane.
-  const browserOpen       = ref(false)
+  // Browser is shown by default on first visit; the user's choice is remembered.
+  const browserOpen       = ref((() => {
+    try { const v = localStorage.getItem('fl.browser.open'); return v === null ? true : v === '1' }
+    catch { return true }
+  })())
+  watch(browserOpen, v => { try { localStorage.setItem('fl.browser.open', v ? '1' : '0') } catch (_) {} })
   const activeArrangement = ref('default')
   const detachedWindows   = reactive({})   // id → { x, y, w, h, z }
   let   _winZ        = 200
@@ -1092,6 +1098,79 @@ export function useStudio() {
   }
   function setMasterPitch(v)      { masterPitch.value = Math.max(-1, Math.min(1, v)) }
   function setMasterPitchRange(r) { masterPitchRange.value = Math.max(1, Math.min(48, Math.round(r))) }
+
+  // ── Browser sample preview (mixer-bypass path) ────────────────────────────────
+  //   Previews route into a dedicated gain straight to the output, bypassing the
+  //   channel/mixer graph. Clicking a new asset aborts the in-flight stream.
+  const browserWidth = ref(220)
+  const previewingId = ref(null)
+  let previewGain = null, previewSrc = null
+  function _ensurePreview() {
+    initAudio()
+    if (!previewGain) { previewGain = audioCtx.createGain(); previewGain.gain.value = 0.7; previewGain.connect(audioCtx.destination) }
+  }
+  function stopPreview() {
+    if (previewSrc) { try { previewSrc.stop() } catch (_) {} ; try { previewSrc.disconnect() } catch (_) {} ; previewSrc = null }
+    previewingId.value = null
+  }
+
+  // Render a sample spec into a cached AudioBuffer (DSP lives in browserLibrary).
+  const _assetBufCache = new Map()
+  function _renderSpec(spec, key) {
+    if (_assetBufCache.has(key)) return _assetBufCache.get(key)
+    const sr = audioCtx.sampleRate
+    const buf = audioCtx.createBuffer(1, Math.ceil(sr * sampleDuration(spec)), sr)
+    fillSample(buf.getChannelData(0), sr, spec)
+    _assetBufCache.set(key, buf)
+    return buf
+  }
+
+  function previewAsset(asset) {
+    _ensurePreview()
+    stopPreview()                                   // abort any in-flight preview
+    const src = audioCtx.createBufferSource()
+    src.buffer = _renderSpec(asset.spec, asset.id)
+    src.connect(previewGain)
+    src.onended = () => { if (previewSrc === src) { previewSrc = null; previewingId.value = null } }
+    src.start()
+    previewSrc = src
+    previewingId.value = asset.id
+  }
+
+  // Play function for a dropped-sample channel: schedules the rendered buffer.
+  function makeSampleFn(spec) {
+    const key = 'spec:' + JSON.stringify(spec)
+    return (ctx, when, params, dest) => {
+      const src = ctx.createBufferSource()
+      src.buffer = _renderSpec(spec, key)
+      if (params.pitch != null) src.playbackRate.value = Math.pow(2, (params.pitch - 60) / 12)
+      const g = ctx.createGain(); g.gain.value = params.velocity ?? 0.8
+      src.connect(g); g.connect(dest)
+      src.start(when)
+    }
+  }
+
+  // Create a new Channel Rack channel from a dropped browser asset.
+  function addSampleChannel(asset) {
+    initAudio()
+    const base = asset.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
+    const ch = makeChannel({
+      name: base.length > 14 ? base.slice(0, 14) : base,
+      color: asset.color || '#4ecdc4',
+      type: 'sample', mode: 'steps', volume: 0.8,
+      instrumentType: 'sample',
+      sampleSpec: { ...asset.spec }, sampleName: asset.name,
+      params: { pitch: 60, velocity: 0.8 },
+      knobs: [{ key: 'pitch', label: 'PITCH', min: 24, max: 96, decimals: 0 }],
+      fn: makeSampleFn(asset.spec),
+    })
+    channels.push(ch)
+    rebuildGains()
+    selectedChannelId.value = ch.id
+    mainView.value = 'sequencer'
+    markDirty()
+    return ch
+  }
 
   // ── MIDI input, sync telemetry & Multilink ────────────────────────────────────
   //   Sync LED states: idle(grey) | unhandled(green) | volatile(orange) | global(blue).
@@ -2075,6 +2154,8 @@ export function useStudio() {
         fnKey:          FN_KEY_MAP.get(ch.fn) ?? 'melodic',
         activeModules:  [...(ch.activeModules ?? [])],
         instrumentType: ch.instrumentType ?? '',
+        sampleSpec:     ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
+        sampleName:     ch.sampleName,
       })),
       channelGroups: channelGroups.map(g => ({ ...g })),
       patterns:      patterns.map(p => ({ ...p })),
@@ -2165,9 +2246,13 @@ export function useStudio() {
       groupId:     ch.groupId     ?? null,
       params:         { ...(ch.params ?? {}) },
       knobs:          (ch.knobs ?? []).map(k => ({ ...k })),
-      fn:             FN_FROM_KEY[ch.fnKey] ?? playMelodicNote,
+      fn:             ch.type === 'sample' && ch.sampleSpec
+                        ? makeSampleFn(ch.sampleSpec)
+                        : (FN_FROM_KEY[ch.fnKey] ?? playMelodicNote),
       activeModules:  [...(ch.activeModules ?? [])],
       instrumentType: ch.instrumentType ?? '',
+      sampleSpec:     ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
+      sampleName:     ch.sampleName,
     })))
 
     // Channel groups
@@ -2277,6 +2362,8 @@ export function useStudio() {
     gridSnap, keyboardInputMode,
     // Title bar
     projectName, projectDirty, extendedHudOpen,
+    // Browser preview + docking + sample drop
+    browserWidth, previewingId, previewAsset, stopPreview, addSampleChannel,
     // Window manager
     browserOpen, activeArrangement, detachedWindows,
     windowState, activateWindow, toggleDetach, redockWindow, focusWindow, applyArrangement,

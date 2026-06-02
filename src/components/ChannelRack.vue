@@ -1,5 +1,15 @@
 <template>
-  <div class="channel-rack" @click="closeAllMenus">
+  <div
+    class="channel-rack"
+    :class="{ 'rack-drop': dropActive }"
+    @click="closeAllMenus"
+    @dragenter.prevent="onSampleDragEnter"
+    @dragover.prevent="onSampleDragOver"
+    @dragleave="onSampleDragLeave"
+    @drop.prevent="onSampleDrop"
+  >
+    <!-- Sample drop overlay -->
+    <div v-if="dropActive" class="rack-drop-hint">＋ Drop sample to add a channel</div>
 
     <!-- ── Pattern navigator ─────────────────────────────────────────── -->
     <div class="pattern-nav">
@@ -473,6 +483,7 @@
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useStudio, FM_PRESETS } from '../store/studio.js'
+import { getAsset } from '../browserLibrary.js'
 import Knob from './Knob.vue'
 
 const {
@@ -486,8 +497,22 @@ const {
   getStepVelocities, setStepVelocity, getStepPans, setStepPan, getStepPitches, setStepPitch,
   fillSteps, cloneChannel, sortChannelsBy, colorChannelsRandom, colorChannelsGradient,
   assignChannelToMixerTrack, mixerTracks,
-  setCutSelf, splitByChannel,
+  setCutSelf, splitByChannel, addSampleChannel,
 } = useStudio()
+
+// ── Sample drag-and-drop from the Browser ─────────────────────────────────────
+const dropActive = ref(false)
+let _dragDepth = 0
+function _hasAsset(e) { return [...(e.dataTransfer?.types ?? [])].includes('application/x-fls-asset') }
+function onSampleDragEnter(e) { if (!_hasAsset(e)) return; _dragDepth++; dropActive.value = true }
+function onSampleDragOver(e)  { if (_hasAsset(e)) e.dataTransfer.dropEffect = 'copy' }
+function onSampleDragLeave()  { if (--_dragDepth <= 0) { _dragDepth = 0; dropActive.value = false } }
+function onSampleDrop(e) {
+  _dragDepth = 0; dropActive.value = false
+  const id = e.dataTransfer.getData('application/x-fls-asset')
+  const asset = id && getAsset(id)
+  if (asset) addSampleChannel(asset)
+}
 
 // ── Graph editor tabs ─────────────────────────────────────────────────────────
 const GE_TABS = [
@@ -922,6 +947,15 @@ function commitRename() {
 .channel-rack {
   display: flex; flex-direction: column; flex: 1;
   overflow: hidden; background: var(--bg-base); position: relative;
+}
+.channel-rack.rack-drop { box-shadow: inset 0 0 0 2px #f1c40f; }
+.rack-drop-hint {
+  position: absolute; inset: 0; z-index: 2500;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(20, 16, 4, 0.55); backdrop-filter: blur(1px);
+  font-family: 'Rajdhani', sans-serif; font-size: 18px; font-weight: 700;
+  letter-spacing: 0.1em; color: #f1c40f; pointer-events: none;
+  text-shadow: 0 0 14px #f1c40f66;
 }
 
 /* ── Options panel ───────────────────────────────────────────────── */

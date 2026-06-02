@@ -6,9 +6,14 @@
     <!-- ── Main body ──────────────────────────────────────────────────── -->
     <div class="studio-body">
 
-      <!-- ── Browser sidebar ───────────────────────────────────────── -->
-      <aside v-if="browserOpen && !detachedWindows.browser" class="browser-sidebar">
+      <!-- ── Browser sidebar (docked: W_main = W_total − W_browser) ──── -->
+      <aside
+        v-if="browserOpen && !detachedWindows.browser"
+        class="browser-sidebar"
+        :style="{ width: browserWidth + 'px', minWidth: browserWidth + 'px' }"
+      >
         <BrowserPanel />
+        <div class="browser-resize" @mousedown.prevent="startBrowserResize" title="Drag to resize" />
       </aside>
 
       <!-- ── Left: Channel Rack / Playlist / Mixer ─────────────────── -->
@@ -242,7 +247,7 @@ const {
   mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen, themeModalOpen,
   clearChannel, handleKeyDown, handleKeyUp,
   addDrumModule, removeDrumModule,
-  browserOpen, detachedWindows, redockWindow, extendedHudOpen,
+  browserOpen, detachedWindows, redockWindow, extendedHudOpen, browserWidth,
   loadWasmForChannel,
 } = useStudio()
 
@@ -251,6 +256,15 @@ const VIEW_ID    = { sequencer: 'rack', playlist: 'playlist', mixer: 'mixer' }
 const VIEW_TITLE = { sequencer: 'Channel Rack', playlist: 'Playlist', mixer: 'Mixer' }
 const detachedIdForView = computed(() => VIEW_ID[mainView.value])
 const mainViewTitle     = computed(() => VIEW_TITLE[mainView.value] ?? 'Window')
+
+// ── Browser dock resize ───────────────────────────────────────────────────────
+function startBrowserResize(e) {
+  const sx = e.clientX, sw = browserWidth.value
+  const move = ev => { browserWidth.value = Math.max(160, Math.min(480, sw + ev.clientX - sx)) }
+  const up = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up) }
+  window.addEventListener('mousemove', move)
+  window.addEventListener('mouseup', up)
+}
 
 // ── Module panel state ────────────────────────────────────────────────────────
 const activeModuleTab   = ref(null)
@@ -407,11 +421,16 @@ function stopResize() {
 
 /* ── Browser sidebar ─────────────────────────────────────────────── */
 .browser-sidebar {
-  width: 190px; min-width: 190px;
+  position: relative;
   border-right: 1px solid var(--border-subtle);
   overflow: hidden;
   flex-shrink: 0;
 }
+.browser-resize {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 5px;
+  cursor: ew-resize; background: transparent; transition: background 0.1s;
+}
+.browser-resize:hover { background: #f1c40f55; }
 
 /* ── Detached-window placeholder ─────────────────────────────────── */
 .detached-placeholder {
