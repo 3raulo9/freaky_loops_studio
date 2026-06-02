@@ -48,6 +48,7 @@
       </label>
 
       <div class="tb-right">
+        <span class="cull-stat" :title="`Clips painted / total (bounding-box culled)`">▦ {{ renderedClipCount }}/{{ totalClipCount }}</span>
         <button class="tb-btn" @click="addPlaylistTrack">+ TRACK</button>
         <button class="tb-btn" @click="addAutoTrack">+ AUTO</button>
         <button class="tb-btn" @click="addMarkerPrompt">+ MARKER</button>
@@ -153,8 +154,9 @@
           </div>
         </div>
 
-        <!-- Track rows -->
-        <template v-for="track in visibleTracks" :key="track.id">
+        <!-- Track rows (vertically culled; spacers preserve scroll height/offsets) -->
+        <div v-if="trackWindow.topPad" class="pl-cull-spacer" :style="{ height: trackWindow.topPad + 'px' }" />
+        <template v-for="track in trackWindow.slice" :key="track.id">
           <div
             class="pl-track-row"
             :class="{
@@ -213,7 +215,7 @@
               <!-- Pattern clips -->
               <template v-if="clipFocusMode === 'pattern' || clipFocusMode === 'automation'">
                 <div
-                  v-for="clip in patternClipsForTrack(track.id)"
+                  v-for="clip in visibleClipsForTrack(track.id)"
                   :key="clip.id"
                   class="pl-clip"
                   :class="{
@@ -257,7 +259,7 @@
               <!-- Automation clips -->
               <template v-if="clipFocusMode === 'automation' || clipFocusMode === 'pattern'">
                 <div
-                  v-for="auto in autoClipsForTrack(track.id)"
+                  v-for="auto in visibleAutoForTrack(track.id)"
                   :key="auto.id"
                   class="pl-auto-clip"
                   :class="{ ghost: clipFocusMode === 'pattern' }"
@@ -300,6 +302,7 @@
             </div>
           </div>
         </template>
+        <div v-if="trackWindow.botPad" class="pl-cull-spacer" :style="{ height: trackWindow.botPad + 'px' }" />
 
         <!-- Add track row -->
         <div class="pl-add-track-row">
@@ -331,6 +334,8 @@
       <div class="ctx-item" @click="ctxToggleLock">
         {{ trackMenu.track.locked ? '🔓 Unlock track' : '⚿ Lock to content' }}
       </div>
+      <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxConsolidate">Consolidate lane clips</div>
       <div class="ctx-sep" />
       <div class="ctx-item danger" @click="ctxRemoveTrack">Remove track</div>
     </div>
@@ -401,7 +406,7 @@ const {
   playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell, isPlaying,
   bpm, totalSteps, getPlayheadTimeSeconds, gridSnap, ppq, snapBars,
   addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
-  placeClip, removeClip, moveClip, resizeClip, splitClip, makeUniqueClip,
+  placeClip, removeClip, moveClip, resizeClip, splitClip, makeUniqueClip, consolidateTrack,
   addTimeMarker, removeTimeMarker,
   groupTrackWithAbove, ungroupTrack, toggleTrackCollapse, setTrackLocked,
   addAutomationClip, removeAutomationClip, addAutoNode, removeAutoNode, resizeAutomationClip,
@@ -899,6 +904,7 @@ function ctxGroupAbove()     { groupTrackWithAbove(trackMenu.value.track.id); tr
 function ctxUngroup()        { ungroupTrack(trackMenu.value.track.id); trackMenu.value = null }
 function ctxToggleCollapse() { toggleTrackCollapse(trackMenu.value.track.id); trackMenu.value = null }
 function ctxToggleLock()     { setTrackLocked(trackMenu.value.track.id, !trackMenu.value.track.locked); trackMenu.value = null }
+function ctxConsolidate()    { consolidateTrack(trackMenu.value.track.id); trackMenu.value = null }
 function ctxRemoveTrack()    { removePlaylistTrack(trackMenu.value.track.id); trackMenu.value = null }
 
 // ── Clip context menu ─────────────────────────────────────────────────────────
@@ -1049,8 +1055,45 @@ function onWheel(e) {
 const minimapEl   = ref(null)
 const timelineRef = ref(null)
 const scrollLeft  = ref(0)
+const scrollTop   = ref(0)
+const viewW       = ref(1200)   // visible clip-area width (minus header column)
+const viewH       = ref(600)    // visible track-area height (minus ruler)
 
-function onTimelineScroll() { scrollLeft.value = timelineRef.value?.scrollLeft ?? 0 }
+function onTimelineScroll() {
+  const tl = timelineRef.value; if (!tl) return
+  scrollLeft.value = tl.scrollLeft
+  scrollTop.value  = tl.scrollTop
+}
+function measureViewport() {
+  const tl = timelineRef.value; if (!tl) return
+  viewW.value = Math.max(0, tl.clientWidth  - HEADER_W)
+  viewH.value = Math.max(0, tl.clientHeight - RULER_H)
+}
+
+// ── Bounding-box culling (only paint instances intersecting the viewport) ─────
+const CULL_X = 2, CULL_Y = 2     // cell / row overscan
+const visMinCell = computed(() => scrollLeft.value / cellWidth.value - CULL_X)
+const visMaxCell = computed(() => (scrollLeft.value + viewW.value) / cellWidth.value + CULL_X)
+function inViewX(c) { return (c.cell + (c.width || 1)) > visMinCell.value && c.cell < visMaxCell.value }
+function visibleClipsForTrack(trackId) { return playlistClips.filter(c => c.trackId === trackId && inViewX(c)) }
+function visibleAutoForTrack(trackId)  { return automationClips.filter(a => a.trackId === trackId && inViewX(a)) }
+
+// Vertical track culling with spacers to preserve scroll height & offsets.
+const trackWindow = computed(() => {
+  const all = visibleTracks.value
+  const th  = trackHeight.value || 1
+  const first = Math.max(0, Math.floor(scrollTop.value / th) - CULL_Y)
+  const last  = Math.min(all.length, first + Math.ceil(viewH.value / th) + CULL_Y * 2)
+  return { slice: all.slice(first, last), topPad: first * th, botPad: (all.length - last) * th }
+})
+
+// Culling telemetry (rendered / total).
+const totalClipCount    = computed(() => playlistClips.length)
+const renderedClipCount = computed(() => {
+  let n = 0
+  for (const t of trackWindow.value.slice) n += visibleClipsForTrack(t.id).length
+  return n
+})
 
 const totalTimelineWidth = computed(() => PLAYLIST_CELLS * cellWidth.value)
 
@@ -1112,18 +1155,27 @@ function onKeyDown(e) {
     selectedClipIds.value = new Set()
   }
 }
+let _viewRO = null
 onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
   rafId = requestAnimationFrame(renderPlayheadLoop)
+  measureViewport()
+  if (timelineRef.value) { _viewRO = new ResizeObserver(measureViewport); _viewRO.observe(timelineRef.value) }
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
   if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
+  _viewRO?.disconnect()
 })
 </script>
 
 <style scoped>
+.pl-cull-spacer { width: 100%; flex-shrink: 0; pointer-events: none; }
+.cull-stat {
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #50506e;
+  padding: 0 8px; align-self: center; white-space: nowrap;
+}
 .playlist {
   display: flex; flex-direction: column; flex: 1; overflow: hidden;
   background: var(--bg-header); user-select: none;
