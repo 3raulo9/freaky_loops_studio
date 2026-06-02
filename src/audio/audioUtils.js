@@ -14,6 +14,35 @@ export function makeHarshCurve(drive, crunch) {
   return curve
 }
 
+// Shared white-noise buffer — one per AudioContext, reused by every percussive
+// voice (snare, clash, flute breath…) instead of allocating AND filling a fresh
+// buffer on every hit. The old per-hit fill ran a Math.random() loop over tens
+// of thousands of samples inside the scheduler tick — a major cause of GC
+// pauses and compute overruns (the underrun crackle) on dense patterns.
+const _noiseCache = new WeakMap()
+export function getNoiseBuffer(ctx, seconds = 4) {
+  const cached = _noiseCache.get(ctx)
+  if (cached) return cached
+  const len = Math.floor(ctx.sampleRate * seconds)
+  const buf = ctx.createBuffer(1, len, ctx.sampleRate)
+  const d = buf.getChannelData(0)
+  for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1
+  _noiseCache.set(ctx, buf)
+  return buf
+}
+
+// A looping source over the shared noise buffer. Start it at a random offset so
+// successive hits don't reuse the exact same noise (start(time, randomOffset()));
+// shape duration/amplitude with a gain envelope as before.
+export function makeNoiseSource(ctx) {
+  const src = ctx.createBufferSource()
+  src.buffer = getNoiseBuffer(ctx)
+  src.loop = true
+  return src
+}
+// Safe random start offset within the shared buffer (kept below its length).
+export function noiseOffset() { return Math.random() * 3 }
+
 // Synthetic reverb IR — created once per AudioContext
 const _reverbCache = new WeakMap()
 export function getOrCreateReverb(ctx) {

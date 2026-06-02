@@ -2,7 +2,7 @@
 // Modulator feeds into carrier.frequency AudioParam via a GainNode scaled to Hz.
 // depth (Hz) = modIndex * modulatorFreq
 
-import { buildProcessChain } from './audioUtils.js'
+import { buildProcessChain, makeNoiseSource, noiseOffset } from './audioUtils.js'
 
 function midiToFreq(pitch) {
   return 440 * Math.pow(2, (pitch - 69) / 12)
@@ -463,10 +463,7 @@ export function playFMFlute(ctx, time, {
   const dur = gate !== null ? gate + decay + 0.15 : decay + 0.15
   if (breath > 0.05) {
     const nLen = dur
-    const buf  = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * nLen), ctx.sampleRate)
-    const data = buf.getChannelData(0)
-    for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1
-    const noise  = ctx.createBufferSource(); noise.buffer = buf
+    const noise  = makeNoiseSource(ctx)
     const nbpf   = ctx.createBiquadFilter()
     nbpf.type = 'bandpass'; nbpf.frequency.value = freq * 2; nbpf.Q.value = 2
     const noiseEnv = ctx.createGain()
@@ -480,7 +477,7 @@ export function playFMFlute(ctx, time, {
       noiseEnv.gain.exponentialRampToValueAtTime(0.001, time + decay)
     }
     noise.connect(nbpf); nbpf.connect(noiseEnv); noiseEnv.connect(env)
-    noise.start(time); noise.stop(time + nLen)
+    noise.start(time, noiseOffset()); noise.stop(time + nLen)
   }
 
   vibrato.start(time);   vibrato.stop(time + dur)
@@ -1212,18 +1209,14 @@ export function playFMKalimba(ctx, time, {
   carrier.connect(env)
 
   if (tone > 0.1) {
-    const bufLen = Math.ceil(ctx.sampleRate * 0.04)
-    const buf    = ctx.createBuffer(1, bufLen, ctx.sampleRate)
-    const data   = buf.getChannelData(0)
-    for (let i = 0; i < bufLen; i++) data[i] = Math.random() * 2 - 1
-    const noise    = ctx.createBufferSource(); noise.buffer = buf
+    const noise    = makeNoiseSource(ctx)
     const nFilter  = ctx.createBiquadFilter()
     const noiseEnv = ctx.createGain()
     nFilter.type = 'bandpass'; nFilter.frequency.value = freq * 3; nFilter.Q.value = 2
     noiseEnv.gain.setValueAtTime(tone * 0.05 * velocity, time)
     noiseEnv.gain.exponentialRampToValueAtTime(0.001, time + 0.04)
     noise.connect(nFilter); nFilter.connect(noiseEnv); noiseEnv.connect(env)
-    noise.start(time); noise.stop(time + 0.05)
+    noise.start(time, noiseOffset()); noise.stop(time + 0.05)
   }
 
   modulator.start(time); modulator.stop(time + dur)

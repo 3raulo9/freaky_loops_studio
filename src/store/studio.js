@@ -1602,10 +1602,14 @@ export function useStudio() {
           const s = loopLen !== null ? step % loopLen : step
           if (d.steps[s]) {
             const vel = d.stepVelocities?.[s] ?? 0.8
-            // Cut-self: instantly silence previous note, then let new one through
+            // Cut-self: choke the previous note before the new one. A short
+            // 2 ms fade-out/in (instead of an instant step) de-clicks the choke.
             if (cutGains[ci]) {
-              cutGains[ci].gain.setValueAtTime(0.0001, when)
-              cutGains[ci].gain.setValueAtTime(1.0,    when + 0.001)
+              const cg = cutGains[ci].gain
+              cg.cancelScheduledValues(when)
+              cg.setValueAtTime(cg.value, when)
+              cg.linearRampToValueAtTime(0.0001, when + 0.002)
+              cg.linearRampToValueAtTime(1.0,    when + 0.004)
             }
             ch.fn(audioCtx, when, { ...ch.params, velocity: vel }, cutDest)
             registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
