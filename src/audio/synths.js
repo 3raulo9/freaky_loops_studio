@@ -92,15 +92,22 @@ export function playKick(ctx, time, {
   click.connect(clickGain)
 
   // ── Built-in distortion (bypassed when Distortion module is active) ───────
+  // makeDistortionCurve(0) is an identity curve, so when there's no drive the
+  // 4x-oversampled shaper is pure CPU cost for an unchanged signal — skip it.
+  // Avoiding the per-voice WaveShaper on dense patterns reduces underrun crackle.
   const distAmt = drive === null ? punch * 120 : 0
-  const dist    = ctx.createWaveShaper()
-  dist.curve      = makeDistortionCurve(distAmt)
-  dist.oversample = '4x'
-
-  bodyGain.connect(dist)
-  subGain.connect(dist)
   clickGain.connect(master)
-  dist.connect(master)
+  if (distAmt > 0) {
+    const dist = ctx.createWaveShaper()
+    dist.curve      = makeDistortionCurve(distAmt)
+    dist.oversample = '4x'
+    bodyGain.connect(dist)
+    subGain.connect(dist)
+    dist.connect(master)
+  } else {
+    bodyGain.connect(master)
+    subGain.connect(master)
+  }
 
   const bDcy = bodyDecay ?? decay
   const stopT = time + Math.max(bDcy, decay) + release + 0.2
