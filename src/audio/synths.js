@@ -5,7 +5,13 @@
 // Optional module params (from drumModules.js) are destructured with defaults
 // that reproduce the original behaviour when no module is attached.
 
-import { buildProcessChain } from './audioUtils.js'
+import { buildProcessChain, makeNoiseSource, noiseOffset } from './audioUtils.js'
+
+// Minimum onset fade. A drum's master gain ramps from silence to peak over this
+// many seconds even when "attack" is 0, so the waveform never steps from 0 to
+// full instantly (a DC discontinuity = an audible click). 0.6 ms is shorter
+// than any percussive transient, so the attack still sounds instant.
+const MIN_ATTACK = 0.0006
 
 function makeDistortionCurve(amount) {
   const n = 256
@@ -43,13 +49,10 @@ export function playKick(ctx, time, {
   // ── Master gain with optional ADSR envelope ───────────────────────────────
   const master = ctx.createGain()
   const peak = 1.2 * velocity
-  if (attack > 0.001) {
-    master.gain.setValueAtTime(0.0001, time)
-    master.gain.linearRampToValueAtTime(peak, time + attack)
-  } else {
-    master.gain.setValueAtTime(peak, time)
-  }
-  const decayStart = time + attack + sustain
+  const atk  = Math.max(attack, MIN_ATTACK)
+  master.gain.setValueAtTime(0.0001, time)
+  master.gain.linearRampToValueAtTime(peak, time + atk)
+  const decayStart = time + atk + sustain
   master.gain.setValueAtTime(peak, decayStart)
   master.gain.exponentialRampToValueAtTime(0.001, decayStart + decay)
   if (release > 0.001) {
@@ -141,14 +144,8 @@ export function playSnare(ctx, time, {
   const pEnd   = pitchEnd   ?? tone * 0.7
   const pDcy   = pitchDecay ?? decay * 0.35
 
-  // ── White noise burst ─────────────────────────────────────────────────────
-  const noiseLen = Math.max(bDcy, 0.08)
-  const buf  = ctx.createBuffer(1, ctx.sampleRate * noiseLen, ctx.sampleRate)
-  const data = buf.getChannelData(0)
-  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1
-
-  const noise    = ctx.createBufferSource()
-  noise.buffer   = buf
+  // ── White noise burst (shared buffer, shaped by noiseGain) ────────────────
+  const noise    = makeNoiseSource(ctx)
   const noiseHPF = ctx.createBiquadFilter()
   noiseHPF.type  = 'highpass'; noiseHPF.frequency.value = tone * 3.5
   const noiseBPF = ctx.createBiquadFilter()
@@ -191,13 +188,10 @@ export function playSnare(ctx, time, {
   // ── Master gain with optional ADSR ───────────────────────────────────────
   const master = ctx.createGain()
   const peak   = velocity
-  if (attack > 0.001) {
-    master.gain.setValueAtTime(0.0001, time)
-    master.gain.linearRampToValueAtTime(peak, time + attack)
-  } else {
-    master.gain.setValueAtTime(peak, time)
-  }
-  const decayStart = time + attack + sustain
+  const atk    = Math.max(attack, MIN_ATTACK)
+  master.gain.setValueAtTime(0.0001, time)
+  master.gain.linearRampToValueAtTime(peak, time + atk)
+  const decayStart = time + atk + sustain
   master.gain.setValueAtTime(peak, decayStart)
   master.gain.exponentialRampToValueAtTime(0.001, decayStart + bDcy)
   if (release > 0.001) {
@@ -210,7 +204,7 @@ export function playSnare(ctx, time, {
   clickGain.connect(master)
 
   const stopT = time + bDcy + release + 0.2
-  noise.start(time);    noise.stop(stopT)
+  noise.start(time, noiseOffset());    noise.stop(stopT)
   osc.start(time);      osc.stop(stopT)
   thump.start(time);    thump.stop(time + 0.04)
   clickOsc.start(time); clickOsc.stop(time + cDcy + 0.05)
@@ -252,13 +246,10 @@ export function playHiHat(ctx, time, {
   // ── Master gain with optional ADSR ───────────────────────────────────────
   const master = ctx.createGain()
   const peak   = velocity
-  if (attack > 0.001) {
-    master.gain.setValueAtTime(0.0001, time)
-    master.gain.linearRampToValueAtTime(peak, time + attack)
-  } else {
-    master.gain.setValueAtTime(peak, time)
-  }
-  const decayStart = time + attack + sustain
+  const atk    = Math.max(attack, MIN_ATTACK)
+  master.gain.setValueAtTime(0.0001, time)
+  master.gain.linearRampToValueAtTime(peak, time + atk)
+  const decayStart = time + atk + sustain
   master.gain.setValueAtTime(peak, decayStart)
   master.gain.exponentialRampToValueAtTime(0.001, decayStart + decay)
   if (release > 0.001) {
@@ -307,12 +298,9 @@ export function playClash(ctx, time, {
     osc.start(time); osc.stop(time + totalDur + 0.1)
   })
 
-  // Noise shimmer layer
+  // Noise shimmer layer (shared buffer, shaped by noiseEnv)
   const nLen  = Math.min(decay + 0.5, 4)
-  const nbuf  = ctx.createBuffer(1, ctx.sampleRate * nLen, ctx.sampleRate)
-  const nd    = nbuf.getChannelData(0)
-  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1
-  const noiseNode = ctx.createBufferSource(); noiseNode.buffer = nbuf
+  const noiseNode = makeNoiseSource(ctx)
   const noiseBPF  = ctx.createBiquadFilter()
   noiseBPF.type = 'bandpass'; noiseBPF.frequency.value = 7000 + tone * 4000; noiseBPF.Q.value = 0.5
   const noiseEnv  = ctx.createGain()
@@ -326,13 +314,10 @@ export function playClash(ctx, time, {
   // ── Master gain with optional ADSR ───────────────────────────────────────
   const master = ctx.createGain()
   const peak   = 0.7 * velocity
-  if (attack > 0.001) {
-    master.gain.setValueAtTime(0.0001, time)
-    master.gain.linearRampToValueAtTime(peak, time + attack)
-  } else {
-    master.gain.setValueAtTime(peak, time)
-  }
-  const decayStart = time + attack + sustain
+  const atk    = Math.max(attack, MIN_ATTACK)
+  master.gain.setValueAtTime(0.0001, time)
+  master.gain.linearRampToValueAtTime(peak, time + atk)
+  const decayStart = time + atk + sustain
   master.gain.setValueAtTime(peak, decayStart)
   master.gain.exponentialRampToValueAtTime(0.001, decayStart + decay)
   if (release > 0.001) {
@@ -341,7 +326,7 @@ export function playClash(ctx, time, {
 
   oscMix.connect(hpf); hpf.connect(master)
   noiseEnv.connect(master)
-  noiseNode.start(time); noiseNode.stop(time + nLen)
+  noiseNode.start(time, noiseOffset()); noiseNode.stop(time + nLen)
 
   buildProcessChain(ctx, master, dest, { drive, crunch, distMix, lpCutoff, hpCutoff, filterQ, reverbSend, delaySend })
 }
