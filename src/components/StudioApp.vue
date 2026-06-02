@@ -179,6 +179,16 @@
       <CustomSynth />
     </div>
 
+    <!-- ── Bottom: SUBTERRA bass panel (when subterra channel selected + piano roll closed) ── -->
+    <div
+      v-if="selectedChannel.type === 'subterra' && mainView === 'sequencer' && !pianoRollOpen"
+      class="custom-synth-panel"
+      :style="{ height: customSynthHeight + 'px' }"
+    >
+      <div class="pr-resize-handle" @mousedown="startCustomSynthResize" title="Drag to resize" />
+      <Subterra />
+    </div>
+
     <!-- ── Bottom: Piano Roll panel ──────────────────────────────────── -->
     <div
       v-if="pianoRollOpen && mainView === 'sequencer' && !detachedWindows.piano"
@@ -239,6 +249,7 @@ import Knob        from './Knob.vue'
 import RenderModal from './RenderModal.vue'
 import ThemeModal  from './ThemeModal.vue'
 import CustomSynth from './CustomSynth.vue'
+import Subterra    from './Subterra.vue'
 import FloatWindow from './FloatWindow.vue'
 import BrowserPanel from './BrowserPanel.vue'
 import ExtendedHud from './ExtendedHud.vue'

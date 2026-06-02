@@ -3,6 +3,7 @@ import { applyTheme } from '../themes.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
+import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
@@ -489,6 +490,7 @@ const KB_SEMITONES = {
 // ─── Audio node registry (AudioWorkletNode per channel, outside reactivity) ───
 const wasmNodes         = new Map()  // channelId -> AudioWorkletNode (WASM plugins)
 const customSynthNodes  = new Map()  // channelId -> AudioWorkletNode (Custom Synth)
+const subterraNodes     = new Map()  // channelId -> AudioWorkletNode (SUBTERRA bass)
 
 // ─── Channel factory ───────────────────────────────────────────────────────────
 let _cid = 0
@@ -1478,6 +1480,10 @@ export function useStudio() {
         const node = customSynthNodes.get(ch.id)
         if (node) { try { node.disconnect() } catch(_){} ; node.connect(trackGains[i]) }
       }
+      if (ch.type === 'subterra') {
+        const node = subterraNodes.get(ch.id)
+        if (node) { try { node.disconnect() } catch(_){} ; node.connect(trackGains[i]) }
+      }
     })
   }
 
@@ -1827,6 +1833,9 @@ export function useStudio() {
     } else if (ch.type === 'custom') {
       const node = customSynthNodes.get(ch.id)
       if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
+    } else if (ch.type === 'subterra') {
+      const node = subterraNodes.get(ch.id)
+      if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
     }
   }
 
@@ -1842,6 +1851,9 @@ export function useStudio() {
 
     const t = audioCtx.currentTime
     customSynthNodes.forEach(node => {
+      try { node.port.postMessage({ type: 'allNotesOff', time: t }) } catch (_) {}
+    })
+    subterraNodes.forEach(node => {
       try { node.port.postMessage({ type: 'allNotesOff', time: t }) } catch (_) {}
     })
     wasmNodes.forEach(node => {
@@ -2071,6 +2083,32 @@ export function useStudio() {
     return customSynthNodes.get(channelId) ?? null
   }
 
+  function addSubterraChannel() {
+    const ch = makeChannel({
+      name:  'SUBTERRA ' + (channels.filter(c => c.type === 'subterra').length + 1),
+      color: '#ff5a3c',
+      type:  'subterra',
+      mode:  'piano',
+      knobs: [],
+      params: {},
+      fn: () => {},
+    })
+    channels.push(ch)
+    initAudio()
+    createSubterraNode(audioCtx).then(node => {
+      subterraNodes.set(ch.id, node)
+      const idx = channels.findIndex(c => c.id === ch.id)
+      if (trackGains[idx]) node.connect(trackGains[idx])
+      ch.fn = makeSubterraPlayFn(() => subterraNodes.get(ch.id))
+    }).catch(err => console.error('[Subterra] Node init failed:', err))
+    if (audioCtx) rebuildGains()
+    selectedChannelId.value = ch.id
+  }
+
+  function getSubterraNode(channelId) {
+    return subterraNodes.get(channelId) ?? null
+  }
+
   function removeChannel(id) {
     const idx = channels.findIndex(c => c.id === id)
     if (idx < 0 || channels.length <= 1) return
@@ -2078,6 +2116,11 @@ export function useStudio() {
     if (customSynthNodes.has(id)) {
       try { customSynthNodes.get(id).disconnect() } catch (_) {}
       customSynthNodes.delete(id)
+    }
+    // Clean up SUBTERRA node
+    if (subterraNodes.has(id)) {
+      try { subterraNodes.get(id).disconnect() } catch (_) {}
+      subterraNodes.delete(id)
     }
     // Clean up WASM node if this is a plugin channel
     if (wasmNodes.has(id)) {
@@ -2465,6 +2508,7 @@ export function useStudio() {
     channels, selectedChannelId, selectedChannel,
     soloChannel, addChannel, addFMChannel, addWasmChannel, loadWasmForChannel,
     addCustomSynthChannel, getCustomSynthNode,
+    addSubterraChannel, getSubterraNode,
     removeChannel, moveChannel,
     // Patterns
     patterns, currentPatternId, pickerPatternId, patternData,
