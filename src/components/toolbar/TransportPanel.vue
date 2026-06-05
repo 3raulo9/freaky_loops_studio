@@ -28,6 +28,15 @@
         @click="toggleRecordArm"
         @contextmenu.prevent.stop="openRecMenu"
       >⏺</button>
+
+      <!-- Loop Record toggle — OFF = infinite take, ON = overdub inside fixed loop -->
+      <button
+        class="tb-btn tb-loop-rec"
+        :class="{ active: loopRecord }"
+        v-hint="'transport.looprec'"
+        @click="loopRecord = !loopRecord"
+        :title="loopRecord ? 'Loop Record ON — overdub within loop (click to disable for infinite take)' : 'Loop Record OFF — playhead runs freely past pattern end (click to enable overdub)'"
+      >↺</button>
     </div>
 
     <!-- Right-click capture-filter menu (bitmask of what gets recorded) -->
@@ -61,7 +70,7 @@ const {
   isPlaying, togglePlay, stopPlay,
   transportState, beatTick, bpm,
   RECORD_FLAGS, recordFilters, recordArmed, recordWarning,
-  toggleRecordFilter, toggleRecordArm,
+  toggleRecordFilter, toggleRecordArm, loopRecord,
 } = useStudio()
 
 const FILTER_LIST = [
@@ -140,6 +149,11 @@ onBeforeUnmount(() => {
   25%      { transform: translateX(-3px); border-color: #e74c3c; }
   75%      { transform: translateX(3px);  border-color: #e74c3c; }
 }
+
+/* ── Loop Record button ────────────────────────────────────────────────────── */
+.tb-loop-rec { font-size: 14px; opacity: 0.35; transition: all 0.15s; }
+.tb-loop-rec:hover { opacity: 0.7; border-color: #e74c3c55; }
+.tb-loop-rec.active { opacity: 1; color: #e74c3c; border-color: #e74c3c88; background: #200a0a; }
 
 /* ── Capture-filter menu ───────────────────────────────────────────────────── */
 .rec-menu {

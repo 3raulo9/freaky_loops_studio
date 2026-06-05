@@ -2,7 +2,8 @@
   <div class="piano-roll"
     @mouseenter="prFocused = true"
     @mouseleave="prFocused = false"
-    @wheel="onWheel">
+    @wheel="onWheel"
+    @click="rulerCtx = null">
 
     <!-- ── Channel selector title bar ─────────────────────────────────── -->
     <div class="pr-title-bar">
@@ -120,11 +121,40 @@
         <div class="pr-content" :style="{ width: gridWidth + 'px' }">
 
           <!-- Ruler (sticky top) -->
-          <div class="pr-ruler">
+          <div class="pr-ruler"
+            @mousedown="onRulerMouseDown"
+            @contextmenu.prevent="onRulerContextMenu">
             <div v-for="m in rulerMarks" :key="m.x"
               class="pr-ruler-mark" :class="{ bar: m.isBar, beat: m.isBeat }"
               :style="{ left: m.x + 'px' }">{{ m.label }}</div>
+            <!-- Loop region red band (RMB / Ctrl+LMB drag selection) -->
+            <div v-if="loopRegion" class="pr-loop-band"
+              :style="{
+                left:  (loopRegion.startTick * pxPerTick) + 'px',
+                width: ((loopRegion.endTick - loopRegion.startTick) * pxPerTick) + 'px'
+              }" />
+            <!-- Void dim in ruler beyond pattern end -->
+            <div class="pr-ruler-void"
+              :style="{ left: (patLengthTicks * pxPerTick) + 'px' }" />
+            <!-- Pattern length marker — drag to resize, right-click ruler to set/clear -->
+            <div class="pr-pat-end"
+              :style="{ left: (patLengthTicks * pxPerTick) + 'px' }"
+              title="Pattern loop end — drag to resize"
+              @mousedown.left.stop.prevent="onPatEndDragStart" />
             <div class="pr-ruler-head" :style="{ left: playheadX + 'px' }" />
+          </div>
+
+          <!-- Ruler right-click context menu -->
+          <div v-if="rulerCtx" class="pr-ruler-ctx"
+            :style="{ left: rulerCtx.x + 'px', top: rulerCtx.y + 'px' }"
+            @click.stop>
+            <div class="pr-ctx-item" @click="applyPatternLength">
+              Set pattern length — {{ rulerCtx.tick / TICKS_PER_BAR }} bar{{ rulerCtx.tick / TICKS_PER_BAR !== 1 ? 's' : '' }}
+            </div>
+            <div class="pr-ctx-item" @click="clearPatternLength">
+              Clear pattern length override
+            </div>
+            <div class="pr-ctx-item pr-ctx-cancel" @click="rulerCtx = null">Cancel</div>
           </div>
 
           <!-- Grid -->
@@ -150,6 +180,20 @@
               class="pr-vline"
               :class="{ bar: vl.isBar, beat: vl.isBeat, snap: vl.isSnap }"
               :style="{ left: (vl.t * pxPerTick) + 'px', height: gridHeight + 'px' }" />
+
+            <!-- Dark void beyond the active pattern zone — infinite horizon fades here.
+                 Placed BEFORE the end-marker and notes so it dims the lanes/lines but
+                 does not cover them (DOM order, no z-index needed). -->
+            <div class="pr-void-zone"
+              :style="{
+                left: (patLengthTicks * pxPerTick) + 'px',
+                width: ((canvasTicks - patLengthTicks) * pxPerTick) + 'px',
+                height: gridHeight + 'px'
+              }" />
+
+            <!-- Pattern length end marker (vertical line at loop-end tick) -->
+            <div class="pr-pat-end-line"
+              :style="{ left: (patLengthTicks * pxPerTick) + 'px', height: gridHeight + 'px' }" />
 
             <!-- Ghost notes (other channels, behind active notes) -->
             <template v-if="ghostsEnabled">
@@ -234,6 +278,8 @@ const props = defineProps({ ch: { type: Object, required: true } })
 const {
   totalSteps, displayStep, channels, selectedChannelId, currentPatternId,
   getPatData, playNote, stopNote, snapScale, pushUndo,
+  getPatternLengthTicks, setPatternLengthOverride, clearPatternLengthOverride,
+  loopRegion, setLoopRegion, clearLoopRegion,
 } = useStudio()
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -297,9 +343,31 @@ const scaleSet = computed(() => {
 })
 
 // ── Grid dimensions ────────────────────────────────────────────────────────────
-const pxPerTick  = computed(() => pxPerStep.value / TICKS_PER_STEP)
-const totalTicks = computed(() => totalSteps.value * TICKS_PER_STEP)
-const gridWidth  = computed(() => totalTicks.value * pxPerTick.value)
+const pxPerTick = computed(() => pxPerStep.value / TICKS_PER_STEP)
+
+// Effective loop-point for the current pattern (auto or manually overridden).
+const patLengthTicks = computed(() => getPatternLengthTicks(currentPatternId.value))
+
+// How many bars to keep rendered beyond the rightmost visible or hovered point.
+const HORIZON_BARS = 4
+
+// Infinite canvas: always extends beyond whatever the user is currently looking at.
+// The canvas grows from four sources — notes, scroll viewport, mouse hover, and the
+// live playhead — and is always snapped to a bar boundary so ruler marks stay clean.
+const canvasTicks = computed(() => {
+  const ppt = pxPerTick.value
+  const noteHorizon   = patLengthTicks.value + TICKS_PER_BAR * 2
+  const viewHorizon   = (scrollLeftVal.value + scrollClientWidth.value) / ppt + TICKS_PER_BAR * HORIZON_BARS
+  const mouseHorizon  = horiMouseX.value / ppt + TICKS_PER_BAR * HORIZON_BARS
+  // During live recording the playhead advances; keep HORIZON_BARS of room ahead of it
+  // so new bars materialise as the user plays, exactly as the spec describes.
+  const playTick      = Math.max(0, displayStep.value) * TICKS_PER_STEP
+  const playHorizon   = playTick + TICKS_PER_BAR * HORIZON_BARS
+  const raw = Math.max(noteHorizon, viewHorizon, mouseHorizon, playHorizon, TICKS_PER_BAR * 4)
+  return Math.ceil(raw / TICKS_PER_BAR) * TICKS_PER_BAR
+})
+
+const gridWidth  = computed(() => canvasTicks.value * pxPerTick.value)
 const gridHeight = computed(() => PIANO_KEYS.length * ROW_H)
 const playheadX  = computed(() => Math.max(0, displayStep.value) * pxPerStep.value)
 
@@ -323,7 +391,7 @@ function clearNotes() {
 // ── Ruler / grid line marks ────────────────────────────────────────────────────
 const rulerMarks = computed(() => {
   const marks = []
-  for (let t = 0; t < totalTicks.value; t += TICKS_PER_BEAT) {
+  for (let t = 0; t < canvasTicks.value; t += TICKS_PER_BEAT) {
     const isBar = t % TICKS_PER_BAR === 0
     marks.push({
       x: t * pxPerTick.value, isBar, isBeat: !isBar,
@@ -337,7 +405,7 @@ const rulerMarks = computed(() => {
 
 const gridLines = computed(() => {
   const lines = []
-  for (let t = 0; t <= totalTicks.value; t += snapTicks.value) {
+  for (let t = 0; t <= canvasTicks.value; t += snapTicks.value) {
     const isBar  = t % TICKS_PER_BAR === 0
     const isBeat = !isBar && t % TICKS_PER_BEAT === 0
     const isSnap = !isBar && !isBeat
@@ -446,9 +514,16 @@ const ctrlInnerRef = ref(null)
 const ctrlViewRef  = ref(null)
 const gridRef      = ref(null)
 
+// Reactive viewport state — updated by onScroll so canvasTicks can depend on them
+const scrollLeftVal    = ref(0)    // scrollRef.scrollLeft
+const scrollClientWidth = ref(800) // scrollRef.clientWidth (initial guess, fixed on mount)
+const horiMouseX       = ref(0)   // rightmost grid-px the mouse has ever reached (high-water)
+
 // ── Scroll sync ────────────────────────────────────────────────────────────────
 function onScroll() {
   const el = scrollRef.value; if (!el) return
+  scrollLeftVal.value    = el.scrollLeft
+  scrollClientWidth.value = el.clientWidth
   if (keysInnerRef.value) keysInnerRef.value.style.transform = `translateY(-${el.scrollTop}px)`
   if (ctrlInnerRef.value) ctrlInnerRef.value.style.transform  = `translateX(-${el.scrollLeft}px)`
 }
@@ -514,7 +589,6 @@ function doRightDelete(x, y) {
 function doPaint(x, y) {
   if (!paintStroke || y < 0 || y > gridHeight.value) return
   const startTick = snapTick(xToTick(x))
-  if (startTick >= totalTicks.value) return
   const key = `${startTick}`
   if (paintStroke.painted.has(key)) return
   paintStroke.painted.add(key)
@@ -632,7 +706,6 @@ function onGridDown(e) {
   // Click on empty space → create note
   const startTick = snapTick(xToTick(x), e.altKey)
   const pitch = snapPitch(yToPitch(y))
-  if (startTick >= totalTicks.value) return
   pushUndo()
   selectedNotes.value = new Set()
   const notes = getPatData(targetChId.value).pianoNotes
@@ -689,6 +762,30 @@ function onResizeDown(e, idx) {
 
 // ── Global mouse move / up ─────────────────────────────────────────────────────
 function onWindowMouseMove(e) {
+  // Advance the infinite-horizon high-water mark whenever the mouse is over the roll
+  if (prFocused.value) {
+    const { x } = getGridPos(e.clientX, e.clientY)
+    if (x > horiMouseX.value) horiMouseX.value = x
+  }
+
+  // Ruler loop-region drag (RMB or Ctrl+LMB held)
+  if (rulerLoopDrag && Math.abs(e.clientX - rulerLoopDrag.startClientX) > 3) {
+    rulerLoopDrag.isLoop = true
+    const { x } = getGridPos(e.clientX, 0)
+    const curTick  = Math.max(0, snapTick(xToTick(x)))
+    const startTick = Math.min(rulerLoopDrag.startTick, curTick)
+    const endTick   = Math.max(rulerLoopDrag.startTick, curTick) || TICKS_PER_BAR
+    setLoopRegion(startTick, endTick)
+  }
+
+  // Pattern-end marker drag
+  if (patEndDrag) {
+    const dx      = e.clientX - patEndDrag.startClientX
+    const newTick = patEndDrag.startTick + dx / pxPerTick.value
+    const barTick = Math.max(TICKS_PER_BAR, Math.round(newTick / TICKS_PER_BAR) * TICKS_PER_BAR)
+    setPatternLengthOverride(currentPatternId.value, barTick)
+  }
+
   // Right-click delete drag
   if (rDrag) {
     const { x, y } = getGridPos(e.clientX, e.clientY)
@@ -747,7 +844,14 @@ function onWindowMouseMove(e) {
 }
 
 function onWindowMouseUp(e) {
-  if (e.button === 2) { rDrag = false; rDragRefs = new Set(); return }
+  if (e.button === 2) {
+    rDrag = false; rDragRefs = new Set()
+    // rulerLoopDrag cleanup is handled by onRulerContextMenu (fires after mouseup)
+    return
+  }
+  // Clean up pat-end drag and ruler Ctrl+LMB loop drag
+  patEndDrag = null
+  if (rulerLoopDrag?.button === 0) rulerLoopDrag = null
   if (selDrag) finalizeRubberBand()
   drag = null; paintStroke = null; selDrag = null
   if (activePitch.value !== null) stopNote(targetCh.value, activePitch.value)
@@ -814,7 +918,10 @@ function onKeyDown(e) {
   else if (e.key === 'e' || e.key === 'E') { tool.value = 'select'; return }
   else if (e.key === 't' || e.key === 'T') { tool.value = 'mute';   return }
   else if (e.key === 'd' || e.key === 'D' || e.key === 'n' || e.key === 'N') { tool.value = 'erase'; return }
-  else if (e.key === 'Escape') { selectedNotes.value = new Set(); return }
+  else if (e.key === 'Escape') {
+    if (loopRegion.value) { clearLoopRegion(); return }
+    selectedNotes.value = new Set(); return
+  }
   else if (e.key === 'h' || e.key === 'H') { cyclePianoChannel(-1); return }
   else if (e.key === 'j' || e.key === 'J') { cyclePianoChannel(+1); return }
   else if (e.code === 'KeyA' && e.ctrlKey) {
@@ -837,6 +944,62 @@ function onKeyDown(e) {
   }
 }
 
+// ── Ruler context menu (pattern length marker) ─────────────────────────────────
+const rulerCtx = ref(null)  // { x, y, tick } or null
+
+// ── Ruler drag state (loop region + pat-end dragging) ──────────────────────────
+// Non-reactive — only used transiently during mousedown/move/up
+let rulerLoopDrag = null   // { startTick, isLoop: bool } — right-click / Ctrl+LMB drag
+let patEndDrag    = null   // { startClientX, startTick }  — gold triangle drag
+
+function onRulerMouseDown(e) {
+  rulerLoopDrag = null   // always reset stale state from previous drag
+  // Right-click drag OR Ctrl+Left drag → start loop-region selection
+  if (e.button === 2 || (e.button === 0 && e.ctrlKey)) {
+    e.preventDefault()
+    const { x } = getGridPos(e.clientX, 0)
+    const tick = Math.max(0, snapTick(xToTick(x)))
+    rulerLoopDrag = { button: e.button, startClientX: e.clientX, startTick: tick, isLoop: false }
+    return
+  }
+  // Plain left click on ruler → clear the loop region
+  if (e.button === 0 && !e.ctrlKey) {
+    clearLoopRegion()
+  }
+}
+
+// Called by @contextmenu.prevent — decides whether to show menu or just confirm drag
+function onRulerContextMenu(e) {
+  e.preventDefault()
+  if (rulerLoopDrag?.isLoop) {
+    // Was a right-drag — loop region already set, skip context menu
+    rulerLoopDrag = null
+    return
+  }
+  rulerLoopDrag = null
+  // Show pattern-length context menu at click position
+  const { x } = getGridPos(e.clientX, 0)
+  const barTick = Math.max(TICKS_PER_BAR, Math.round(xToTick(x) / TICKS_PER_BAR) * TICKS_PER_BAR)
+  rulerCtx.value = { x: e.clientX, y: e.clientY, tick: barTick }
+}
+
+// Gold triangle (pat-end marker) drag start
+function onPatEndDragStart(e) {
+  if (e.button !== 0) return
+  e.preventDefault(); e.stopPropagation()
+  patEndDrag = { startClientX: e.clientX, startTick: patLengthTicks.value }
+}
+
+function applyPatternLength() {
+  if (rulerCtx.value) setPatternLengthOverride(currentPatternId.value, rulerCtx.value.tick)
+  rulerCtx.value = null
+}
+
+function clearPatternLength() {
+  clearPatternLengthOverride(currentPatternId.value)
+  rulerCtx.value = null
+}
+
 // ── Lifecycle ──────────────────────────────────────────────────────────────────
 onMounted(() => {
   window.addEventListener('mousemove', onWindowMouseMove)
@@ -845,8 +1008,9 @@ onMounted(() => {
   // Scroll to C4 — wait for layout so clientHeight is available
   nextTick(() => {
     if (scrollRef.value) {
-      const c4idx = PIANO_KEYS.indexOf(60)
       const el = scrollRef.value
+      scrollClientWidth.value = el.clientWidth   // init viewport width for canvasTicks
+      const c4idx = PIANO_KEYS.indexOf(60)
       el.scrollTop = Math.max(0, c4idx * ROW_H - el.clientHeight / 2 + ROW_H * 2)
     }
   })
@@ -1069,6 +1233,59 @@ onUnmounted(() => {
   position: absolute; top: 0; width: 2px;
   background: rgba(255,255,255,0.7); pointer-events: none; z-index: 25;
 }
+
+/* Dark void zone — the "infinite horizon" beyond the active pattern area.
+   No z-index: DOM order places it below the end-marker and notes. */
+.pr-void-zone {
+  position: absolute; top: 0;
+  background: rgba(0, 0, 0, 0.14);
+  pointer-events: none;
+}
+
+/* Red loop-region band (RMB / Ctrl+LMB drag on ruler) */
+.pr-loop-band {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(231, 76, 60, 0.28);
+  border-left:  2px solid rgba(231, 76, 60, 0.75);
+  border-right: 2px solid rgba(231, 76, 60, 0.75);
+  pointer-events: none; z-index: 10;
+}
+
+/* Ruler dim beyond pattern end */
+.pr-ruler-void {
+  position: absolute; top: 0; bottom: 0; right: 0;
+  background: rgba(0, 0, 0, 0.22);
+  pointer-events: none;
+}
+
+/* Pattern length end marker — ruler triangle + grid line */
+.pr-pat-end {
+  position: absolute; top: 0; width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 9px solid #e8c84a;
+  transform: translateX(-5px);
+  cursor: ew-resize; z-index: 22;
+  cursor: ew-resize;
+}
+.pr-pat-end-line {
+  position: absolute; top: 0; width: 2px;
+  background: rgba(232,200,74,0.45); pointer-events: none; z-index: 5;
+}
+
+/* Ruler right-click context menu */
+.pr-ruler-ctx {
+  position: fixed; z-index: 9999;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 5px;
+  padding: 3px 0; min-width: 220px; box-shadow: 0 8px 28px rgba(0,0,0,0.8);
+  font-family: 'Share Tech Mono', monospace;
+}
+.pr-ctx-item {
+  padding: 6px 14px; font-size: 10px; font-weight: 600; letter-spacing: 0.08em;
+  color: #9090c0; cursor: pointer; transition: background 0.07s;
+}
+.pr-ctx-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.pr-ctx-cancel { color: #50506a; border-top: 1px solid var(--border-subtle); margin-top: 3px; }
 
 /* ── Control pane ──────────────────────────────────────────────────────────── */
 .pr-ctrl-outer {

@@ -1,6 +1,15 @@
 <template>
   <div class="playlist" @wheel.prevent="onWheel" @click="closeMenus" @keydown.esc="closeMenus">
 
+    <!-- Floating picker-drag ghost — follows cursor until snapped to a track (Section 1.3) -->
+    <div v-if="pickerDrag && !hoverGhost" class="picker-drag-float"
+      :style="{
+        left:  pickerDragPos.x + 'px',
+        top:   pickerDragPos.y + 'px',
+        width: pickerDrag.floatW + 'px',
+        '--clip-color': pickerDrag.color,
+      }" />
+
     <!-- ── Toolbar ─────────────────────────────────────────────────────────────── -->
     <div class="pl-toolbar">
 
@@ -95,14 +104,21 @@
               current:   currentPatternId === pat.id,
               unused:    unusedPatternIds.has(pat.id),
             }"
-            @click="pickerPatternId = pat.id"
+            @mousedown.prevent="onPickerItemDown($event, pat)"
             @dblclick="currentPatternId = pat.id"
-            :title="unusedPatternIds.has(pat.id) ? 'Not placed in Playlist' : 'Double-click to edit'"
+            :title="unusedPatternIds.has(pat.id) ? 'Not placed in Playlist' : 'Drag to place · Dbl-click to edit'"
           >
-            <span class="picker-dot" :style="{ background: pat.color }" />
-            <span class="picker-name">{{ pat.name }}</span>
-            <span v-if="currentPatternId === pat.id" class="picker-badge edit">EDIT</span>
-            <span v-else-if="unusedPatternIds.has(pat.id)" class="picker-badge unused">–</span>
+            <!-- Compressed MIDI thumbnail (Section 1.2) -->
+            <canvas class="picker-mini-canvas"
+              :ref="el => onPickerCanvasRef(pat.id, el)" />
+            <!-- Info row -->
+            <div class="picker-item-row">
+              <span class="picker-dot" :style="{ background: pat.color }" />
+              <span class="picker-name">{{ pat.name }}</span>
+              <span v-if="patternBarLabel(pat.id)" class="picker-badge bars">{{ patternBarLabel(pat.id) }}</span>
+              <span v-if="currentPatternId === pat.id" class="picker-badge edit">EDIT</span>
+              <span v-else-if="unusedPatternIds.has(pat.id)" class="picker-badge unused">–</span>
+            </div>
           </div>
         </div>
 
@@ -198,6 +214,7 @@
               @mousedown.prevent="onCellsMouseDown($event, track)"
               @mousemove="onCellsMouseMove($event, track)"
               @mouseup="onCellsMouseUp"
+              @mouseleave="hoverGhost = null"
               @contextmenu.prevent="onCellsRightClick($event, track)"
             >
               <!-- Grid lines -->
@@ -292,6 +309,17 @@
                   />
                 </div>
               </template>
+
+              <!-- Hover ghost: shows full pattern footprint before you click (Step 3) -->
+              <div
+                v-if="hoverGhost && hoverGhost.trackId === track.id && !dragGhost"
+                class="pl-clip hover-ghost-clip"
+                :style="{
+                  left:  hoverGhost.cell * cellWidth + 'px',
+                  width: hoverGhost.width * cellWidth - 3 + 'px',
+                  '--clip-color': hoverGhost.color,
+                }"
+              />
 
               <!-- Drag ghost -->
               <div
@@ -397,7 +425,7 @@
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
-import { useStudio } from '../store/studio.js'
+import { useStudio, TICKS_PER_STEP } from '../store/studio.js'
 
 const {
   patterns, currentPatternId, pickerPatternId,
@@ -406,11 +434,11 @@ const {
   playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell, isPlaying,
   bpm, totalSteps, getPlayheadTimeSeconds, gridSnap, ppq, snapBars,
   addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
-  placeClip, removeClip, moveClip, resizeClip, splitClip, makeUniqueClip, consolidateTrack,
+  placeClip, removeClip, moveClip, resizeClip, splitClip, setSlipOffset, makeUniqueClip, consolidateTrack,
   addTimeMarker, removeTimeMarker,
   groupTrackWithAbove, ungroupTrack, toggleTrackCollapse, setTrackLocked,
   addAutomationClip, removeAutomationClip, addAutoNode, removeAutoNode, resizeAutomationClip,
-  getUnusedPatternIds,
+  getUnusedPatternIds, getPatternLengthTicks,
   PLAYLIST_CELLS,
 } = useStudio()
 
@@ -469,6 +497,17 @@ function autoClipsForTrack(trackId)    { return automationClips.filter(a => a.tr
 function patternName(pid)  { return patterns.find(p => p.id === pid)?.name  ?? '?' }
 function patternColor(pid) { return patterns.find(p => p.id === pid)?.color ?? '#4ecdc4' }
 
+// Returns the width of a pattern in playlist cells (= number of bars).
+function patternWidthCells(patId) {
+  const ticks = getPatternLengthTicks(patId)
+  return Math.max(1, Math.ceil(ticks / (totalSteps.value * TICKS_PER_STEP)))
+}
+// Returns "N BAR" label string for the picker, only shown for multi-bar patterns.
+function patternBarLabel(patId) {
+  const bars = patternWidthCells(patId)
+  return bars > 1 ? bars + (bars === 1 ? ' BAR' : ' BAR') : null
+}
+
 function patternClipStyle(clip) {
   const color = patternColor(clip.patternId)
   return {
@@ -506,8 +545,13 @@ function previewNotes(clip) {
       const pitches = d.pianoNotes.map(n => n.pitch)
       const minP = Math.min(...pitches), maxP = Math.max(...pitches)
       const range = maxP - minP || 1
+      // Find the furthest note end so we can normalise x positions correctly
+      const TICKS_PER_STEP_LOCAL = 120
+      const lastTick = d.pianoNotes.reduce((m, n) =>
+        Math.max(m, (n.startTick ?? 0) + (n.durationTicks ?? TICKS_PER_STEP_LOCAL)), totalSteps * TICKS_PER_STEP_LOCAL)
       d.pianoNotes.forEach(n => {
-        notes.push({ key: idx++, x: (n.step / totalSteps) * 100, y: ((maxP - n.pitch) / range) * 76 + 10, w: (1 / totalSteps) * 100 * 0.85 })
+        const startTick = n.startTick ?? (n.step ?? 0) * TICKS_PER_STEP_LOCAL
+        notes.push({ key: idx++, x: (startTick / lastTick) * 100, y: ((maxP - n.pitch) / range) * 76 + 10, w: (TICKS_PER_STEP_LOCAL / lastTick) * 100 * 0.85 })
       })
     }
   })
@@ -523,7 +567,64 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r},${g},${b},${alpha})`
 }
 
-const clipCanvases = new Map()
+const clipCanvases   = new Map()
+const pickerCanvases = new Map()
+
+// ── Picker mini-canvas (Section 1.2 — compressed MIDI thumbnail) ─────────────
+function onPickerCanvasRef(patId, el) {
+  if (el) { pickerCanvases.set(patId, el); requestAnimationFrame(() => drawPickerCanvas(patId, el)) }
+  else      pickerCanvases.delete(patId)
+}
+
+function drawPickerCanvas(patId, canvas) {
+  const W = canvas.offsetWidth || 100
+  const H = canvas.offsetHeight || 14
+  if (W < 4 || H < 2) return
+  const dpr = window.devicePixelRatio || 1
+  canvas.width  = Math.round(W * dpr)
+  canvas.height = Math.round(H * dpr)
+  const ctx = canvas.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, W, H)
+
+  const pd = patternData[patId]
+  if (!pd) return
+  const color    = patternColor(patId)
+  const patTicks = getPatternLengthTicks(patId)
+  if (patTicks <= 0) return
+
+  // Collect all notes (step + piano) normalised to pixels
+  const rects = []
+  channels.forEach(ch => {
+    const d = pd[ch.id]
+    if (!d) return
+    if (ch.mode === 'steps') {
+      d.steps?.forEach((on, si) => {
+        if (!on) return
+        const x = (si / (totalSteps.value)) * W
+        rects.push({ x, y: H * 0.2, w: Math.max(1, W / totalSteps.value - 0.5), h: H * 0.6 })
+      })
+    } else {
+      const notes = d.pianoNotes
+      if (!notes?.length) return
+      const pitches = notes.map(n => n.pitch)
+      const minP = Math.min(...pitches), maxP = Math.max(...pitches), range = maxP - minP || 1
+      notes.forEach(n => {
+        const x = ((n.startTick ?? 0) / patTicks) * W
+        const w = Math.max(0.8, ((n.durationTicks ?? TICKS_PER_STEP) / patTicks) * W - 0.3)
+        const y = ((maxP - n.pitch) / range) * (H - 2) + 1
+        rects.push({ x, y, w, h: 2 })
+      })
+    }
+  })
+  if (!rects.length) return
+  ctx.fillStyle = hexToRgba(color, 0.75)
+  rects.forEach(r => ctx.fillRect(r.x, r.y, r.w, r.h))
+}
+
+function redrawAllPickerCanvases() {
+  nextTick(() => pickerCanvases.forEach((el, pid) => drawPickerCanvas(pid, el)))
+}
 
 function onClipCanvasRef(clipId, el) {
   if (el) {
@@ -567,6 +668,44 @@ function drawClipCanvas(clipId, canvas) {
     }
   }
 
+  // ── Step 14: Ghost-tail zone — dim overlay for empty space beyond last note ──
+  // Pattern length (via time marker or auto-calculated) vs. actual note extent.
+  const patLenTicks  = getPatternLengthTicks(clip.patternId)
+  const clipLenTicks = (clip.width || 1) * totalSteps.value * TICKS_PER_STEP
+  const normLen      = Math.max(patLenTicks, clipLenTicks)   // what the clip represents
+
+  // Find the tick of the last note in any piano channel of this pattern.
+  let lastNoteTick = 0
+  const pd = patternData[clip.patternId]
+  if (pd) {
+    Object.values(pd).forEach(d => {
+      if (!d?.pianoNotes) return
+      d.pianoNotes.forEach(n => {
+        const end = (n.startTick ?? 0) + (n.durationTicks ?? TICKS_PER_STEP)
+        if (end > lastNoteTick) lastNoteTick = end
+      })
+    })
+  }
+
+  // Draw ghost tail if there is empty space at the end (Step 14).
+  if (lastNoteTick < normLen && normLen > 0) {
+    const tailStartX = (lastNoteTick / normLen) * clipW
+    // Hatched overlay: diagonal lines
+    ctx.save()
+    ctx.fillStyle = 'rgba(0,0,0,0.18)'
+    ctx.fillRect(tailStartX, 0, clipW - tailStartX, clipH)
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)'
+    ctx.lineWidth = 1
+    const spacing = 8
+    for (let d = -clipH; d < (clipW - tailStartX); d += spacing) {
+      ctx.beginPath()
+      ctx.moveTo(tailStartX + Math.max(0, d), 0)
+      ctx.lineTo(tailStartX + d + clipH, clipH)
+      ctx.stroke()
+    }
+    ctx.restore()
+  }
+
   // Collect normalised notes via existing previewNotes helper (returns x%, y%, w%)
   const notes = previewNotes(clip)
   if (!notes.length) return
@@ -587,6 +726,7 @@ function redrawAllClipCanvases() {
 
 watch([cellWidth, trackHeight, currentPatternId, pickerPatternId], redrawAllClipCanvases)
 watch(patternData, redrawAllClipCanvases, { deep: true })
+watch(patternData, redrawAllPickerCanvases, { deep: true })
 
 // ── Automation graph helpers ──────────────────────────────────────────────────
 function autoPolyline(auto) {
@@ -646,7 +786,65 @@ function cellFromX(x) { return snapCell(x / cellWidth.value) }
 // ── Pattern clip mouse interactions ──────────────────────────────────────────
 const draggingClip  = ref(null)
 const dragGhost     = ref(null)
+const hoverGhost    = ref(null)    // { trackId, cell, width, color } — pre-placement ghost
+const pickerDrag    = ref(null)    // { patId, color, floatW } — drag-from-picker state
+const pickerDragPos = ref({ x: 0, y: 0 })   // current cursor viewport coords
 let   isPainting    = false
+
+// ── Picker-drag ghost (Section 1.3) ──────────────────────────────────────────
+// Computes which track+cell the cursor is over during a picker drag and writes
+// to hoverGhost so the regular snapped ghost renders there.
+function updateHoverFromPickerDrag(e) {
+  const tl = timelineRef.value
+  if (!tl || !pickerDrag.value) { hoverGhost.value = null; return }
+  const tlRect = tl.getBoundingClientRect()
+  const inTimeline = e.clientX >= tlRect.left  && e.clientX <= tlRect.right &&
+                     e.clientY >= tlRect.top   && e.clientY <= tlRect.bottom
+  if (!inTimeline) { hoverGhost.value = null; return }
+
+  const relY  = e.clientY - tlRect.top  + tl.scrollTop  - RULER_H
+  const relX  = e.clientX - tlRect.left + tl.scrollLeft - HEADER_W
+  const tIdx  = Math.max(0, Math.min(visibleTracks.value.length - 1, Math.floor(relY / trackHeight.value)))
+  const track = visibleTracks.value[tIdx]
+  if (!track || track.locked) { hoverGhost.value = null; return }
+
+  const patId = pickerDrag.value.patId
+  const w     = patternWidthCells(patId)
+  const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor((relX / cellWidth.value) / w) * w))
+  hoverGhost.value = { trackId: track.id, cell: snappedCell, width: w, color: patternColor(patId) }
+}
+
+function onPickerItemDown(e, pat) {
+  pickerPatternId.value = pat.id   // select on mousedown
+  if (e.button !== 0) return
+
+  let dragStarted = false
+  const startX = e.clientX, startY = e.clientY
+  const floatW = Math.min(patternWidthCells(pat.id) * cellWidth.value, 300)
+
+  const onMove = (me) => {
+    pickerDragPos.value = { x: me.clientX, y: me.clientY }
+    if (!dragStarted && (Math.abs(me.clientX - startX) > 4 || Math.abs(me.clientY - startY) > 4)) {
+      dragStarted = true
+      pickerDrag.value = { patId: pat.id, color: pat.color, floatW }
+    }
+    if (dragStarted) updateHoverFromPickerDrag(me)
+  }
+
+  const onUp = (ue) => {
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup',   onUp)
+    if (dragStarted && hoverGhost.value) {
+      // Commit placement at the snapped ghost position
+      placeClip(hoverGhost.value.trackId, hoverGhost.value.cell, pat.id)
+    }
+    pickerDrag.value = null
+    hoverGhost.value = null
+  }
+
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup',   onUp)
+}
 
 function clipAtCell(trackId, cell) {
   return playlistClips.find(c => c.trackId === trackId && cell >= c.cell && cell < c.cell + (c.width || 1))
@@ -702,14 +900,22 @@ function onCellsMouseDown(e, track) {
     return
   }
   if (tool === 'draw') {
+    hoverGhost.value = null  // hide ghost on click
     const clip = clipAtCell(track.id, cell)
     if (clip) { removeClip(clip.id); return }
-    placeClip(track.id, cell, pickerPatternId.value)
+    // Place at the snapped cell for pattern-width alignment
+    const w = patternWidthCells(pickerPatternId.value)
+    const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell / w) * w))
+    placeClip(track.id, snappedCell, pickerPatternId.value)
     return
   }
   if (tool === 'paint') {
     isPainting = true
-    placeClip(track.id, cell, pickerPatternId.value)
+    hoverGhost.value = null
+    // Snap first paint stroke to pattern-width grid (Step 15)
+    const w = patternWidthCells(pickerPatternId.value)
+    const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell / w) * w))
+    placeClip(track.id, snappedCell, pickerPatternId.value)
     window.addEventListener('mouseup', stopPainting, { once: true })
   }
 }
@@ -748,11 +954,26 @@ function onSelectEnd(e) {
 
 function onCellsMouseMove(e, track) {
   if (draggingClip.value) { onDragMove(e); return }
-  if (!isPainting || playlistTool.value !== 'paint') return
+
+  const rect    = e.currentTarget.getBoundingClientRect()
+  const rawCell = cellFromX(e.clientX - rect.left)
+  const tool    = playlistTool.value
+
+  // Hover ghost: show exact pattern footprint while hovering with draw tool (Step 3)
+  if (tool === 'draw' && clipFocusMode.value === 'pattern' && !isPainting) {
+    const w    = patternWidthCells(pickerPatternId.value)
+    const cell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell)))
+    hoverGhost.value = { trackId: track.id, cell, width: w, color: patternColor(pickerPatternId.value) }
+  } else {
+    hoverGhost.value = null
+  }
+
+  if (!isPainting || tool !== 'paint') return
   if (track.locked) return
-  const rect = e.currentTarget.getBoundingClientRect()
-  const cell = Math.max(0, Math.min(PLAYLIST_CELLS - 1, Math.floor(cellFromX(e.clientX - rect.left))))
-  placeClip(track.id, cell, pickerPatternId.value)
+  // Brush: snap to pattern-width multiples so clips chain without gaps (Step 15)
+  const w         = patternWidthCells(pickerPatternId.value)
+  const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell / w) * w))
+  placeClip(track.id, snappedCell, pickerPatternId.value)
 }
 
 function onCellsMouseUp() { isPainting = false }
@@ -767,6 +988,32 @@ function onCellsRightClick(e, track) {
 }
 
 // ── Clip drag (move) ──────────────────────────────────────────────────────────
+// ── Slip drag state ───────────────────────────────────────────────────────────
+let slipDragClip     = null
+let slipDragStartX   = 0
+let slipDragOrigSlip = 0
+
+function startSlipDrag(e, clip) {
+  e.preventDefault(); e.stopPropagation()
+  slipDragClip     = clip
+  slipDragStartX   = e.clientX
+  slipDragOrigSlip = clip.slipOffset ?? 0
+  window.addEventListener('mousemove', onSlipMove)
+  window.addEventListener('mouseup',   onSlipEnd, { once: true })
+}
+
+function onSlipMove(e) {
+  if (!slipDragClip) return
+  const dx       = e.clientX - slipDragStartX
+  const stepDelta = -Math.round(dx / cellWidth.value * totalSteps.value)
+  setSlipOffset(slipDragClip.id, slipDragOrigSlip + stepDelta)
+}
+
+function onSlipEnd() {
+  slipDragClip = null
+  window.removeEventListener('mousemove', onSlipMove)
+}
+
 function onClipMouseDown(e, clip, track) {
   const tool = playlistTool.value
   if (tool === 'erase') { removeClip(clip.id); return }
@@ -787,6 +1034,8 @@ function onClipMouseDown(e, clip, track) {
     }
     return
   }
+  // Slip tool (Step 12): drag clip content left/right within clip window
+  if (tool === 'draw' && e.shiftKey) { startSlipDrag(e, clip); return }
   if (tool !== 'draw') return
   if (track.locked) return
   draggingClip.value = clip
@@ -1270,13 +1519,27 @@ onBeforeUnmount(() => {
 .picker-list { flex: 1; overflow-y: auto; }
 .picker-section { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #252535; padding: 6px 10px 3px; letter-spacing: 0.1em; }
 .picker-item {
-  display: flex; align-items: center; gap: 6px; padding: 6px 10px;
-  cursor: pointer; border-bottom: 1px solid var(--border-subtle); transition: background 0.08s;
+  display: flex; flex-direction: column; gap: 3px;
+  padding: 5px 8px 6px;
+  cursor: grab; border-bottom: 1px solid var(--border-subtle); transition: background 0.08s;
 }
+.picker-item:active { cursor: grabbing; }
 .picker-item:hover    { background: var(--bg-panel); }
 .picker-item.selected { background: var(--bg-hover); }
-.picker-item.current  { border-left: 2px solid #e74c3c; }
+.picker-item.current  { border-left: 2px solid #e74c3c; padding-left: 6px; }
 .picker-item.unused   { opacity: 0.4; }
+
+/* Compressed MIDI thumbnail canvas (Section 1.2) */
+.picker-mini-canvas {
+  display: block; width: 100%; height: 14px;
+  background: var(--bg-base); border-radius: 2px;
+  image-rendering: pixelated;
+  opacity: 0.75; transition: opacity 0.1s;
+}
+.picker-item:hover .picker-mini-canvas { opacity: 1; }
+
+/* Info row: dot + name + badges */
+.picker-item-row { display: flex; align-items: center; gap: 5px; }
 .picker-dot  { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .picker-name {
   font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
@@ -1284,9 +1547,22 @@ onBeforeUnmount(() => {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .picker-item.selected .picker-name { color: #c0c0e0; }
+
+/* Floating ghost that follows cursor when dragging from picker (Section 1.3) */
+.picker-drag-float {
+  position: fixed; z-index: 9999;
+  height: 30px; max-width: 600px;
+  border: 2px dashed color-mix(in srgb, var(--clip-color, #4ecdc4) 70%, transparent);
+  background: color-mix(in srgb, var(--clip-color, #4ecdc4) 12%, transparent);
+  border-radius: 3px;
+  transform: translate(-50%, -50%);
+  pointer-events: none; opacity: 0.6;
+  transition: width 0.08s ease;
+}
 .picker-badge { font-family: 'Share Tech Mono', monospace; font-size: 8px; padding: 1px 4px; border-radius: 3px; flex-shrink: 0; }
 .picker-badge.edit   { color: #e74c3c; background: #1a0808; border: 1px solid #e74c3c44; }
 .picker-badge.unused { color: var(--text-muted); background: var(--bg-base); border: 1px solid var(--border); }
+.picker-badge.bars   { color: #4ecdc4; background: #041614; border: 1px solid #4ecdc444; }
 .picker-actions { padding: 6px 8px; border-top: 1px solid var(--border-subtle); }
 .picker-action-btn {
   width: 100%; padding: 5px; background: transparent; border: 1px dashed var(--border);
@@ -1420,7 +1696,14 @@ onBeforeUnmount(() => {
   background: linear-gradient(to left, rgba(255,255,255,0.08), transparent);
 }
 .clip-resize-handle:hover { background: linear-gradient(to left, rgba(255,255,255,0.2), transparent); }
-.drag-ghost-clip { pointer-events: none; z-index: 8; border-style: dashed; }
+.drag-ghost-clip  { pointer-events: none; z-index: 8; border-style: dashed; }
+/* Pre-placement hover ghost (Step 3) */
+.hover-ghost-clip {
+  pointer-events: none; z-index: 7;
+  opacity: 0.35;
+  border: 2px dashed color-mix(in srgb, var(--clip-color, #4ecdc4) 80%, transparent);
+  background: color-mix(in srgb, var(--clip-color, #4ecdc4) 12%, transparent);
+}
 
 /* ── Automation clip ─────────────────────────────────────────────────────────── */
 .pl-auto-clip {
