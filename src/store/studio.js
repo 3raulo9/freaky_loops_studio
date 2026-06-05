@@ -1753,11 +1753,19 @@ export function useStudio() {
           const secPerTick    = (60 / bpm.value) / 4 / TICKS_PER_STEP
           const stepStartTick = patternStep * TICKS_PER_STEP
           const stepEndTick   = stepStartTick + TICKS_PER_STEP
+          // Clip boundary in ticks: notes must not sustain past this point (Step 7).
+          // This prevents note bleed when two clips play back-to-back on the same track.
+          const clipEndTick = (slipOffset + clipWidth * totalSteps.value) * TICKS_PER_STEP
           d.pianoNotes
             .filter(n => n.startTick >= stepStartTick && n.startTick < stepEndTick && !n.muted)
             .forEach(note => {
-              const noteWhen = when + (note.startTick - stepStartTick) * secPerTick
-              const gate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
+              const noteWhen     = when + (note.startTick - stepStartTick) * secPerTick
+              const nominalGate  = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
+              const ticksToEnd   = clipEndTick - note.startTick
+              // Clamp gate so the note is silenced exactly at the clip boundary.
+              const gate = ticksToEnd > 0
+                ? Math.min(nominalGate, Math.max(0.01, ticksToEnd * secPerTick - 0.005))
+                : nominalGate
               ch.fn(audioCtx, noteWhen, { ...ch.params, pitch: note.pitch + masterPitchSemis.value, velocity: note.velocity ?? 1, gate }, dest)
               registerVoice(noteWhen, gate + 0.12)
             })
