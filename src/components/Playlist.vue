@@ -590,32 +590,28 @@ function previewNotes(clip) {
   const slipTicks   = slipOff * TICKS_PER_STEP     // tick offset into the pattern
 
   let idx = 0
+  // Gather all pianoNotes across channels (steps-mode channels mirror their
+  // active steps as C5 notes so the same tick-accurate rendering applies here).
+  const allNotes = []
   channels.forEach(ch => {
     const d = pd[ch.id]
-    if (!d) return
-    if (ch.mode === 'steps') {
-      // Step channels loop inside their window
-      d.steps?.forEach((on, si) => {
-        if (!on) return
-        const x = (si / totalSteps.value) * 100
-        notes.push({ key: idx++, x, y: 20, w: (1 / totalSteps.value) * 100 * 0.8 })
-      })
-    } else if (d.pianoNotes?.length) {
-      const pitches = d.pianoNotes.map(n => n.pitch)
-      const minP = Math.min(...pitches), maxP = Math.max(...pitches)
-      const range = maxP - minP || 1
-      d.pianoNotes.forEach(n => {
-        // Compute position relative to the clip's visible window start (slipTicks)
-        const rawTick = n.startTick ?? (n.step ?? 0) * TICKS_PER_STEP
-        const relTick = rawTick - slipTicks
-        if (relTick < 0 || relTick >= windowTicks) return   // outside this clip's window
-        const x = (relTick / windowTicks) * 100
-        const w = Math.max(0.5, ((n.durationTicks ?? TICKS_PER_STEP) / windowTicks) * 100 - 0.2)
-        const y = ((maxP - n.pitch) / range) * 76 + 10
-        notes.push({ key: idx++, x, y, w })
-      })
-    }
+    if (!d?.pianoNotes?.length) return
+    d.pianoNotes.forEach(n => { allNotes.push({ n, ch }) })
   })
+  if (allNotes.length) {
+    const pitches = allNotes.map(({ n }) => n.pitch)
+    const minP = Math.min(...pitches), maxP = Math.max(...pitches)
+    const range = maxP - minP || 1
+    allNotes.forEach(({ n }) => {
+      const rawTick = n.startTick ?? (n.step ?? 0) * TICKS_PER_STEP
+      const relTick = rawTick - slipTicks
+      if (relTick < 0 || relTick >= windowTicks) return
+      const x = (relTick / windowTicks) * 100
+      const w = Math.max(0.5, ((n.durationTicks ?? TICKS_PER_STEP) / windowTicks) * 100 - 0.2)
+      const y = ((maxP - n.pitch) / range) * 76 + 10
+      notes.push({ key: idx++, x, y, w })
+    })
+  }
   return notes
 }
 
@@ -656,27 +652,22 @@ function drawPickerCanvas(patId, canvas) {
 
   // Collect all notes (step + piano) normalised to pixels
   const rects = []
+  // Unified rendering: steps-mode channels mirror active steps as C5 pianoNotes,
+  // so a single tick-accurate pass covers both steps and piano-roll channels.
+  const allNotesPicker = []
   channels.forEach(ch => {
     const d = pd[ch.id]
-    if (!d) return
-    if (ch.mode === 'steps') {
-      d.steps?.forEach((on, si) => {
-        if (!on) return
-        const x = (si / (totalSteps.value)) * W
-        rects.push({ x, y: H * 0.2, w: Math.max(1, W / totalSteps.value - 0.5), h: H * 0.6 })
-      })
-    } else {
-      const notes = d.pianoNotes
-      if (!notes?.length) return
-      const pitches = notes.map(n => n.pitch)
-      const minP = Math.min(...pitches), maxP = Math.max(...pitches), range = maxP - minP || 1
-      notes.forEach(n => {
-        const x = ((n.startTick ?? 0) / patTicks) * W
-        const w = Math.max(0.8, ((n.durationTicks ?? TICKS_PER_STEP) / patTicks) * W - 0.3)
-        const y = ((maxP - n.pitch) / range) * (H - 2) + 1
-        rects.push({ x, y, w, h: 2 })
-      })
-    }
+    if (!d?.pianoNotes?.length) return
+    d.pianoNotes.forEach(n => allNotesPicker.push(n))
+  })
+  if (!allNotesPicker.length) return
+  const pickerPitches = allNotesPicker.map(n => n.pitch)
+  const minP2 = Math.min(...pickerPitches), maxP2 = Math.max(...pickerPitches), range2 = maxP2 - minP2 || 1
+  allNotesPicker.forEach(n => {
+    const x = ((n.startTick ?? 0) / patTicks) * W
+    const w = Math.max(0.8, ((n.durationTicks ?? TICKS_PER_STEP) / patTicks) * W - 0.3)
+    const y = ((maxP2 - n.pitch) / range2) * (H - 2) + 1
+    rects.push({ x, y, w, h: 2 })
   })
   if (!rects.length) return
   ctx.fillStyle = hexToRgba(color, 0.75)
