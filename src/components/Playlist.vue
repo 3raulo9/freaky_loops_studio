@@ -236,15 +236,24 @@
                   :key="clip.id"
                   class="pl-clip"
                   :class="{
-                    ghost:    clipFocusMode === 'automation',
-                    dragging: draggingClip?.id === clip.id,
-                    selected: selectedClipIds.has(clip.id),
-                    'clip-muted': clip.muted,
+                    ghost:       clipFocusMode === 'automation',
+                    dragging:    draggingClip?.id === clip.id,
+                    selected:    selectedClipIds.has(clip.id),
+                    'clip-muted':  clip.muted,
+                    'tool-slice':  playlistTool === 'slice',
+                    'tool-slip':   playlistTool === 'slip',
                   }"
                   :style="patternClipStyle(clip)"
                   @mousedown.stop="onClipMouseDown($event, clip, track)"
+                  @mousemove="onClipSliceHover($event, clip)"
+                  @mouseleave="slicePreview = null"
                   @contextmenu.prevent.stop="openClipMenu($event, clip)"
                 >
+                  <!-- Left resize handle (Step 8/9) — drag to window from left edge -->
+                  <div v-if="!track.locked"
+                    class="clip-left-handle"
+                    @mousedown.stop="onLeftResizeStart($event, clip)" />
+
                   <!-- Title bar: solid theme color strip with name + dropdown -->
                   <div class="clip-titlebar" :style="{ background: patternColor(clip.patternId) }">
                     <button
@@ -257,19 +266,45 @@
                       class="clip-titlebar-name"
                       :class="{ 'name-muted': clip.muted }"
                     >{{ patternName(clip.patternId) }}</span>
+                    <!-- Step 11: source-offset badge ("⊳N" shows which bar content starts from) -->
+                    <span v-if="(clip.slipOffset ?? 0) > 0"
+                      class="clip-offset-badge"
+                      :title="'Content starts at bar ' + (Math.floor((clip.slipOffset ?? 0) / totalSteps) + 1)">
+                      ⊳{{ Math.floor((clip.slipOffset ?? 0) / totalSteps) + 1 }}
+                    </span>
+                    <!-- Step 6: progress fill sweeps across titlebar as playhead passes through -->
+                    <div v-if="isPlaying && clipLocalHeadX(clip) >= 0"
+                      class="clip-title-progress"
+                      :style="{
+                        width: (clipLocalHeadX(clip) / ((clip.width || 1) * cellWidth - 4)) * 100 + '%'
+                      }" />
                   </div>
+
                   <!-- Body: translucent theme color with canvas note preview -->
                   <div class="clip-body" :style="{ background: hexToRgba(patternColor(clip.patternId), 0.18) }">
                     <canvas
                       :ref="el => onClipCanvasRef(clip.id, el)"
                       class="clip-note-canvas"
                     />
+                    <!-- Step 6: real-time vertical playhead inside the clip body -->
+                    <div v-if="isPlaying && clipLocalHeadX(clip) >= 0"
+                      class="clip-local-head"
+                      :style="{ left: clipLocalHeadX(clip) + 'px' }" />
+                    <!-- Step 10: snapped slice preview line before committing the cut -->
+                    <div v-if="slicePreview?.clipId === clip.id"
+                      class="clip-slice-preview"
+                      :style="{ left: slicePreview.x + 'px' }" />
                   </div>
-                  <div
-                    v-if="!track.locked"
+
+                  <!-- Right resize handle -->
+                  <div v-if="!track.locked"
                     class="clip-resize-handle"
-                    @mousedown.stop="onResizeStart($event, clip)"
-                  />
+                    @mousedown.stop="onResizeStart($event, clip)" />
+
+                  <!-- Step 9: right-edge truncation indicator — dot pattern signals hidden content -->
+                  <div
+                    v-if="(clip.slipOffset ?? 0) + (clip.width || 1) * totalSteps < patternWidthCells(clip.patternId) * totalSteps"
+                    class="clip-truncated-edge" />
                 </div>
               </template>
 
@@ -431,7 +466,7 @@ const {
   patterns, currentPatternId, pickerPatternId,
   patternData, channels,
   playlistTracks, playlistClips, automationClips, timeMarkers, usePlaylist,
-  playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell, isPlaying,
+  playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, displayStep, playbackStartCell, isPlaying,
   bpm, totalSteps, getPlayheadTimeSeconds, gridSnap, ppq, snapBars,
   addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
   placeClip, removeClip, moveClip, resizeClip, splitClip, setSlipOffset, makeUniqueClip, consolidateTrack,
@@ -450,6 +485,7 @@ const tools = [
   { id: 'slice',  icon: '✂',  tip: 'Slice — cut clip at cursor (C)' },
   { id: 'mute',   icon: '⊘',  tip: 'Mute — toggle individual clip mute (T)' },
   { id: 'select', icon: '⬚',  tip: 'Select — drag box to select clips (E)' },
+  { id: 'slip',   icon: '↔',  tip: 'Slip — drag to shift pattern content inside clip boundary (S)' },
 ]
 // ── Auto-scroll & selection ───────────────────────────────────────────────────
 const autoScroll      = ref(true)
@@ -497,6 +533,17 @@ function autoClipsForTrack(trackId)    { return automationClips.filter(a => a.tr
 function patternName(pid)  { return patterns.find(p => p.id === pid)?.name  ?? '?' }
 function patternColor(pid) { return patterns.find(p => p.id === pid)?.color ?? '#4ecdc4' }
 
+// In-clip playhead position (px from clip left edge), or -1 when out of range.
+// Used by Step 6 to draw the real-time bar:beat indicator inside the clip body.
+function clipLocalHeadX(clip) {
+  const localCell = displayCell.value - clip.cell
+  if (localCell < 0 || localCell >= (clip.width || 1)) return -1
+  const localStep      = localCell * totalSteps.value + Math.max(0, displayStep.value)
+  const totalClipSteps = (clip.width || 1) * totalSteps.value
+  const progress       = localStep / totalClipSteps
+  return progress * ((clip.width || 1) * cellWidth.value - 4)
+}
+
 // Returns the width of a pattern in playlist cells (= number of bars).
 function patternWidthCells(patId) {
   const ticks = getPatternLengthTicks(patId)
@@ -527,31 +574,45 @@ function autoClipStyle(auto) {
 }
 
 // ── Clip preview notes from patternData ───────────────────────────────────────
+// Returns normalised note positions { x%, y%, w% } relative to the clip's
+// *visible window* (clip.width cells, offset by clip.slipOffset steps).
+// This ensures the canvas preview exactly matches what the scheduler plays.
 function previewNotes(clip) {
   const notes = []
   if (!patternData) return notes
   const pd = patternData[clip.patternId]
   if (!pd) return notes
-  const totalSteps = 32
+
+  // The visible window the clip plays: [slipOffset … slipOffset + clipWidth] in steps.
+  const slipOff     = clip.slipOffset ?? 0
+  const clipSteps   = (clip.width || 1) * totalSteps.value
+  const windowTicks = clipSteps * TICKS_PER_STEP   // total visible ticks
+  const slipTicks   = slipOff * TICKS_PER_STEP     // tick offset into the pattern
+
   let idx = 0
   channels.forEach(ch => {
     const d = pd[ch.id]
     if (!d) return
     if (ch.mode === 'steps') {
-      d.steps.forEach((on, si) => {
-        if (on) notes.push({ key: idx++, x: (si / totalSteps) * 100, y: 20, w: (1 / totalSteps) * 100 * 0.8 })
+      // Step channels loop inside their window
+      d.steps?.forEach((on, si) => {
+        if (!on) return
+        const x = (si / totalSteps.value) * 100
+        notes.push({ key: idx++, x, y: 20, w: (1 / totalSteps.value) * 100 * 0.8 })
       })
     } else if (d.pianoNotes?.length) {
       const pitches = d.pianoNotes.map(n => n.pitch)
       const minP = Math.min(...pitches), maxP = Math.max(...pitches)
       const range = maxP - minP || 1
-      // Find the furthest note end so we can normalise x positions correctly
-      const TICKS_PER_STEP_LOCAL = 120
-      const lastTick = d.pianoNotes.reduce((m, n) =>
-        Math.max(m, (n.startTick ?? 0) + (n.durationTicks ?? TICKS_PER_STEP_LOCAL)), totalSteps * TICKS_PER_STEP_LOCAL)
       d.pianoNotes.forEach(n => {
-        const startTick = n.startTick ?? (n.step ?? 0) * TICKS_PER_STEP_LOCAL
-        notes.push({ key: idx++, x: (startTick / lastTick) * 100, y: ((maxP - n.pitch) / range) * 76 + 10, w: (TICKS_PER_STEP_LOCAL / lastTick) * 100 * 0.85 })
+        // Compute position relative to the clip's visible window start (slipTicks)
+        const rawTick = n.startTick ?? (n.step ?? 0) * TICKS_PER_STEP
+        const relTick = rawTick - slipTicks
+        if (relTick < 0 || relTick >= windowTicks) return   // outside this clip's window
+        const x = (relTick / windowTicks) * 100
+        const w = Math.max(0.5, ((n.durationTicks ?? TICKS_PER_STEP) / windowTicks) * 100 - 0.2)
+        const y = ((maxP - n.pitch) / range) * 76 + 10
+        notes.push({ key: idx++, x, y, w })
       })
     }
   })
@@ -651,20 +712,55 @@ function drawClipCanvas(clipId, canvas) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, clipW, clipH)
 
-  // LOD: skip note drawing for very narrow clips
-  if (clipW < 40) return
-
   const color    = patternColor(clip.patternId)
   const isActive = clip.patternId === currentPatternId.value || clip.patternId === pickerPatternId.value
   const noteAlpha = isActive ? 0.85 : 0.28
+  const clipBars  = clip.width || 1   // 1 playlist cell = 1 bar
+  const pxPerBar  = cellWidth.value   // pixels per bar at current zoom
 
-  // High-zoom: subtle vertical grid lines (piano-roll matrix feel)
-  if (clipW > 150) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.05)'
+  // ── Step 13: Adaptive LOD ─────────────────────────────────────────────────────
+  // Ultra-narrow (extreme zoom-out): solid color block only, no sub-elements.
+  if (clipW < 6) {
+    ctx.fillStyle = hexToRgba(color, noteAlpha * 0.55)
+    ctx.fillRect(0, 0, clipW, clipH)
+    return
+  }
+  // Narrow: skip note details, just draw the bar-separator skeleton.
+  const skipNotes = clipW < 16
+
+  // ── Bar separator lines (Steps 4 + 5) ────────────────────────────────────────
+  ctx.lineWidth = 1
+  for (let b = 1; b < clipBars; b++) {
+    const bx = (b / clipBars) * clipW
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'
+    ctx.beginPath(); ctx.moveTo(bx, 0); ctx.lineTo(bx, clipH); ctx.stroke()
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)'
+    ctx.beginPath(); ctx.moveTo(bx + 0.5, 0); ctx.lineTo(bx + 0.5, clipH); ctx.stroke()
+  }
+
+  // ── Beat sub-divisions (visible above ~100px per bar, Step 13 zoom-in) ────────
+  if (pxPerBar > 100) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)'
     ctx.lineWidth = 1
-    for (let i = 1; i < 16; i++) {
-      const gx = (i / 16) * clipW
-      ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, clipH); ctx.stroke()
+    for (let b = 0; b < clipBars; b++) {
+      for (let beat = 1; beat < 4; beat++) {
+        const bx = ((b * 4 + beat) / (clipBars * 4)) * clipW
+        ctx.beginPath(); ctx.moveTo(bx, 0); ctx.lineTo(bx, clipH); ctx.stroke()
+      }
+    }
+  }
+
+  // ── Step-level micro-grid (visible above ~280px per bar — extreme zoom-in) ────
+  if (pxPerBar > 280) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.03)'
+    ctx.lineWidth = 1
+    const stepsPerBar = totalSteps.value   // 16 steps = 1 bar
+    for (let b = 0; b < clipBars; b++) {
+      for (let s = 0; s < stepsPerBar; s++) {
+        if (s % 4 === 0) continue   // already drawn as beat
+        const sx = ((b * stepsPerBar + s) / (clipBars * stepsPerBar)) * clipW
+        ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, clipH); ctx.stroke()
+      }
     }
   }
 
@@ -687,26 +783,30 @@ function drawClipCanvas(clipId, canvas) {
     })
   }
 
-  // Draw ghost tail if there is empty space at the end (Step 14).
+  // ── Step 14: Ghost-tail zone — transparent grid block for empty pattern padding ──
+  // Shows deliberate empty space (e.g. a 5-bar melody in an 8-bar time-marker slot).
   if (lastNoteTick < normLen && normLen > 0) {
-    const tailStartX = (lastNoteTick / normLen) * clipW
-    // Hatched overlay: diagonal lines
-    ctx.save()
-    ctx.fillStyle = 'rgba(0,0,0,0.18)'
-    ctx.fillRect(tailStartX, 0, clipW - tailStartX, clipH)
-    ctx.strokeStyle = 'rgba(255,255,255,0.06)'
-    ctx.lineWidth = 1
-    const spacing = 8
-    for (let d = -clipH; d < (clipW - tailStartX); d += spacing) {
-      ctx.beginPath()
-      ctx.moveTo(tailStartX + Math.max(0, d), 0)
-      ctx.lineTo(tailStartX + d + clipH, clipH)
-      ctx.stroke()
+    const tailStartX   = (lastNoteTick / normLen) * clipW
+    const tailWidth    = clipW - tailStartX
+    // Transparent fill — lighter than note area so content vs. silence is clear at a glance
+    ctx.fillStyle = 'rgba(0,0,0,0.09)'
+    ctx.fillRect(tailStartX, 0, tailWidth, clipH)
+    // Bar-separator lines inside the ghost block (same visual language as the rest of the clip)
+    if (tailWidth > 4) {
+      const ticksPerBar = totalSteps.value * TICKS_PER_STEP
+      const totalBarsN  = Math.ceil(normLen / ticksPerBar)
+      ctx.strokeStyle = 'rgba(255,255,255,0.13)'
+      ctx.lineWidth = 1
+      for (let b = 1; b < totalBarsN; b++) {
+        const bx = (b * ticksPerBar / normLen) * clipW
+        if (bx <= tailStartX + 0.5) continue
+        ctx.beginPath(); ctx.moveTo(bx, 0); ctx.lineTo(bx, clipH); ctx.stroke()
+      }
     }
-    ctx.restore()
   }
 
   // Collect normalised notes via existing previewNotes helper (returns x%, y%, w%)
+  if (skipNotes) return
   const notes = previewNotes(clip)
   if (!notes.length) return
 
@@ -725,8 +825,10 @@ function redrawAllClipCanvases() {
 }
 
 watch([cellWidth, trackHeight, currentPatternId, pickerPatternId], redrawAllClipCanvases)
-watch(patternData, redrawAllClipCanvases, { deep: true })
-watch(patternData, redrawAllPickerCanvases, { deep: true })
+watch(patternData,    redrawAllClipCanvases,   { deep: true })
+watch(patternData,    redrawAllPickerCanvases,  { deep: true })
+// Redraw clip canvases when slipOffset, width, or any clip property changes (Step 12)
+watch(playlistClips,  redrawAllClipCanvases,   { deep: true })
 
 // ── Automation graph helpers ──────────────────────────────────────────────────
 function autoPolyline(auto) {
@@ -988,6 +1090,22 @@ function onCellsRightClick(e, track) {
 }
 
 // ── Clip drag (move) ──────────────────────────────────────────────────────────
+// ── Slice preview (Step 10) ───────────────────────────────────────────────────
+// Tracks the snapped cut position while hovering over a clip with the Slice tool.
+const slicePreview = ref(null)   // { clipId, x (px from clip left) }
+
+function onClipSliceHover(e, clip) {
+  if (playlistTool.value !== 'slice') { slicePreview.value = null; return }
+  const rect  = e.currentTarget.getBoundingClientRect()
+  const relX  = e.clientX - rect.left
+  // Snap to nearest bar (cell) boundary within the clip
+  const cellInClip  = Math.floor(relX / cellWidth.value)
+  const snappedX    = cellInClip * cellWidth.value
+  // Don't show at left edge (bar 0 would cut nothing off the front)
+  if (cellInClip <= 0 || cellInClip >= (clip.width || 1)) { slicePreview.value = null; return }
+  slicePreview.value = { clipId: clip.id, x: snappedX }
+}
+
 // ── Slip drag state ───────────────────────────────────────────────────────────
 let slipDragClip     = null
 let slipDragStartX   = 0
@@ -1034,8 +1152,8 @@ function onClipMouseDown(e, clip, track) {
     }
     return
   }
-  // Slip tool (Step 12): drag clip content left/right within clip window
-  if (tool === 'draw' && e.shiftKey) { startSlipDrag(e, clip); return }
+  // Slip tool (Step 12): dedicated tool or Shift+draw shortcut
+  if (tool === 'slip' || (tool === 'draw' && e.shiftKey)) { startSlipDrag(e, clip); return }
   if (tool !== 'draw') return
   if (track.locked) return
   draggingClip.value = clip
@@ -1078,6 +1196,7 @@ const dragGhostStyle = computed(() => {
 })
 
 // ── Clip resize ───────────────────────────────────────────────────────────────
+// ── Right-edge resize ─────────────────────────────────────────────────────────
 let resizingClip     = null
 let resizeStartX     = 0
 let resizeStartWidth = 1
@@ -1092,6 +1211,44 @@ function onResizeMove(e) {
   resizeClip(resizingClip.id, resizeStartWidth + Math.round((e.clientX - resizeStartX) / cellWidth.value))
 }
 function onResizeEnd() { resizingClip = null; window.removeEventListener('mousemove', onResizeMove) }
+
+// ── Left-edge resize (Step 8 / Step 9 windowing) ─────────────────────────────
+// Dragging the left handle adjusts the start cell, the slipOffset (so the
+// remaining content stays aligned), and the width — all non-destructively.
+let leftResizeClip     = null
+let leftResizeStartX   = 0
+let leftResizeOrigCell = 0
+let leftResizeOrigSlip = 0
+let leftResizeOrigW    = 0
+
+function onLeftResizeStart(e, clip) {
+  e.preventDefault(); e.stopPropagation()
+  leftResizeClip     = clip
+  leftResizeStartX   = e.clientX
+  leftResizeOrigCell = clip.cell
+  leftResizeOrigSlip = clip.slipOffset ?? 0
+  leftResizeOrigW    = clip.width || 1
+  window.addEventListener('mousemove', onLeftResizeMove)
+  window.addEventListener('mouseup',   onLeftResizeEnd, { once: true })
+}
+
+function onLeftResizeMove(e) {
+  if (!leftResizeClip) return
+  const deltaCells = Math.round((e.clientX - leftResizeStartX) / cellWidth.value)
+  const newCell    = Math.max(0, leftResizeOrigCell + deltaCells)
+  const actualDelta = newCell - leftResizeOrigCell       // how many cells actually shifted
+  const newWidth   = Math.max(1, leftResizeOrigW - actualDelta)
+  const newSlip    = Math.max(0, leftResizeOrigSlip + actualDelta * totalSteps.value)
+  leftResizeClip.cell        = newCell
+  leftResizeClip.width       = newWidth
+  leftResizeClip.slipOffset  = newSlip
+  leftResizeClip._userWidth  = newWidth   // mark as manually resized
+}
+
+function onLeftResizeEnd() {
+  leftResizeClip = null
+  window.removeEventListener('mousemove', onLeftResizeMove)
+}
 
 // ── Automation clip interaction ───────────────────────────────────────────────
 function onAutoClipMouseDown(e, auto, track) {
@@ -1398,6 +1555,7 @@ function onKeyDown(e) {
   if (e.key === 'e' || e.key === 'E') playlistTool.value = 'select'
   if (e.key === 'c' || e.key === 'C') playlistTool.value = 'slice'
   if (e.key === 't' || e.key === 'T') playlistTool.value = 'mute'
+  if (e.key === 's' || e.key === 'S') playlistTool.value = 'slip'
   if (e.key === 'Escape') { closeMenus(); selectedClipIds.value = new Set() }
   if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipIds.value.size > 0) {
     selectedClipIds.value.forEach(id => removeClip(id))
@@ -1691,11 +1849,67 @@ onBeforeUnmount(() => {
   position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;
 }
 
+/* Step 6: in-clip playhead — vertical bar that sweeps through the clip body during playback */
+.clip-local-head {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: rgba(255,255,255,0.75); pointer-events: none; z-index: 6;
+  box-shadow: 0 0 3px rgba(255,255,255,0.4);
+}
+/* Step 6: titlebar progress fill — darkens the played portion of the title band */
+.clip-title-progress {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: rgba(0,0,0,0.25); pointer-events: none;
+  transition: width 0.05s linear;
+}
+
+/* Step 8: left-edge resize handle */
+.clip-left-handle {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 7px;
+  cursor: ew-resize; z-index: 4;
+  background: linear-gradient(to right, rgba(255,255,255,0.08), transparent);
+}
+.clip-left-handle:hover { background: linear-gradient(to right, rgba(255,255,255,0.22), transparent); }
+
+/* Right-edge resize handle */
 .clip-resize-handle {
   position: absolute; right: 0; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 3;
   background: linear-gradient(to left, rgba(255,255,255,0.08), transparent);
 }
 .clip-resize-handle:hover { background: linear-gradient(to left, rgba(255,255,255,0.2), transparent); }
+
+/* Step 10: scissors cursor on clip body when Slice tool is active */
+.pl-clip.tool-slice { cursor: crosshair; }
+/* Step 12: slip cursor when Slip tool is active */
+.pl-clip.tool-slip  { cursor: ew-resize; }
+
+/* Step 10: snapped cut preview line */
+.clip-slice-preview {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  background: rgba(255, 200, 60, 0.85);
+  box-shadow: 0 0 5px rgba(255,200,60,0.6);
+  pointer-events: none; z-index: 10;
+}
+
+/* Step 11: source-offset badge (shows which bar the fragment starts from) */
+.clip-offset-badge {
+  font-family: 'Share Tech Mono', monospace; font-size: 8px; font-weight: 700;
+  letter-spacing: 0.08em; color: rgba(255,255,255,0.65);
+  background: rgba(0,0,0,0.25); border-radius: 2px;
+  padding: 0 3px; flex-shrink: 0; margin-right: 2px;
+}
+
+/* Step 9: truncated-edge indicator — hatched right border signals hidden content */
+.clip-truncated-edge {
+  position: absolute; right: 7px; top: 0; bottom: 0; width: 4px;
+  background: repeating-linear-gradient(
+    45deg,
+    transparent,
+    transparent 2px,
+    rgba(255,255,255,0.12) 2px,
+    rgba(255,255,255,0.12) 4px
+  );
+  pointer-events: none; z-index: 2;
+}
 .drag-ghost-clip  { pointer-events: none; z-index: 8; border-style: dashed; }
 /* Pre-placement hover ghost (Step 3) */
 .hover-ghost-clip {
