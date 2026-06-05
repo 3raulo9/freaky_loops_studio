@@ -590,6 +590,7 @@ export function useStudio() {
     { id: 'p1', name: 'Pattern 1', color: '#4ecdc4' },
   ])
   const patternData = reactive({ p1: {} })
+  const patternLengthOverrides = reactive({})   // patId → tick count (manual loop-point override)
   const currentPatternId = ref('p1')
   const pickerPatternId  = ref('p1')   // selected in playlist picker
 
@@ -630,6 +631,7 @@ export function useStudio() {
     if (idx < 0) return
     patterns.splice(idx, 1)
     delete patternData[id]
+    delete patternLengthOverrides[id]
     if (currentPatternId.value === id) currentPatternId.value = patterns[0].id
     if (pickerPatternId.value === id)  pickerPatternId.value  = patterns[0].id
     // Remove all playlist clips that used this pattern
@@ -718,13 +720,16 @@ export function useStudio() {
     if (leftWidth <= 0 || leftWidth >= (clip.width || 1)) return
     const rightWidth = (clip.width || 1) - leftWidth
     clip.width = leftWidth
+    // The right fragment's slip offset must account for the cells it has been cut from:
+    // it starts `leftWidth` cells into the pattern (shifted by leftWidth*totalSteps steps).
+    const rightSlip = (clip.slipOffset ?? 0) + leftWidth * totalSteps.value
     playlistClips.push({
       id: 'c' + (++_clipId),
       trackId: clip.trackId,
       cell: atCell,
       patternId: clip.patternId,
       width: rightWidth,
-      slipOffset: 0,
+      slipOffset: rightSlip,
       muted: clip.muted || false,
     })
   }
@@ -766,7 +771,18 @@ export function useStudio() {
   function resizeClip(clipId, newWidth) {
     const clip = playlistClips.find(c => c.id === clipId)
     if (!clip) return
-    clip.width = Math.max(1, Math.min(PLAYLIST_CELLS - clip.cell, newWidth))
+    clip.width      = Math.max(1, Math.min(PLAYLIST_CELLS - clip.cell, newWidth))
+    clip._userWidth = clip.width   // mark manual override so auto-stretch won't shrink below this
+  }
+
+  // Slip tool: shift the internal playback window by `deltaSteps` steps.
+  // Positive = play later material first; clamped to the pattern's total step range.
+  function setSlipOffset(clipId, deltaSteps) {
+    const clip = playlistClips.find(c => c.id === clipId)
+    if (!clip) return
+    const patLen     = Math.ceil(getPatternLengthTicks(clip.patternId) / TICKS_PER_STEP)
+    const maxSlip    = Math.max(0, patLen - (clip.width || 1) * totalSteps.value)
+    clip.slipOffset  = Math.max(0, Math.min(maxSlip, Math.round(deltaSteps)))
   }
 
   function removeClip(clipId) {
@@ -955,6 +971,26 @@ export function useStudio() {
     catch { return true }
   })())
   watch(browserOpen, v => { try { localStorage.setItem('fl.browser.open', v ? '1' : '0') } catch (_) {} })
+
+  // ── Playlist clip auto-stretch (Unified Pattern Architecture) ─────────────────
+  // When piano notes push the effective pattern length beyond the current clip
+  // width, expand the clip automatically.  Never shrinks below the user's last
+  // manual resize (tracked via clip._userWidth) — users can still force-truncate.
+  watch(
+    [patternData, patternLengthOverrides],
+    () => {
+      playlistClips.forEach(clip => {
+        const autoLen  = getPatternLengthTicks(clip.patternId)
+        const autoWidth = Math.max(1, Math.ceil(autoLen / (totalSteps.value * TICKS_PER_STEP)))
+        // Only grow: if the user manually set a smaller width, respect it unless the
+        // pattern has grown past it.
+        const minWidth = clip._userWidth ?? 0
+        const newWidth = Math.max(minWidth, autoWidth)
+        if (clip.width !== newWidth) clip.width = newWidth
+      })
+    },
+    { deep: true },
+  )
   const activeArrangement = ref('default')
   const detachedWindows   = reactive({})   // id → { x, y, w, h, z }
   let   _winZ        = 200
@@ -1066,6 +1102,20 @@ export function useStudio() {
   const recordArmed    = ref(false)
   const recordWarning  = ref(false)
   let   recordWarnTimer = null
+
+  // Loop Record — when OFF the playhead runs indefinitely past the pattern end,
+  // capturing a continuous take; when ON it overdubs inside the fixed loop window.
+  const loopRecord = ref(true)
+
+  // Non-reactive map: keys currently held during a live recording session.
+  // key-code → { pitch, audioStartTime }
+  const liveRecordNotes = new Map()
+
+  // Score logger — a circular buffer that silently captures every MIDI key event
+  // regardless of arm state (≤ 30 min of history).
+  // Each entry: { pitch, t0, t1 }  where t0/t1 are performance.now()/1000.
+  const scoreLogBuffer  = []
+  const SCORE_LOG_MAX_S = 30 * 60   // 30 minutes
 
   function toggleRecordFilter(flag) {
     recordFilters.value ^= flag
@@ -1583,6 +1633,43 @@ export function useStudio() {
     return true
   }
 
+  // ── Loop region (red ruler selection — temporary playback loop override) ────────
+  // null when inactive; overrides pattern-length for the scheduler when set.
+  const loopRegion = ref(null)   // { startTick: number, endTick: number }
+  function setLoopRegion(startTick, endTick) {
+    const st = Math.max(0, startTick)
+    const et = Math.max(st + TICKS_PER_STEP, endTick)
+    loopRegion.value = { startTick: st, endTick: et }
+  }
+  function clearLoopRegion() { loopRegion.value = null }
+
+  // ── Pattern length API ─────────────────────────────────────────────────────────
+  // Auto-length = furthest note end tick across all piano channels in the pattern.
+  // Falls back to totalSteps * TICKS_PER_STEP when the pattern has no piano notes.
+  function getPatternAutoLengthTicks(patId) {
+    const pid = patId ?? currentPatternId.value
+    const pd  = patternData[pid]
+    let maxTick = totalSteps.value * TICKS_PER_STEP
+    if (pd) {
+      Object.values(pd).forEach(d => {
+        if (!d?.pianoNotes) return
+        d.pianoNotes.forEach(n => {
+          const end = (n.startTick ?? 0) + (n.durationTicks ?? TICKS_PER_STEP)
+          if (end > maxTick) maxTick = end
+        })
+      })
+    }
+    return maxTick
+  }
+
+  function getPatternLengthTicks(patId) {
+    const pid = patId ?? currentPatternId.value
+    return patternLengthOverrides[pid] ?? getPatternAutoLengthTicks(pid)
+  }
+
+  function setPatternLengthOverride(patId, ticks) { patternLengthOverrides[patId] = ticks }
+  function clearPatternLengthOverride(patId)       { delete patternLengthOverrides[patId] }
+
   // ── Scheduler ─────────────────────────────────────────────────────────────────
   const LOOK_AHEAD = 0.12
   const TICK_MS    = 25
@@ -1595,24 +1682,39 @@ export function useStudio() {
   let playbackStartCellSeconds = 0
   let _lastBeat = -1   // last beat index emitted to beatTick (metronome pulse)
 
-  function getPatternsForCell(cell) {
-    if (!usePlaylist.value) return [currentPatternId.value]
+  // Returns clip descriptors for the given playlist cell.
+  // Each descriptor carries the offset into the clip so multi-bar patterns
+  // play the correct bar, and the clip boundary so truncated clips are silent
+  // beyond their visible end.  slipOffset (in steps) shifts the playback window.
+  function getClipsForCell(cell) {
+    if (!usePlaylist.value) {
+      // Channel-rack mode: single "virtual" clip with no boundary
+      return [{ patternId: currentPatternId.value, clipOffset: 0, clipWidth: 0x7FFFFFFF, slipOffset: 0 }]
+    }
     const playingTrackIds = new Set(playlistTracks.filter(t => !t.muted).map(t => t.id))
+    const cellMod = cell % PLAYLIST_CELLS
     return playlistClips
       .filter(c => {
         const w = c.width || 1
-        const cellMod = cell % PLAYLIST_CELLS
         return cellMod >= c.cell && cellMod < c.cell + w && playingTrackIds.has(c.trackId) && !c.muted
       })
-      .map(c => c.patternId)
+      .map(c => ({
+        patternId:  c.patternId,
+        clipOffset: cellMod - c.cell,   // cells into this clip (0 = first bar)
+        clipWidth:  c.width || 1,       // total cells the clip spans
+        slipOffset: c.slipOffset ?? 0,  // step shift for the slip tool
+      }))
   }
+
+  // Keep old name as a shim so any external callers still work
+  function getPatternsForCell(cell) { return getClipsForCell(cell).map(c => c.patternId) }
 
   function scheduleStep(step, baseWhen, cell) {
     noteQueue.push({ step, time: baseWhen, cell: cell % PLAYLIST_CELLS })
     syncVolumes()
     const secPerBeat = 60 / bpm.value
     const secPerStep = secPerBeat / 4                 // Δstep (a 16th note)
-    const pids = getPatternsForCell(cell)
+    const clips = getClipsForCell(cell)
     channels.forEach((ch, ci) => {
       if (ch.muted) return
       // Global swing (S∈[0,1]): even steps delayed by up to Δstep/3 → triplet groove.
@@ -1621,17 +1723,16 @@ export function useStudio() {
       const when = baseWhen + swingOff
       const dest     = trackGains[ci] ?? audioCtx.destination
       const cutDest  = cutGains[ci]   ?? dest   // route through cutGain if cutSelf
-      pids.forEach(pid => {
-        const d = getPatData(ch.id, pid)
+      clips.forEach(({ patternId, clipOffset, clipWidth, slipOffset }) => {
+        const d = getPatData(ch.id, patternId)
         if (ch.mode === 'steps') {
-          // Per-channel loop length: map step back into loopLength range
+          // Step channels always loop within their loop-length window.
           const loopLen = ch.loopEnabled && ch.loopLength > 0 && ch.loopLength < totalSteps.value
             ? ch.loopLength : null
           const s = loopLen !== null ? step % loopLen : step
           if (d.steps[s]) {
             const vel = d.stepVelocities?.[s] ?? 0.8
-            // Cut-self: choke the previous note before the new one. A short
-            // 2 ms fade-out/in (instead of an instant step) de-clicks the choke.
+            // Cut-self: a 2 ms fade-out/in de-clicks the choke.
             if (cutGains[ci]) {
               const cg = cutGains[ci].gain
               cg.cancelScheduledValues(when)
@@ -1643,18 +1744,23 @@ export function useStudio() {
             registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
           }
         } else {
-          // Schedule all piano notes whose startTick falls within this step's window.
-          // Using a range check (not rounding) means two notes within the same 1/16-note
-          // window (e.g. at tick 0 and tick 60) both fire, at their precise sub-step offset.
-          const secPerTick   = (60 / bpm.value) / 4 / TICKS_PER_STEP
-          const stepStartTick = step * TICKS_PER_STEP
+          // Piano channels: compute the absolute step within the pattern.
+          // clipOffset advances by 1 each cell, so multi-bar patterns play the
+          // correct bar on each successive cell.  slipOffset shifts the window.
+          const patternStep = clipOffset * totalSteps.value + step + slipOffset
+          // Enforce non-destructive clip boundary (Step 9: truncated clips play silence).
+          if (patternStep >= clipWidth * totalSteps.value) return
+          const secPerTick    = (60 / bpm.value) / 4 / TICKS_PER_STEP
+          const stepStartTick = patternStep * TICKS_PER_STEP
           const stepEndTick   = stepStartTick + TICKS_PER_STEP
-          d.pianoNotes.filter(n => n.startTick >= stepStartTick && n.startTick < stepEndTick && !n.muted).forEach(note => {
-            const noteWhen = when + (note.startTick - stepStartTick) * secPerTick
-            const gate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
-            ch.fn(audioCtx, noteWhen, { ...ch.params, pitch: note.pitch + masterPitchSemis.value, velocity: note.velocity ?? 1, gate }, dest)
-            registerVoice(noteWhen, gate + 0.12)
-          })
+          d.pianoNotes
+            .filter(n => n.startTick >= stepStartTick && n.startTick < stepEndTick && !n.muted)
+            .forEach(note => {
+              const noteWhen = when + (note.startTick - stepStartTick) * secPerTick
+              const gate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
+              ch.fn(audioCtx, noteWhen, { ...ch.params, pitch: note.pitch + masterPitchSemis.value, velocity: note.velocity ?? 1, gate }, dest)
+              registerVoice(noteWhen, gate + 0.12)
+            })
         }
       })
     })
@@ -1700,19 +1806,29 @@ export function useStudio() {
     const secPerBeat = 60 / bpm.value
     const secPerStep = secPerBeat / 4
     const steps = totalSteps.value
+    // Loop Record OFF + armed → let the playhead run indefinitely so the user
+    // can capture a continuous take beyond the pattern boundary.
+    const infiniteRecord = !loopRecord.value && recordArmed.value && !usePlaylist.value
+    // Otherwise: loop region → pattern-length override → auto-length.
+    const loopEndTick = infiniteRecord
+      ? null
+      : (loopRegion.value?.endTick ?? (usePlaylist.value ? steps * TICKS_PER_STEP : getPatternLengthTicks(currentPatternId.value)))
+    const effectiveSteps = infiniteRecord
+      ? 0x3FFFFFFF   // ~1 billion — playhead never wraps during recording
+      : (usePlaylist.value ? steps : Math.max(steps, Math.ceil(loopEndTick / TICKS_PER_STEP)))
     // Buffer-deadline miss: if the next event is already in the past, the
     // scheduler fell behind its window → register a dropout (underrun).
     if (nextNoteTime < audioCtx.currentTime - 0.001) audioUnderruns.value++
     while (nextNoteTime < audioCtx.currentTime + LOOK_AHEAD) {
       // Pass base grid time — per-channel swing applied inside scheduleStep
-      scheduleStep(schedStep % steps, nextNoteTime, schedCell)
-      // Metronome: one click per beat (4 steps/beat), accent on the cell downbeat.
+      scheduleStep(schedStep % effectiveSteps, nextNoteTime, schedCell)
+      // Metronome: one click per beat (4 steps/beat), accent on the downbeat (always at totalSteps boundary).
       if (metronomeOn.value && schedStep % 4 === 0) {
         scheduleMetroClick(nextNoteTime, metroAccent.value && schedStep % steps === 0)
       }
       nextNoteTime += secPerStep
       schedStep++
-      if (schedStep % steps === 0) schedCell++
+      if (schedStep % effectiveSteps === 0) schedCell++
     }
     // Audio processing load = compute time of this block / its time-window deadline.
     const elapsed = performance.now() - t0
@@ -1787,6 +1903,7 @@ export function useStudio() {
   }
 
   function pausePlay() {
+    finalizeRecordedNotes()
     isPlaying.value = false
     transportState.value = 'paused'
     clearInterval(schedulerTimer); schedulerTimer = null
@@ -1795,6 +1912,7 @@ export function useStudio() {
   }
 
   function stopPlay() {
+    finalizeRecordedNotes()
     isPlaying.value = false
     transportState.value = 'stopped'
     clearInterval(schedulerTimer); schedulerTimer = null
@@ -1894,6 +2012,19 @@ export function useStudio() {
     const pitch = 12 * (kbOctave.value + 1) + semi
     pressedKeyPitch.set(e.code, pitch)
     playNote(selectedChannel.value, pitch)
+
+    // ── Score logger: always capture MIDI input (30-min rolling buffer) ──────────
+    const t0 = performance.now() / 1000
+    scoreLogBuffer.push({ pitch, t0, t1: null })
+    const cutoff = t0 - SCORE_LOG_MAX_S
+    while (scoreLogBuffer.length && scoreLogBuffer[0].t0 < cutoff) scoreLogBuffer.shift()
+
+    // ── Live MIDI recording: arm + playing + NOTES filter + piano channel ────────
+    if (audioCtx && isPlaying.value && recordArmed.value &&
+        (recordFilters.value & RECORD_FLAGS.NOTES) &&
+        selectedChannel.value?.mode === 'piano') {
+      liveRecordNotes.set(e.code, { pitch, audioStartTime: audioCtx.currentTime })
+    }
   }
 
   function handleKeyUp(e) {
@@ -1903,6 +2034,63 @@ export function useStudio() {
       stopNote(selectedChannel.value, pitch)
       pressedKeyPitch.delete(e.code)
     }
+
+    // ── Score logger: close the note entry ───────────────────────────────────────
+    const logEntry = [...scoreLogBuffer].reverse().find(n => n.pitch === pitch && n.t1 === null)
+    if (logEntry) logEntry.t1 = performance.now() / 1000
+
+    // ── Live recording: finalise and push the completed note ─────────────────────
+    if (liveRecordNotes.has(e.code)) {
+      const { pitch: rPitch, audioStartTime } = liveRecordNotes.get(e.code)
+      liveRecordNotes.delete(e.code)
+      if (audioCtx && isPlaying.value) {
+        const secPerTick    = (60 / bpm.value) / 4 / TICKS_PER_STEP
+        const startTick     = Math.max(0, Math.round((audioStartTime - playbackStartAudioTime) / secPerTick))
+        const endTick       = Math.round((audioCtx.currentTime - playbackStartAudioTime) / secPerTick)
+        const durationTicks = Math.max(TICKS_PER_STEP, endTick - startTick)
+        const ch = selectedChannel.value
+        if (ch?.mode === 'piano') {
+          getPatData(ch.id).pianoNotes.push({ startTick, pitch: rPitch, velocity: 0.8, durationTicks })
+        }
+      }
+    }
+  }
+
+  // Finalise any notes still held when the transport stops mid-recording.
+  function finalizeRecordedNotes() {
+    if (!liveRecordNotes.size) return
+    const ch = selectedChannel.value
+    liveRecordNotes.forEach(({ pitch: rPitch, audioStartTime }) => {
+      if (!audioCtx || ch?.mode !== 'piano') return
+      const secPerTick    = (60 / bpm.value) / 4 / TICKS_PER_STEP
+      const startTick     = Math.max(0, Math.round((audioStartTime - playbackStartAudioTime) / secPerTick))
+      const endTick       = Math.round((audioCtx.currentTime - playbackStartAudioTime) / secPerTick)
+      const durationTicks = Math.max(TICKS_PER_STEP, endTick - startTick)
+      getPatData(ch.id).pianoNotes.push({ startTick, pitch: rPitch, velocity: 0.8, durationTicks })
+    })
+    liveRecordNotes.clear()
+  }
+
+  // ── Score logger dump ──────────────────────────────────────────────────────────
+  // Extract the last captured MIDI performance from the rolling buffer into the
+  // currently selected piano channel, then open the Piano Roll to show the result.
+  function dumpScoreLog() {
+    const completed = scoreLogBuffer.filter(n => n.t1 !== null && n.t1 > n.t0)
+    if (!completed.length) return
+    const ch = channels.find(c => c.id === selectedChannelId.value)
+    if (!ch || ch.mode !== 'piano') return
+
+    pushUndo()
+    const refTime    = completed[0].t0
+    const secPerTick = (60 / bpm.value) / 4 / TICKS_PER_STEP
+    const patData    = getPatData(ch.id)
+    completed.forEach(({ pitch, t0, t1 }) => {
+      const startTick     = Math.max(0, Math.round((t0 - refTime) / secPerTick))
+      const durationTicks = Math.max(TICKS_PER_STEP, Math.round((t1 - t0) / secPerTick))
+      patData.pianoNotes.push({ startTick, pitch, velocity: 0.8, durationTicks })
+    })
+    scoreLogBuffer.length = 0   // clear after dump
+    pianoRollOpen.value = true
   }
 
   // ── Pattern editing ───────────────────────────────────────────────────────────
@@ -2360,6 +2548,7 @@ export function useStudio() {
         })
         return out
       })(),
+      patternLengthOverrides: { ...patternLengthOverrides },
       currentPatternId: currentPatternId.value,
       playlistTracks:   playlistTracks.map(t => ({ ...t })),
       playlistClips:    playlistClips.map(c => ({ ...c })),
@@ -2461,6 +2650,10 @@ export function useStudio() {
       })
     })
 
+    // Pattern length overrides
+    Object.keys(patternLengthOverrides).forEach(k => delete patternLengthOverrides[k])
+    Object.assign(patternLengthOverrides, p.patternLengthOverrides ?? {})
+
     const firstPatId = patterns[0]?.id ?? 'p1'
     currentPatternId.value = p.currentPatternId ?? firstPatId
     pickerPatternId.value  = p.currentPatternId ?? firstPatId
@@ -2534,7 +2727,7 @@ export function useStudio() {
     playlistTracks, playlistClips, timeMarkers, usePlaylist,
     playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell,
     addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
-    placeClip, removeClip, moveClip, resizeClip, splitClip, makeUniqueClip, consolidateTrack,
+    placeClip, removeClip, moveClip, resizeClip, splitClip, setSlipOffset, makeUniqueClip, consolidateTrack,
     addTimeMarker, removeTimeMarker,
     PLAYLIST_CELLS,
     // Track groups/lock
@@ -2571,7 +2764,7 @@ export function useStudio() {
     // Transport status + record
     transportState, beatTick, beatAccent,
     RECORD_FLAGS, recordFilters, recordArmed, recordWarning,
-    toggleRecordFilter, toggleRecordArm,
+    toggleRecordFilter, toggleRecordArm, loopRecord, dumpScoreLog,
     // Metronome
     metronomeOn, metronomeSound, metroAccent,
     getAnalyser: () => analyserNode,
@@ -2587,6 +2780,10 @@ export function useStudio() {
     getMixerAnalyser, assignChannelToMixerTrack, moveMixerTrack,
     // Scale snap
     snapScale,
+    // Pattern length (infinite canvas)
+    getPatternLengthTicks, setPatternLengthOverride, clearPatternLengthOverride,
+    // Loop region (red ruler selection — temporary playback override)
+    loopRegion, setLoopRegion, clearLoopRegion,
     // Project save / load
     saveProject, loadProjectFile,
     // Drum modules

@@ -306,7 +306,10 @@
 
             <!-- Mini piano-roll preview -->
             <template v-else>
-              <div class="mini-pr" :style="{ '--cols': totalSteps }"
+
+              <!-- ─ Single-bar: column-per-step grid (unchanged) ─ -->
+              <div v-if="!isMultiBarChannel(ch)"
+                class="mini-pr" :style="{ '--cols': totalSteps }"
                 @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
                 <div v-for="s in totalSteps" :key="s-1" class="mini-pr-col"
                   :class="{
@@ -314,11 +317,38 @@
                     playing: isPlaying && displayStep === s-1,
                     beat:    (s-1) % 4 === 0,
                   }">
-                  <div v-for="note in notesAtStep(ch, s-1)" :key="`${note.step}-${note.pitch}`"
+                  <div v-for="note in notesAtStep(ch, s-1)"
+                    :key="`${note.startTick ?? note.step}-${note.pitch}`"
                     class="mini-note" :style="{ bottom: noteBottom(note.pitch) + '%' }" />
                 </div>
                 <span class="mini-pr-hint">PIANO ROLL</span>
               </div>
+
+              <!-- ─ Multi-bar: absolute-positioned panoramic view ─ -->
+              <div v-else
+                class="mini-pr mini-pr-wide"
+                @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
+                <!-- Bar divider lines at each bar boundary -->
+                <div v-for="bi in (channelPatternBars(ch) - 1)" :key="'bl' + bi"
+                  class="mini-bar-line"
+                  :style="{ left: (bi / channelPatternBars(ch)) * 100 + '%' }" />
+                <!-- Playhead position in the wide view -->
+                <div v-if="isPlaying && displayStep >= 0"
+                  class="mini-wide-head"
+                  :style="{ left: ((displayStep * TICKS_PER_STEP) / channelPatternTicks(ch)) * 100 + '%' }" />
+                <!-- All notes, x = time %, y = pitch % -->
+                <div v-for="note in getPianoNotes(ch.id)"
+                  :key="`${note.startTick}-${note.pitch}`"
+                  class="mini-note-wide"
+                  :style="{
+                    left:   ((note.startTick ?? 0) / channelPatternTicks(ch)) * 100 + '%',
+                    width:  Math.max(0.5, ((note.durationTicks ?? TICKS_PER_STEP) / channelPatternTicks(ch)) * 100) + '%',
+                    bottom: noteBottom(note.pitch) + '%',
+                  }" />
+                <!-- Bar-count readout -->
+                <span class="mini-pr-bars-label">{{ channelPatternBars(ch) }} BAR</span>
+              </div>
+
             </template>
 
             <!-- Loop toggle (overlaid on seq area) -->
@@ -495,7 +525,7 @@
 
 <script setup>
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
-import { useStudio, FM_PRESETS } from '../store/studio.js'
+import { useStudio, FM_PRESETS, TICKS_PER_STEP } from '../store/studio.js'
 import { getAsset } from '../browserLibrary.js'
 import Knob from './Knob.vue'
 
@@ -512,7 +542,11 @@ const {
   assignChannelToMixerTrack, mixerTracks,
   setCutSelf, splitByChannel, addSampleChannel,
   rotateSteps, invertSteps,
+  getPatternLengthTicks,
 } = useStudio()
+
+// Local MIDI-tick constant (matches store's TICKS_PER_STEP = 120)
+const CR_TICKS_PER_BAR = TICKS_PER_STEP * 16  // 1920 — one 4/4 bar at 1/16 resolution
 
 // ── Step-length layout reflow (stack into 2 rows when steps get too narrow) ────
 const rackEl = ref(null)
@@ -772,14 +806,41 @@ function openOrSelectChannel(ch) {
 }
 
 // ── Mini piano-roll preview helpers ──────────────────────────────────────────
+function noteStep(n) {
+  // Migrate from old n.step to tick-based n.startTick
+  return n.startTick !== undefined
+    ? Math.floor(n.startTick / TICKS_PER_STEP)
+    : (n.step ?? 0)
+}
 function notesAtStep(ch, step) {
-  return getPianoNotes(ch.id).filter(n => n.step === step)
+  return getPianoNotes(ch.id).filter(n => noteStep(n) === step)
 }
 function channelHasNotesAtStep(ch, step) {
-  return getPianoNotes(ch.id).some(n => n.step === step)
+  return getPianoNotes(ch.id).some(n => noteStep(n) === step)
 }
 function noteBottom(pitch) {
   return ((pitch - 36) / (84 - 36)) * 100
+}
+
+// ── Multi-bar detection ───────────────────────────────────────────────────────
+// Returns the furthest note-end tick for a piano channel in the current pattern.
+function channelPatternTicks(ch) {
+  const notes = getPianoNotes(ch.id)
+  if (!notes.length) return totalSteps.value * TICKS_PER_STEP
+  return notes.reduce(
+    (m, n) => Math.max(m, (n.startTick ?? 0) + (n.durationTicks ?? TICKS_PER_STEP)),
+    totalSteps.value * TICKS_PER_STEP,
+  )
+}
+
+// Number of whole bars the channel's notes span (minimum 1).
+function channelPatternBars(ch) {
+  return Math.max(1, Math.ceil(channelPatternTicks(ch) / CR_TICKS_PER_BAR))
+}
+
+// True when the channel has piano notes extending beyond 1 bar.
+function isMultiBarChannel(ch) {
+  return ch.mode === 'piano' && channelPatternBars(ch) > 1
 }
 
 // ── Graph Editor ──────────────────────────────────────────────────────────────
@@ -839,7 +900,7 @@ function startGeDrag(e, ch) {
 function isChannelFiring(ch) {
   if (!isPlaying.value || displayStep.value < 0 || ch.muted) return false
   if (ch.mode === 'steps') return !!getSteps(ch.id)[displayStep.value]
-  return getPianoNotes(ch.id).some(n => n.step === displayStep.value)
+  return getPianoNotes(ch.id).some(n => noteStep(n) === displayStep.value)
 }
 
 // ── Ghost-step helpers ────────────────────────────────────────────────────────
@@ -1338,6 +1399,40 @@ function commitRename() {
   letter-spacing: 0.15em; color: #252540; pointer-events: none;
 }
 .mini-pr:hover .mini-pr-hint { color: #4a4a6a; }
+
+/* ── Multi-bar panoramic mini-pr ─────────────────────────────── */
+.mini-pr-wide {
+  flex: 1; height: 28px; position: relative;
+  background: var(--bg-deeper); border: 1px solid var(--border-subtle);
+  border-radius: 3px; cursor: pointer; overflow: hidden;
+  transition: border-color 0.1s;
+}
+.mini-pr-wide:hover { border-color: #3a3a5a; }
+/* Internal bar-boundary dividers */
+.mini-bar-line {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: var(--border-subtle); pointer-events: none;
+}
+/* Playhead position indicator */
+.mini-wide-head {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: rgba(255,255,255,0.55); pointer-events: none; z-index: 4;
+}
+/* Absolutely-placed note blocks */
+.mini-note-wide {
+  position: absolute; height: 3px;
+  background: var(--accent); border-radius: 1px;
+  box-shadow: 0 0 3px color-mix(in srgb, var(--accent) 60%, transparent);
+  pointer-events: none;
+}
+/* Bar-count label (e.g. "4 BAR") */
+.mini-pr-bars-label {
+  position: absolute; top: 50%; right: 5px;
+  transform: translateY(-50%);
+  font-family: 'Share Tech Mono', monospace; font-size: 7px;
+  font-weight: 700; letter-spacing: 0.14em; white-space: nowrap;
+  color: #4ecdc488; pointer-events: none;
+}
 
 /* ── Graph Editor strip ──────────────────────────────────────────── */
 .ge-strip {

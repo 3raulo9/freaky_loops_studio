@@ -20,6 +20,14 @@
       :disabled="!canRedo"
     >↷</button>
     <div class="tb-tools-sep" />
+    <!-- Dump score log: extract the last 30 min of MIDI input into the selected piano channel -->
+    <button
+      class="tb-tool tb-tool-scorelog"
+      v-hint="'tools.scorelog'"
+      @click="dumpScoreLog"
+      title="Dump score log — extract last 30 min of played MIDI notes into selected piano channel"
+    >♩</button>
+    <div class="tb-tools-sep" />
     <button
       class="tb-tool tb-tool-save"
       v-hint="'tools.save'"
@@ -47,7 +55,7 @@ import { useStudio } from '../../store/studio.js'
 const {
   keyboardInputMode,
   canUndo, canRedo, undoAction, redoAction,
-  saveProject, loadProjectFile,
+  saveProject, loadProjectFile, dumpScoreLog,
 } = useStudio()
 
 const fileInput = ref(null)
