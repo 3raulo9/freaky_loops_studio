@@ -534,7 +534,7 @@ const {
   pianoRollOpen, kbOctave,
   patterns, currentPatternId, getSteps, getPianoNotes,
   addPattern, removePattern, duplicatePattern,
-  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, addWasmChannel, addCustomSynthChannel, addSubterraChannel, removeChannel, moveChannel,
+  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, addWasmChannel, addCustomSynthChannel, addSubterraChannel, removeChannel, moveChannel, setChannelMode,
   channelGroups, addGroup, removeGroup, renameGroup, assignChannelsToGroup,
   graphEditorOpen, graphParam,
   getStepVelocities, setStepVelocity, getStepPans, setStepPan, getStepPitches, setStepPitch,
@@ -949,8 +949,8 @@ function ctxAction(action) {
   ctxMenu.open = false
   ctxSubOpen.value = null
   if (!ch) return
-  if (action === 'to-piano')  { ch.mode = 'piano'; openOrSelectChannel(ch) }
-  if (action === 'to-steps')  { ch.mode = 'steps' }
+  if (action === 'to-piano')  { setChannelMode(ch.id, 'piano'); openOrSelectChannel(ch) }
+  if (action === 'to-steps')  { setChannelMode(ch.id, 'steps') }
   if (action === 'piano-roll')   openOrSelectChannel(ch)
   if (action === 'rename')       startRename(ch)
   if (action === 'clone')        cloneChannel(ch.id)

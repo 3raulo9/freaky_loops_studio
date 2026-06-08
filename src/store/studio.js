@@ -453,6 +453,7 @@ export const PIANO_HIGH  = 127
 export const NOTE_NAMES  = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 export const PIANO_KEYS  = Array.from({ length: PIANO_HIGH - PIANO_LOW + 1 }, (_, i) => PIANO_HIGH - i)
 export const TICKS_PER_STEP = 120   // 1/16 note at 480 PPQ
+export const STEPS_PITCH    = 72    // C5 — steps mode stores notes here in pianoNotes[]
 export const PLAYLIST_BARS  = 32
 export const PLAYLIST_CELLS = 32
 
@@ -2104,7 +2105,15 @@ export function useStudio() {
   // ── Pattern editing ───────────────────────────────────────────────────────────
   function toggleStep(channelId, step) {
     pushUndo()
-    const d = getPatData(channelId); d.steps[step] = !d.steps[step]
+    const d = getPatData(channelId)
+    d.steps[step] = !d.steps[step]
+    const startTick = step * TICKS_PER_STEP
+    const idx = d.pianoNotes.findIndex(n => n.startTick === startTick && n.pitch === STEPS_PITCH)
+    if (d.steps[step]) {
+      if (idx < 0) d.pianoNotes.push({ startTick, pitch: STEPS_PITCH, velocity: d.stepVelocities?.[step] ?? 0.8, durationTicks: TICKS_PER_STEP })
+    } else {
+      if (idx >= 0) d.pianoNotes.splice(idx, 1)
+    }
   }
 
   function togglePianoNote(channelId, step, pitch) {
@@ -2126,6 +2135,55 @@ export function useStudio() {
     const d = getPatData(channelId); d.steps.fill(false); d.pianoNotes.length = 0
   }
 
+  // Rebuild all C5 (STEPS_PITCH) pianoNotes from the steps[] boolean array.
+  // Called whenever steps data changes on a steps-mode channel so the playlist
+  // length calculation (which reads only pianoNotes) sees the correct pattern width.
+  function syncStepsToPianoNotes(channelId, patternId) {
+    const d = getPatData(channelId, patternId)
+    for (let i = d.pianoNotes.length - 1; i >= 0; i--) {
+      if (d.pianoNotes[i].pitch === STEPS_PITCH) d.pianoNotes.splice(i, 1)
+    }
+    d.steps.forEach((on, si) => {
+      if (on) d.pianoNotes.push({
+        startTick:     si * TICKS_PER_STEP,
+        pitch:         STEPS_PITCH,
+        velocity:      d.stepVelocities?.[si] ?? 0.8,
+        durationTicks: TICKS_PER_STEP,
+      })
+    })
+  }
+
+  // Rebuild steps[] from C5 pianoNotes (used when switching back to steps mode
+  // after the user may have drawn or erased C5 notes in the piano roll).
+  function syncPianoNotesToSteps(channelId, patternId) {
+    const d = getPatData(channelId, patternId)
+    d.steps.fill(false)
+    d.pianoNotes.forEach(n => {
+      if (n.pitch === STEPS_PITCH) {
+        const si = Math.round((n.startTick ?? 0) / TICKS_PER_STEP)
+        if (si >= 0 && si < d.steps.length) d.steps[si] = true
+      }
+    })
+  }
+
+  // Switch a channel between 'steps' and 'piano' mode, keeping data in sync.
+  function setChannelMode(channelId, mode) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch || ch.mode === mode) return
+    if (mode === 'piano') {
+      // Mirror steps → C5 pianoNotes across every pattern so piano roll shows them
+      Object.keys(patternData).forEach(pid => {
+        if (patternData[pid]?.[channelId]) syncStepsToPianoNotes(channelId, pid)
+      })
+    } else if (mode === 'steps') {
+      // Rebuild steps[] from C5 pianoNotes in case user edited them in piano roll
+      Object.keys(patternData).forEach(pid => {
+        if (patternData[pid]?.[channelId]) syncPianoNotesToSteps(channelId, pid)
+      })
+    }
+    ch.mode = mode
+  }
+
   // ── Step-state bitmask ops (compact channel-lane representation) ───────────────
   //   A lane's on/off state maps to one integer bitmask; pattern transforms are
   //   pure bitwise ops. BigInt scales the mask cleanly past 32 steps.
@@ -2138,6 +2196,7 @@ export function useStudio() {
   function setStepMask(channelId, mask, len = totalSteps.value, patternId) {
     const s = getSteps(channelId, patternId)
     for (let i = 0; i < len; i++) s[i] = ((mask >> BigInt(i)) & 1n) === 1n
+    syncStepsToPianoNotes(channelId, patternId)
   }
   function rotateSteps(channelId, dir = 1, len = totalSteps.value) {
     pushUndo()
@@ -2386,6 +2445,7 @@ export function useStudio() {
     for (let i = 0; i < totalSteps.value; i++) {
       d.steps[i] = i % every === 0
     }
+    syncStepsToPianoNotes(channelId)
   }
 
   // ── Clone channel ──────────────────────────────────────────────────────────
@@ -2658,6 +2718,15 @@ export function useStudio() {
       })
     })
 
+    // Mirror steps → C5 pianoNotes for any steps-mode channels in the loaded project
+    channels.forEach(ch => {
+      if (ch.mode === 'steps') {
+        Object.keys(patternData).forEach(pid => {
+          if (patternData[pid]?.[ch.id]) syncStepsToPianoNotes(ch.id, pid)
+        })
+      }
+    })
+
     // Pattern length overrides
     Object.keys(patternLengthOverrides).forEach(k => delete patternLengthOverrides[k])
     Object.assign(patternLengthOverrides, p.patternLengthOverrides ?? {})
@@ -2717,6 +2786,7 @@ export function useStudio() {
     addPattern, removePattern, duplicatePattern,
     // Pattern editing
     toggleStep, togglePianoNote, hasNote, clearChannel, clearAll,
+    setChannelMode, syncStepsToPianoNotes,
     // Step bitmask ops
     getStepMask, setStepMask, rotateSteps, invertSteps,
     // Step graph
