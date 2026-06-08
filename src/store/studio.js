@@ -1,4 +1,4 @@
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed, watch, toRaw } from 'vue'
 import { applyTheme } from '../themes.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
@@ -1784,6 +1784,34 @@ export function useStudio() {
   function setPatternLengthOverride(patId, ticks) { patternLengthOverrides[patId] = ticks }
   function clearPatternLengthOverride(patId)       { delete patternLengthOverrides[patId] }
 
+  // ── Play-time note index ───────────────────────────────────────────────────────
+  // Built from raw (non-Proxy) note data at play start so the scheduler hot path
+  // never touches Vue Proxies. Key: "patId:chId", Value: Map<stepIndex, Note[]>.
+  // stepIndex = Math.floor(note.startTick / TICKS_PER_STEP) — matches patternStep.
+  let _playNotes = null
+
+  function compilePlayNotes() {
+    const rawPD = toRaw(patternData)
+    const idx = new Map()
+    for (const pid of Object.keys(rawPD)) {
+      const pd = rawPD[pid]
+      if (!pd) continue
+      for (const cid of Object.keys(pd)) {
+        const notes = toRaw(pd[cid]?.pianoNotes)
+        if (!notes?.length) continue
+        const byStep = new Map()
+        for (const n of notes) {
+          if (n.muted) continue
+          const s = Math.floor((n.startTick ?? 0) / TICKS_PER_STEP)
+          if (!byStep.has(s)) byStep.set(s, [])
+          byStep.get(s).push(n)
+        }
+        idx.set(`${pid}:${cid}`, byStep)
+      }
+    }
+    _playNotes = idx
+  }
+
   // ── Scheduler ─────────────────────────────────────────────────────────────────
   const LOOK_AHEAD = 0.12
   const TICK_MS    = 25
@@ -1829,7 +1857,8 @@ export function useStudio() {
     const secPerBeat = 60 / bpm.value
     const secPerStep = secPerBeat / 4                 // Δstep (a 16th note)
     const clips = getClipsForCell(cell)
-    channels.forEach((ch, ci) => {
+    const rawChannels = toRaw(channels)
+    rawChannels.forEach((ch, ci) => {
       if (ch.muted) return
       // Global swing (S∈[0,1]): even steps delayed by up to Δstep/3 → triplet groove.
       const swingMix = ch.swingMix ?? 1.0
@@ -1866,23 +1895,26 @@ export function useStudio() {
           if (patternStep >= clipWidth * totalSteps.value) return
           const secPerTick    = (60 / bpm.value) / 4 / TICKS_PER_STEP
           const stepStartTick = patternStep * TICKS_PER_STEP
-          const stepEndTick   = stepStartTick + TICKS_PER_STEP
           // Clip boundary in ticks: notes must not sustain past this point (Step 7).
           // This prevents note bleed when two clips play back-to-back on the same track.
           const clipEndTick = (slipOffset + clipWidth * totalSteps.value) * TICKS_PER_STEP
-          d.pianoNotes
-            .filter(n => n.startTick >= stepStartTick && n.startTick < stepEndTick && !n.muted)
-            .forEach(note => {
-              const noteWhen     = when + (note.startTick - stepStartTick) * secPerTick
-              const nominalGate  = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
-              const ticksToEnd   = clipEndTick - note.startTick
-              // Clamp gate so the note is silenced exactly at the clip boundary.
+          // O(1) lookup into the pre-compiled step index — no Proxy, no .filter scan.
+          const _byStep = _playNotes?.get(`${patternId}:${ch.id}`)
+          const _stepNotes = _byStep?.get(patternStep)
+          if (_stepNotes) {
+            const rawParams = toRaw(ch.params)
+            for (const note of _stepNotes) {
+              if (note.muted) continue
+              const noteWhen    = when + (note.startTick - stepStartTick) * secPerTick
+              const nominalGate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
+              const ticksToEnd  = clipEndTick - note.startTick
               const gate = ticksToEnd > 0
                 ? Math.min(nominalGate, Math.max(0.01, ticksToEnd * secPerTick - 0.005))
                 : nominalGate
-              ch.fn(audioCtx, noteWhen, { ...ch.params, pitch: note.pitch + masterPitchSemis.value, velocity: note.velocity ?? 1, gate }, dest)
+              ch.fn(audioCtx, noteWhen, { ...rawParams, pitch: note.pitch + masterPitchSemis.value, velocity: note.velocity ?? 1, gate }, dest)
               registerVoice(noteWhen, gate + 0.12)
-            })
+            }
+          }
         }
       })
     })
@@ -2018,6 +2050,7 @@ export function useStudio() {
     playbackStartCellSeconds = startCell * getSecPerCell()
     noteQueue.length = 0; displayStep.value = -1; displayCell.value = startCell
     _lastBeat = -1
+    compilePlayNotes()                  // snapshot notes as plain JS before entering hot loop
     isPlaying.value = true              // engine confirmed → transport state syncs
     transportState.value = 'playing'
     schedulerTimer = setInterval(tick, TICK_MS)
@@ -2030,6 +2063,7 @@ export function useStudio() {
     transportState.value = 'paused'
     clearInterval(schedulerTimer); schedulerTimer = null
     noteQueue.length = 0; displayStep.value = -1
+    _playNotes = null   // rebuilt on next play so edits are picked up
     // Playhead stays at current position (pause)
   }
 
@@ -2041,6 +2075,7 @@ export function useStudio() {
     noteQueue.length = 0; displayStep.value = -1
     displayCell.value = 0; playbackStartCell.value = 0
     _lastBeat = -1
+    _playNotes = null   // rebuilt on next play so edits are picked up
   }
 
   function togglePlay() {
