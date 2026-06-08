@@ -2,15 +2,18 @@
   <div
     ref="rackEl"
     class="channel-rack"
-    :class="{ 'rack-drop': dropActive }"
+    :class="{ 'rack-drop': dropActive, 'rack-drop-midi': midiDropActive }"
     @click="closeAllMenus"
-    @dragenter.prevent="onSampleDragEnter"
-    @dragover.prevent="onSampleDragOver"
-    @dragleave="onSampleDragLeave"
-    @drop.prevent="onSampleDrop"
+    @dragenter.prevent="onRackDragEnter"
+    @dragover.prevent="onRackDragOver"
+    @dragleave="onRackDragLeave"
+    @drop.prevent="onRackDrop"
   >
-    <!-- Sample drop overlay -->
-    <div v-if="dropActive" class="rack-drop-hint">＋ Drop sample to add a channel</div>
+    <!-- Drop overlays -->
+    <div v-if="midiDropActive" class="rack-drop-hint rack-drop-hint--midi">
+      ♩ Drop MIDI file — imports as editable tracks
+    </div>
+    <div v-else-if="dropActive" class="rack-drop-hint">＋ Drop sample to add a channel</div>
 
     <!-- ── Pattern navigator ─────────────────────────────────────────── -->
     <div class="pattern-nav">
@@ -170,6 +173,14 @@
 
       <div class="rack-right">
         <span class="kb-badge">⌨ Z–M · {{ kbOctave }}</span>
+
+        <!-- MIDI import status toast -->
+        <span v-if="midiImportMsg" class="midi-import-msg">{{ midiImportMsg }}</span>
+
+        <!-- Hidden file input for the browse button inside synth picker -->
+        <input ref="midiFileInput" type="file" accept=".mid,.midi" style="display:none"
+          @change="onMidiFileInput" />
+
         <div class="add-synth-wrap" ref="synthPickerRef">
           <button class="add-ch-btn" @click.stop="showSynthPicker = !showSynthPicker" title="Add synth channel">
             + SYNTH ▾
@@ -194,6 +205,13 @@
             <div class="synth-pick-item" @click="addWasmChannel(); showSynthPicker = false">
               <span class="synth-pick-dot" style="background:#7b2fff"/>⬡ WASM Plugin
             </div>
+            <div class="synth-pick-section synth-pick-section--midi">MIDI IMPORT</div>
+            <div class="synth-pick-item synth-pick-item--midi"
+              @click="midiFileInput?.click(); showSynthPicker = false"
+              title="Import a .mid file — each instrument track becomes an editable channel">
+              <span class="synth-pick-dot" style="background:#e91e63"/>♩ Browse MIDI file…
+            </div>
+            <div class="synth-pick-hint">or drag a .mid file anywhere onto the rack</div>
           </div>
         </div>
       </div>
@@ -328,25 +346,26 @@
               <div v-else
                 class="mini-pr mini-pr-wide"
                 @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
-                <!-- Bar divider lines at each bar boundary -->
-                <div v-for="bi in (channelPatternBars(ch) - 1)" :key="'bl' + bi"
-                  class="mini-bar-line"
-                  :style="{ left: (bi / channelPatternBars(ch)) * 100 + '%' }" />
-                <!-- Playhead position in the wide view -->
+                <!-- Playhead lives outside v-memo so it updates every tick without re-rendering notes -->
                 <div v-if="isPlaying && displayStep >= 0"
                   class="mini-wide-head"
                   :style="{ left: ((displayStep * TICKS_PER_STEP) / channelPatternTicks(ch)) * 100 + '%' }" />
-                <!-- All notes, x = time %, y = pitch % -->
-                <div v-for="note in getPianoNotes(ch.id)"
-                  :key="`${note.startTick}-${note.pitch}`"
-                  class="mini-note-wide"
-                  :style="{
-                    left:   ((note.startTick ?? 0) / channelPatternTicks(ch)) * 100 + '%',
-                    width:  Math.max(0.5, ((note.durationTicks ?? TICKS_PER_STEP) / channelPatternTicks(ch)) * 100) + '%',
-                    bottom: noteBottom(note.pitch) + '%',
-                  }" />
-                <!-- Bar-count readout -->
-                <span class="mini-pr-bars-label">{{ channelPatternBars(ch) }} BAR</span>
+                <!-- Static content: bar lines + notes. v-memo skips this subtree when only
+                     displayStep changes; it re-renders only when the note count or bar count changes. -->
+                <template v-memo="[ch.id, channelPatternBars(ch), getPianoNotes(ch.id).length]">
+                  <div v-for="bi in (channelPatternBars(ch) - 1)" :key="'bl' + bi"
+                    class="mini-bar-line"
+                    :style="{ left: (bi / channelPatternBars(ch)) * 100 + '%' }" />
+                  <div v-for="note in getMiniNotes(ch.id)"
+                    :key="`${note.startTick}-${note.pitch}`"
+                    class="mini-note-wide"
+                    :style="{
+                      left:   ((note.startTick ?? 0) / channelPatternTicks(ch)) * 100 + '%',
+                      width:  Math.max(0.5, ((note.durationTicks ?? TICKS_PER_STEP) / channelPatternTicks(ch)) * 100) + '%',
+                      bottom: noteBottom(note.pitch) + '%',
+                    }" />
+                  <span class="mini-pr-bars-label">{{ channelPatternBars(ch) }} BAR</span>
+                </template>
               </div>
 
             </template>
@@ -543,6 +562,7 @@ const {
   setCutSelf, splitByChannel, addSampleChannel,
   rotateSteps, invertSteps,
   getPatternLengthTicks,
+  importMidiFile,
 } = useStudio()
 
 // Local MIDI-tick constant (matches store's TICKS_PER_STEP = 120)
@@ -558,16 +578,73 @@ const compactSteps = computed(() => stepPx.value < STEP_MIN_PX)
 const stepCols = computed(() => compactSteps.value ? Math.ceil(totalSteps.value / 2) : totalSteps.value)
 let _rackRO = null
 
-// ── Sample drag-and-drop from the Browser ─────────────────────────────────────
-const dropActive = ref(false)
+// ── MIDI file import ──────────────────────────────────────────────────────────
+const midiFileInput = ref(null)
+const midiImportMsg = ref('')
+let   _midiMsgTimer = null
+
+async function _importMidiFileObj(file) {
+  try {
+    const buffer = await file.arrayBuffer()
+    const { channelCount } = importMidiFile(buffer, file.name)
+    midiImportMsg.value = channelCount > 0
+      ? `✓ Imported "${file.name.replace(/\.(mid|midi)$/i, '')}" — ${channelCount} track${channelCount > 1 ? 's' : ''}`
+      : 'No note data found in this MIDI file'
+  } catch (err) {
+    midiImportMsg.value = '✕ Could not parse: ' + err.message
+  }
+  clearTimeout(_midiMsgTimer)
+  _midiMsgTimer = setTimeout(() => { midiImportMsg.value = '' }, 4000)
+}
+
+async function onMidiFileInput(e) {
+  const file = e.target.files?.[0]
+  if (!file) return
+  e.target.value = ''
+  await _importMidiFileObj(file)
+}
+
+// ── Unified drag-and-drop: Browser samples + desktop MIDI files ───────────────
+const dropActive     = ref(false)  // browser sample asset drag
+const midiDropActive = ref(false)  // desktop MIDI file drag
 let _dragDepth = 0
+
 function _hasAsset(e) { return [...(e.dataTransfer?.types ?? [])].includes('application/x-fls-asset') }
-function onSampleDragEnter(e) { if (!_hasAsset(e)) return; _dragDepth++; dropActive.value = true }
-function onSampleDragOver(e)  { if (_hasAsset(e)) e.dataTransfer.dropEffect = 'copy' }
-function onSampleDragLeave()  { if (--_dragDepth <= 0) { _dragDepth = 0; dropActive.value = false } }
-function onSampleDrop(e) {
-  _dragDepth = 0; dropActive.value = false
-  const id = e.dataTransfer.getData('application/x-fls-asset')
+function _hasFiles(e) { return [...(e.dataTransfer?.types ?? [])].includes('Files') }
+
+function onRackDragEnter(e) {
+  const asset = _hasAsset(e)
+  const files = _hasFiles(e)
+  if (!asset && !files) return
+  _dragDepth++
+  if (asset) dropActive.value = true
+  else       midiDropActive.value = true
+}
+function onRackDragOver(e) {
+  if (_hasAsset(e) || _hasFiles(e)) e.dataTransfer.dropEffect = 'copy'
+}
+function onRackDragLeave() {
+  if (--_dragDepth <= 0) {
+    _dragDepth = 0
+    dropActive.value     = false
+    midiDropActive.value = false
+  }
+}
+async function onRackDrop(e) {
+  _dragDepth = 0
+  dropActive.value     = false
+  midiDropActive.value = false
+
+  // Desktop MIDI file takes priority
+  const files    = [...(e.dataTransfer?.files ?? [])]
+  const midiFile = files.find(f => /\.(mid|midi)$/i.test(f.name))
+  if (midiFile) {
+    await _importMidiFileObj(midiFile)
+    return
+  }
+
+  // Browser sample asset
+  const id    = e.dataTransfer.getData('application/x-fls-asset')
   const asset = id && getAsset(id)
   if (asset) addSampleChannel(asset)
 }
@@ -815,6 +892,11 @@ function noteStep(n) {
 function notesAtStep(ch, step) {
   return getPianoNotes(ch.id).filter(n => noteStep(n) === step)
 }
+const MINI_NOTE_CAP = 200
+function getMiniNotes(chId) {
+  const notes = getPianoNotes(chId)
+  return notes.length > MINI_NOTE_CAP ? notes.slice(0, MINI_NOTE_CAP) : notes
+}
 function channelHasNotesAtStep(ch, step) {
   return getPianoNotes(ch.id).some(n => noteStep(n) === step)
 }
@@ -897,10 +979,25 @@ function startGeDrag(e, ch) {
 }
 
 // ── Activity LED ──────────────────────────────────────────────────────────────
+// Per-channel computed Set of active step indices — built once from pianoNotes,
+// invalidated automatically when pianoNotes changes (reactive dependency).
+// Replaces the O(N) .some() scan on every tick with an O(1) Set.has() lookup.
+const _activeStepSets = new Map()
+function getActiveStepsSet(chId) {
+  if (!_activeStepSets.has(chId)) {
+    _activeStepSets.set(chId, computed(() => {
+      const set = new Set()
+      for (const n of getPianoNotes(chId)) set.add(noteStep(n))
+      return set
+    }))
+  }
+  return _activeStepSets.get(chId).value
+}
+
 function isChannelFiring(ch) {
   if (!isPlaying.value || displayStep.value < 0 || ch.muted) return false
   if (ch.mode === 'steps') return !!getSteps(ch.id)[displayStep.value]
-  return getPianoNotes(ch.id).some(n => noteStep(n) === displayStep.value)
+  return getActiveStepsSet(ch.id).has(displayStep.value)
 }
 
 // ── Ghost-step helpers ────────────────────────────────────────────────────────
@@ -1046,7 +1143,8 @@ function commitRename() {
   display: flex; flex-direction: column; flex: 1;
   overflow: hidden; background: var(--bg-base); position: relative;
 }
-.channel-rack.rack-drop { box-shadow: inset 0 0 0 2px #f1c40f; }
+.channel-rack.rack-drop      { box-shadow: inset 0 0 0 2px #f1c40f; }
+.channel-rack.rack-drop-midi { box-shadow: inset 0 0 0 2px #e91e63; }
 .rack-drop-hint {
   position: absolute; inset: 0; z-index: 2500;
   display: flex; align-items: center; justify-content: center;
@@ -1175,6 +1273,28 @@ function commitRename() {
   border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.15s;
 }
 .add-ch-btn:hover { border-color: #4ecdc4; color: #4ecdc4; }
+.midi-import-msg {
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.06em; color: #4ecdc4; white-space: nowrap;
+  animation: mpr-fadein 0.2s ease;
+}
+@keyframes mpr-fadein { from { opacity: 0; transform: translateY(4px) } to { opacity: 1; transform: none } }
+
+/* MIDI drop overlay */
+.rack-drop-hint--midi {
+  background: linear-gradient(135deg, #e91e6322, #9b59b611);
+  border: 1px dashed #e91e6366;
+  color: #e91e63cc;
+}
+
+/* MIDI section inside synth picker */
+.synth-pick-section--midi { color: #e91e6399; border-top: 1px solid #e91e6322; margin-top: 4px; padding-top: 6px; }
+.synth-pick-item--midi:hover .synth-pick-dot { box-shadow: 0 0 6px #e91e63; }
+.synth-pick-hint {
+  padding: 3px 10px 6px;
+  font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 500;
+  letter-spacing: 0.06em; color: #44445a; line-height: 1.4;
+}
 .synth-picker {
   position: absolute; right: 0; top: calc(100% + 5px); z-index: 2000;
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 7px;

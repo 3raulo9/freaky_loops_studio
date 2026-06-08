@@ -28,6 +28,10 @@
       @click="themeModalOpen = true">
       <span class="tb-win-icon">◑</span><span class="tb-win-lbl">THEME</span>
     </button>
+    <button class="tb-win tb-win-midi" v-hint="'win.midi'" title="MIDI Port Router / GM Renderer"
+      @click="midiRouterOpen = true">
+      <span class="tb-win-icon">♩</span><span class="tb-win-lbl">MIDI</span>
+    </button>
 
     <!-- Arrangement / layout preset selector -->
     <button class="tb-win tb-win-layout" v-hint="'win.layout'" title="Workspace layout presets"
@@ -68,7 +72,7 @@ import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../../store/studio.js'
 
 const {
-  renderModalOpen, themeModalOpen,
+  renderModalOpen, themeModalOpen, midiRouterOpen,
   browserOpen, activeArrangement,
   windowState, activateWindow, toggleDetach, applyArrangement,
 } = useStudio()
