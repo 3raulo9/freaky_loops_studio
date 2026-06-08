@@ -5,6 +5,8 @@ import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
 import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
+import { parseMidi } from '../midi/midiParser.js'
+import { convertMidiToTracks } from '../midi/midiImport.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
 import {
@@ -626,6 +628,114 @@ export function useStudio() {
     currentPatternId.value = id
   }
 
+  // Drum type → channel config for imported MIDI channel 9 tracks
+  const _DRUM_IMPORT = {
+    kick:  { type: 'drum', instrumentType: 'kick',  color: '#e74c3c',
+             params: { pitch: 60, decay: 0.55, punch: 0.65 },
+             knobs: [
+               { key: 'pitch', label: 'PITCH', min: 30,  max: 140, decimals: 0 },
+               { key: 'decay', label: 'DECAY', min: 0.15, max: 1.6, decimals: 2 },
+               { key: 'punch', label: 'PUNCH', min: 0,    max: 1,   decimals: 2 },
+             ], fn: playKick },
+    snare: { type: 'drum', instrumentType: 'snare', color: '#f39c12',
+             params: { snap: 0.7, tone: 210, decay: 0.28 },
+             knobs: [
+               { key: 'snap',  label: 'SNAP',  min: 0,   max: 1,   decimals: 2 },
+               { key: 'tone',  label: 'TONE',  min: 80,  max: 700, decimals: 0 },
+               { key: 'decay', label: 'DECAY', min: 0.04, max: 0.9, decimals: 2 },
+             ], fn: playSnare },
+    hihat: { type: 'drum', instrumentType: 'hihat', color: '#2ecc71',
+             params: { decay: 0.07, tone: 0.5, mix: 0.75 },
+             knobs: [
+               { key: 'decay', label: 'DECAY', min: 0.01, max: 0.45, decimals: 2 },
+               { key: 'tone',  label: 'TONE',  min: 0,    max: 1,    decimals: 2 },
+               { key: 'mix',   label: 'MIX',   min: 0,    max: 1,    decimals: 2 },
+             ], fn: playHiHat },
+    clash: { type: 'drum', instrumentType: 'clash', color: '#9b59b6',
+             params: { decay: 1.2, tone: 0.45, ring: 0.4 },
+             knobs: [
+               { key: 'decay', label: 'DECAY', min: 0.2, max: 4.0, decimals: 2 },
+               { key: 'tone',  label: 'TONE',  min: 0,   max: 1,   decimals: 2 },
+               { key: 'ring',  label: 'RING',  min: 0,   max: 1,   decimals: 2 },
+             ], fn: playClash },
+  }
+
+  /**
+   * Import a MIDI binary buffer into the channel rack.
+   *
+   * Creates a new named pattern for the file, adds one channel per active MIDI
+   * track using the closest matching FM synth preset (GM program → FM_PRESETS key),
+   * populates every channel's pianoNotes from the MIDI note data, and sets the
+   * project BPM to the file's primary tempo.
+   *
+   * The result is a fully editable project: notes in the piano roll, patterns in
+   * the playlist, instruments swappable via the channel rack — just like music
+   * composed natively in the app.
+   */
+  function importMidiFile(buffer, filename = 'MIDI IMPORT') {
+    const parsed = parseMidi(buffer)
+    const { bpm: midiBpm, patternName, tracks } = convertMidiToTracks(parsed, filename)
+
+    if (tracks.length === 0) return { channelCount: 0 }
+
+    // Sync project tempo to the MIDI file
+    bpm.value = midiBpm
+
+    // Create a new pattern named after the file
+    const patId = 'p' + (++_pid + 1)
+    patterns.push({ id: patId, name: patternName, color: '#e91e63' })
+    patternData[patId] = {}
+    currentPatternId.value = patId
+
+    let firstCh  = null
+    let maxTick  = 0
+
+    for (const track of tracks) {
+      let ch
+      if (track.drumType) {
+        const cfg = _DRUM_IMPORT[track.drumType] ?? _DRUM_IMPORT.kick
+        ch = makeChannel({ name: track.name, mode: 'piano', ...cfg })
+      } else {
+        const preset = FM_PRESETS[track.fmKey] ?? FM_PRESETS.pad
+        ch = makeChannel({
+          name:   track.name,
+          color:  preset.color,
+          mode:   'piano',
+          params: { ...preset.params },
+          knobs:  preset.knobs.map(k => ({ ...k })),
+          fn:     preset.fn,
+        })
+      }
+
+      channels.push(ch)
+      if (!firstCh) firstCh = ch
+
+      // Assign the notes array in one shot — single reactive trigger instead of N pushes.
+      // Plain object copies; individual note properties don't need deep Vue tracking.
+      const notes = track.notes.map(n => ({ ...n }))
+      getPatData(ch.id, patId).pianoNotes = notes
+
+      // Track the furthest tick so we can set a length override below
+      if (notes.length > 0) {
+        const last = notes[notes.length - 1]
+        const end  = last.startTick + (last.durationTicks ?? TICKS_PER_STEP)
+        if (end > maxTick) maxTick = end
+      }
+    }
+
+    // Pin the pattern length so getPatternAutoLengthTicks never has to scan all notes.
+    // Rounded up to the nearest bar (480 × 4 ticks).
+    if (maxTick > 0) {
+      const barTicks    = TICKS_PER_STEP * 16  // one 4/4 bar at 1/16 resolution = 1920 ticks
+      const roundedTick = Math.ceil(maxTick / barTicks) * barTicks
+      setPatternLengthOverride(patId, roundedTick)
+    }
+
+    if (audioCtx) rebuildGains()
+    if (firstCh) selectedChannelId.value = firstCh.id
+    return { channelCount: tracks.length }
+  }
+
   function removePattern(id) {
     if (patterns.length <= 1) return
     const idx = patterns.findIndex(p => p.id === id)
@@ -900,6 +1010,7 @@ export function useStudio() {
   const pianoRollOpen      = ref(false)
   const renderModalOpen    = ref(false)
   const themeModalOpen     = ref(false)
+  const midiRouterOpen     = ref(false)
   const currentTheme       = ref(localStorage.getItem('fls-theme') ?? 'void')
   applyTheme(currentTheme.value)
   const kbOctave           = ref(4)
@@ -1649,16 +1760,18 @@ export function useStudio() {
   // Falls back to totalSteps * TICKS_PER_STEP when the pattern has no piano notes.
   function getPatternAutoLengthTicks(patId) {
     const pid = patId ?? currentPatternId.value
+    // If a manual override exists, skip the O(N) scan entirely
+    if (patternLengthOverrides[pid] != null) return patternLengthOverrides[pid]
     const pd  = patternData[pid]
     let maxTick = totalSteps.value * TICKS_PER_STEP
     if (pd) {
-      Object.values(pd).forEach(d => {
-        if (!d?.pianoNotes) return
-        d.pianoNotes.forEach(n => {
+      for (const d of Object.values(pd)) {
+        if (!d?.pianoNotes) continue
+        for (const n of d.pianoNotes) {
           const end = (n.startTick ?? 0) + (n.durationTicks ?? TICKS_PER_STEP)
           if (end > maxTick) maxTick = end
-        })
-      })
+        }
+      }
     }
     return maxTick
   }
@@ -2783,7 +2896,7 @@ export function useStudio() {
     // Patterns
     patterns, currentPatternId, pickerPatternId, patternData,
     getPatData, getSteps, getPianoNotes,
-    addPattern, removePattern, duplicatePattern,
+    addPattern, removePattern, duplicatePattern, importMidiFile,
     // Pattern editing
     toggleStep, togglePianoNote, hasNote, clearChannel, clearAll,
     setChannelMode, syncStepsToPianoNotes,
@@ -2816,7 +2929,7 @@ export function useStudio() {
     // Utilities
     getUnusedPatternIds,
     // UI state
-    mainView, pianoRollOpen, renderModalOpen, themeModalOpen, currentTheme, kbOctave,
+    mainView, pianoRollOpen, renderModalOpen, themeModalOpen, midiRouterOpen, currentTheme, kbOctave,
     gridSnap, keyboardInputMode,
     // Snap / quantization engine
     ppq, altFreeform, tickDurationSec, ticksPerGridCell, snapTicks, snapBars,

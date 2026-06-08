@@ -201,8 +201,8 @@
                 class="pr-ghost" :style="ghostStyle(gn)" />
             </template>
 
-            <!-- Active channel notes -->
-            <div v-for="(note, idx) in currentNotes" :key="'n' + idx"
+            <!-- Active channel notes — only the viewport-visible subset is rendered -->
+            <div v-for="{ note, idx } in visibleNotesWithIdx" :key="'n' + idx"
               class="pr-note"
               :class="{ selected: selectedNotes.has(idx), muted: note.muted }"
               :style="noteStyle(note)"
@@ -307,7 +307,7 @@ const tool        = ref('draw')
 const pxPerStep   = ref(40)
 const snapTicks   = ref(120)   // default 1/16 note
 const ctrlTarget  = ref('velocity')
-const ghostsEnabled = ref(true)
+const ghostsEnabled = ref(false)
 const prFocused   = ref(false)
 const chDropOpen  = ref(false)
 
@@ -375,11 +375,37 @@ const playheadX  = computed(() => Math.max(0, displayStep.value) * pxPerStep.val
 const currentNotes   = computed(() => getPatData(targetChId.value).pianoNotes)
 const selectedNotes  = ref(new Set())
 
+const GHOST_NOTE_CAP = 800  // prevent O(N×channels) blow-up on large imports
 const ghostNotes = computed(() => {
   if (!ghostsEnabled.value) return []
-  return channels
-    .filter(c => c.id !== targetChId.value && c.mode === 'piano')
-    .flatMap(c => getPatData(c.id).pianoNotes.map(n => ({ ...n, _color: c.color })))
+  const result = []
+  for (const c of channels) {
+    if (c.id === targetChId.value || c.mode !== 'piano') continue
+    for (const n of getPatData(c.id).pianoNotes) {
+      if (result.length >= GHOST_NOTE_CAP) return result
+      result.push({ ...n, _color: c.color })
+    }
+  }
+  return result
+})
+
+// Viewport-clipped note list — only the notes visible (or within 2 bars) of the
+// current horizontal scroll window are returned. Original indices are preserved
+// so selectedNotes.has(idx) and onNoteDown($event, idx) still target the right note.
+const visibleNotesWithIdx = computed(() => {
+  const all = currentNotes.value
+  const ppt = pxPerTick.value
+  if (ppt <= 0) return all.map((note, idx) => ({ note, idx }))
+  const BUFFER = TICKS_PER_BAR * 2
+  const visStart = Math.max(0, scrollLeftVal.value / ppt - BUFFER)
+  const visEnd   = (scrollLeftVal.value + scrollClientWidth.value) / ppt + BUFFER
+  const result = []
+  for (let idx = 0; idx < all.length; idx++) {
+    const note = all[idx]
+    const noteEnd = note.startTick + (note.durationTicks ?? TICKS_PER_STEP)
+    if (noteEnd >= visStart && note.startTick <= visEnd) result.push({ note, idx })
+  }
+  return result
 })
 
 function clearNotes() {
@@ -389,12 +415,21 @@ function clearNotes() {
 }
 
 // ── Ruler / grid line marks ────────────────────────────────────────────────────
+// Only generate marks/lines inside the visible scroll viewport + a 1-bar buffer
+// on each side. This keeps DOM count constant (~20-40 divs) regardless of song
+// length, which is critical after importing long MIDI files.
 const rulerMarks = computed(() => {
+  const ppt = pxPerTick.value
+  if (ppt <= 0) return []
+  const left  = scrollLeftVal.value
+  const right = left + scrollClientWidth.value
+  const startT = Math.max(0,                Math.floor((left  / ppt) / TICKS_PER_BEAT) * TICKS_PER_BEAT)
+  const endT   = Math.min(canvasTicks.value, Math.ceil ((right / ppt) / TICKS_PER_BEAT) * TICKS_PER_BEAT + TICKS_PER_BEAT)
   const marks = []
-  for (let t = 0; t < canvasTicks.value; t += TICKS_PER_BEAT) {
+  for (let t = startT; t < endT; t += TICKS_PER_BEAT) {
     const isBar = t % TICKS_PER_BAR === 0
     marks.push({
-      x: t * pxPerTick.value, isBar, isBeat: !isBar,
+      x: t * ppt, isBar, isBeat: !isBar,
       label: isBar
         ? String(t / TICKS_PER_BAR + 1)
         : (pxPerStep.value >= 12 ? String(Math.floor(t / TICKS_PER_BEAT) + 1) : ''),
@@ -404,8 +439,15 @@ const rulerMarks = computed(() => {
 })
 
 const gridLines = computed(() => {
+  const ppt  = pxPerTick.value
+  const snap = snapTicks.value
+  if (ppt <= 0 || snap <= 0) return []
+  const left  = scrollLeftVal.value
+  const right = left + scrollClientWidth.value
+  const startT = Math.max(0,                Math.floor((left  / ppt) / snap) * snap)
+  const endT   = Math.min(canvasTicks.value, Math.ceil ((right / ppt) / snap) * snap + snap)
   const lines = []
-  for (let t = 0; t <= canvasTicks.value; t += snapTicks.value) {
+  for (let t = startT; t <= endT; t += snap) {
     const isBar  = t % TICKS_PER_BAR === 0
     const isBeat = !isBar && t % TICKS_PER_BEAT === 0
     const isSnap = !isBar && !isBeat
@@ -515,15 +557,19 @@ const ctrlViewRef  = ref(null)
 const gridRef      = ref(null)
 
 // Reactive viewport state — updated by onScroll so canvasTicks can depend on them
-const scrollLeftVal    = ref(0)    // scrollRef.scrollLeft
-const scrollClientWidth = ref(800) // scrollRef.clientWidth (initial guess, fixed on mount)
-const horiMouseX       = ref(0)   // rightmost grid-px the mouse has ever reached (high-water)
+const scrollLeftVal     = ref(0)    // scrollRef.scrollLeft
+const scrollClientWidth  = ref(800) // scrollRef.clientWidth (initial guess, fixed on mount)
+const scrollTopVal       = ref(0)   // scrollRef.scrollTop
+const scrollClientHeight = ref(600) // scrollRef.clientHeight (initial guess)
+const horiMouseX         = ref(0)   // rightmost grid-px the mouse has ever reached (high-water)
 
 // ── Scroll sync ────────────────────────────────────────────────────────────────
 function onScroll() {
   const el = scrollRef.value; if (!el) return
-  scrollLeftVal.value    = el.scrollLeft
-  scrollClientWidth.value = el.clientWidth
+  scrollLeftVal.value      = el.scrollLeft
+  scrollClientWidth.value  = el.clientWidth
+  scrollTopVal.value       = el.scrollTop
+  scrollClientHeight.value = el.clientHeight
   if (keysInnerRef.value) keysInnerRef.value.style.transform = `translateY(-${el.scrollTop}px)`
   if (ctrlInnerRef.value) ctrlInnerRef.value.style.transform  = `translateX(-${el.scrollLeft}px)`
 }
@@ -1009,9 +1055,11 @@ onMounted(() => {
   nextTick(() => {
     if (scrollRef.value) {
       const el = scrollRef.value
-      scrollClientWidth.value = el.clientWidth   // init viewport width for canvasTicks
+      scrollClientWidth.value  = el.clientWidth    // init viewport width for canvasTicks
+      scrollClientHeight.value = el.clientHeight   // init viewport height for note virtualization
       const c4idx = PIANO_KEYS.indexOf(60)
       el.scrollTop = Math.max(0, c4idx * ROW_H - el.clientHeight / 2 + ROW_H * 2)
+      scrollTopVal.value = el.scrollTop
     }
   })
 })

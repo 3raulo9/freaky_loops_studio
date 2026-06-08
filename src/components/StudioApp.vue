@@ -169,6 +169,9 @@
     <!-- ── Theme modal ───────────────────────────────────────────────── -->
     <ThemeModal v-if="themeModalOpen" @close="themeModalOpen = false" />
 
+    <!-- ── MIDI Port Router ──────────────────────────────────────────── -->
+    <MidiPortRouter v-if="midiRouterOpen" @close="midiRouterOpen = false" />
+
     <!-- ── Bottom: Custom Synth panel (when custom synth selected + piano roll closed) ── -->
     <div
       v-if="selectedChannel.type === 'custom' && mainView === 'sequencer' && !pianoRollOpen"
@@ -246,8 +249,9 @@ import Mixer       from './Mixer.vue'
 import PianoRoll   from './PianoRoll.vue'
 import StepGrid    from './StepGrid.vue'
 import Knob        from './Knob.vue'
-import RenderModal from './RenderModal.vue'
-import ThemeModal  from './ThemeModal.vue'
+import RenderModal    from './RenderModal.vue'
+import ThemeModal     from './ThemeModal.vue'
+import MidiPortRouter from './MidiPortRouter.vue'
 import CustomSynth from './CustomSynth.vue'
 import Subterra    from './Subterra.vue'
 import FloatWindow from './FloatWindow.vue'
@@ -255,7 +259,7 @@ import BrowserPanel from './BrowserPanel.vue'
 import ExtendedHud from './ExtendedHud.vue'
 
 const {
-  mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen, themeModalOpen,
+  mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen, themeModalOpen, midiRouterOpen,
   clearChannel, handleKeyDown, handleKeyUp,
   addDrumModule, removeDrumModule,
   browserOpen, detachedWindows, redockWindow, extendedHudOpen, browserWidth,
