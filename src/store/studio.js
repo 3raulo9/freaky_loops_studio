@@ -7,6 +7,8 @@ import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
 import { parseMidi } from '../midi/midiParser.js'
 import { convertMidiToTracks } from '../midi/midiImport.js'
+import { makeGMPlayFn, preloadGMInstrument } from '../audio/gmSynth.js'
+import { GM_INSTRUMENTS, GM_CATEGORIES } from '../midi/gmDictionary.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
 import {
@@ -696,14 +698,14 @@ export function useStudio() {
         const cfg = _DRUM_IMPORT[track.drumType] ?? _DRUM_IMPORT.kick
         ch = makeChannel({ name: track.name, mode: 'piano', ...cfg })
       } else {
-        const preset = FM_PRESETS[track.fmKey] ?? FM_PRESETS.pad
+        const prog = Math.max(0, Math.min(127, track.gmProgram ?? 0))
         ch = makeChannel({
           name:   track.name,
-          color:  preset.color,
+          color:  gmChannelColor(prog),
           mode:   'piano',
-          params: { ...preset.params },
-          knobs:  preset.knobs.map(k => ({ ...k })),
-          fn:     preset.fn,
+          fn:     makeGMPlayFn(prog),
+          params: { gmProgram: prog },
+          knobs:  [],
         })
       }
 
@@ -733,6 +735,16 @@ export function useStudio() {
 
     if (audioCtx) rebuildGains()
     if (firstCh) selectedChannelId.value = firstCh.id
+
+    // Kick off sample loading in the background so instruments are ready before play.
+    if (audioCtx) {
+      for (const track of tracks) {
+        if (!track.drumType && track.gmProgram != null) {
+          preloadGMInstrument(audioCtx, track.gmProgram)
+        }
+      }
+    }
+
     return { channelCount: tracks.length }
   }
 
@@ -2408,6 +2420,35 @@ export function useStudio() {
     selectedChannelId.value = ch.id
   }
 
+  // One color per GM category (16 categories, index matches GM_CATEGORIES order)
+  const GM_CAT_COLORS = [
+    '#f59e0b','#f97316','#84cc16','#22c55e','#0d9488',
+    '#3b82f6','#6366f1','#eab308','#ef4444','#10b981',
+    '#ec4899','#8b5cf6','#a855f7','#d97706','#dc2626','#6b7280',
+  ]
+
+  function gmChannelColor(program) {
+    const idx = GM_CATEGORIES.findIndex(c => program >= c.range[0] && program <= c.range[1])
+    return GM_CAT_COLORS[idx] ?? '#6b7280'
+  }
+
+  function addGMChannel(program) {
+    const prog = Math.max(0, Math.min(127, program))
+    const name = (GM_INSTRUMENTS[prog] ?? 'SYNTH').split(/[\s(]/)[0].toUpperCase().slice(0, 10)
+    const ch = makeChannel({
+      name,
+      color:  gmChannelColor(prog),
+      mode:   'piano',
+      fn:     makeGMPlayFn(prog),
+      params: { gmProgram: prog },
+      knobs:  [],
+    })
+    channels.push(ch)
+    if (audioCtx) rebuildGains()
+    selectedChannelId.value = ch.id
+    if (audioCtx) preloadGMInstrument(audioCtx, prog)
+  }
+
   function addWasmChannel() {
     const ch = makeChannel({
       name:  'PLUGIN ' + (channels.filter(c => c.type === 'wasm').length + 1),
@@ -2924,9 +2965,10 @@ export function useStudio() {
     pushUndo,
     // Channels
     channels, selectedChannelId, selectedChannel,
-    soloChannel, addChannel, addFMChannel, addWasmChannel, loadWasmForChannel,
+    soloChannel, addChannel, addFMChannel, addGMChannel, addWasmChannel, loadWasmForChannel,
     addCustomSynthChannel, getCustomSynthNode,
     addSubterraChannel, getSubterraNode,
+    GM_CATEGORIES, GM_CAT_COLORS, GM_INSTRUMENTS,
     removeChannel, moveChannel,
     // Patterns
     patterns, currentPatternId, pickerPatternId, patternData,

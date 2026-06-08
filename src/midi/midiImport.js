@@ -1,54 +1,16 @@
 // Convert a parsed MIDI file into channel-rack track descriptors.
 //
 // Each MIDI channel becomes a track with:
-//   - fmKey:    key into FM_PRESETS (closest matching synth sound)
-//   - drumType: 'kick'|'snare'|'hihat'|'clash' (only for channel 9 groups)
-//   - notes:    pianoNotes-format array ready for patternData
+//   - gmProgram: GM program number 0-127 (melodic channels)
+//   - drumType:  'kick'|'snare'|'hihat'|'clash' (only for channel 9 groups)
+//   - notes:     pianoNotes-format array ready for patternData
 //
 // Tick conversion: MIDI ticks → project ticks at 480 PPQ
 //   projTick = round(midiTick × 480 / midiTicksPerBeat)
 
-import { GM_INSTRUMENTS, getCategoryForProgram } from './gmDictionary.js'
+import { GM_INSTRUMENTS } from './gmDictionary.js'
 
 const PROJ_TPB = 480 // TICKS_PER_STEP (120) × 4 steps per beat
-
-// ── GM program (0–127) → FM_PRESETS key ─────────────────────────────────────
-// Maps each General MIDI program to the closest synthesized equivalent
-// available in FM_PRESETS.
-const GM_TO_FM_KEY = [
-  // 0-7   Piano
-  'rhodes','rhodes','wurly','clav','rhodes','wurly','clav','clav',
-  // 8-15  Chromatic Percussion
-  'celeste','glocken','bell','vibe','marimba','xylophone','bell','kalimba',
-  // 16-23 Organ
-  'organ','organ','organ','organ','organ','organ','harmonica','organ',
-  // 24-31 Guitar
-  'guitar','guitar','guitar','guitar','distgtr','distgtr','distgtr','guitar',
-  // 32-39 Bass
-  'bass','bass','bass','bass','bass','bass','moog','moog',
-  // 40-47 Strings
-  'strings','strings','cello','cello','strings','strings','pluck','timpani',
-  // 48-55 Ensemble
-  'strings','strings','strings','strings','choir','choir','pad','brass',
-  // 56-63 Brass
-  'trumpet','brass','brass','trumpet','brass','brass','brass','brass',
-  // 64-71 Reed
-  'clarinet','clarinet','clarinet','clarinet','oboe','oboe','oboe','clarinet',
-  // 72-79 Pipe
-  'flute','flute','flute','flute','flute','flute','flute','flute',
-  // 80-87 Synth Lead
-  'moog','moog','flute','moog','moog','choir','moog','moog',
-  // 88-95 Synth Pad
-  'pad','pad','pad','choir','pad','pad','pad','pad',
-  // 96-103 Synth FX
-  'pad','pad','pad','pad','pad','wobble','wobble','wobble',
-  // 104-111 Ethnic
-  'sitar','pluck','pluck','koto','kalimba','organ','strings','oboe',
-  // 112-119 Percussive
-  'bell','bell','steeldrum','marimba','marimba','marimba','bass','pad',
-  // 120-127 Sound Effects
-  'pad','pad','pad','pad','bell','pad','pad','pad',
-]
 
 // MIDI channel 9 percussion notes → drum channel group
 const DRUM_GROUPS = [
@@ -144,17 +106,16 @@ export function convertMidiToTracks(parsed, filename = 'MIDI IMPORT') {
         if (notes.length > 0) tracks.push({ name: 'PERC', fmKey: 'marimba', notes })
       }
     } else {
-      // Melodic channel
-      const prog   = Math.max(0, Math.min(127, ch.program ?? 0))
-      const fmKey  = GM_TO_FM_KEY[prog] ?? 'pad'
-      // Short display name: first word of GM instrument name
-      const name = (GM_INSTRUMENTS[prog] ?? 'SYNTH')
+      // Melodic channel — carry the exact GM program so the store can load
+      // the real sampled instrument instead of an FM approximation.
+      const gmProgram = Math.max(0, Math.min(127, ch.program ?? 0))
+      const name = (GM_INSTRUMENTS[gmProgram] ?? 'SYNTH')
         .split(/[\s(]/)[0]
         .toUpperCase()
         .slice(0, 10)
 
       const notes = pairNotes(noteEvents, ticksPerBeat)
-      if (notes.length > 0) tracks.push({ name, fmKey, notes })
+      if (notes.length > 0) tracks.push({ name, gmProgram, notes })
     }
   }
 

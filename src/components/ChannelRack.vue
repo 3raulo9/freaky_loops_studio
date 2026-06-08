@@ -195,6 +195,22 @@
               @click="addFMChannel(key); showSynthPicker = false">
               <span class="synth-pick-dot" :style="{ background: preset.color }"/>{{ preset.name }}
             </div>
+            <div class="synth-pick-section">GM INSTRUMENTS</div>
+            <div v-for="(cat, ci) in GM_CATEGORIES" :key="cat.name">
+              <div class="synth-pick-item synth-pick-cat"
+                @click.stop="toggleGMCat(cat.name)">
+                <span class="synth-pick-dot" :style="{ background: GM_CAT_COLORS[ci] }"/>
+                {{ cat.name }}
+                <span class="synth-pick-arrow">{{ expandedGMCat === cat.name ? '▾' : '▸' }}</span>
+              </div>
+              <div v-if="expandedGMCat === cat.name" class="synth-pick-gm-items">
+                <div v-for="prog in getProgsForCat(cat)" :key="prog"
+                  class="synth-pick-item synth-pick-item--gm"
+                  @click="addGMChannel(prog); showSynthPicker = false; expandedGMCat = null">
+                  {{ GM_INSTRUMENTS[prog] }}
+                </div>
+              </div>
+            </div>
             <div class="synth-pick-section">PLUGINS</div>
             <div class="synth-pick-item" @click="addCustomSynthChannel(); showSynthPicker = false">
               <span class="synth-pick-dot" style="background:#00d4ff"/>◈ Custom Synth
@@ -553,7 +569,8 @@ const {
   pianoRollOpen, kbOctave,
   patterns, currentPatternId, getSteps, getPianoNotes,
   addPattern, removePattern, duplicatePattern,
-  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, addWasmChannel, addCustomSynthChannel, addSubterraChannel, removeChannel, moveChannel, setChannelMode,
+  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, addGMChannel, addWasmChannel, addCustomSynthChannel, addSubterraChannel, removeChannel, moveChannel, setChannelMode,
+  GM_CATEGORIES, GM_CAT_COLORS, GM_INSTRUMENTS,
   channelGroups, addGroup, removeGroup, renameGroup, assignChannelsToGroup,
   graphEditorOpen, graphParam,
   getStepVelocities, setStepVelocity, getStepPans, setStepPan, getStepPitches, setStepPitch,
@@ -681,6 +698,16 @@ function getOpTargets() {
 // ── Synth picker ──────────────────────────────────────────────────────────────
 const showSynthPicker = ref(false)
 const synthPickerRef  = ref(null)
+const expandedGMCat   = ref(null)  // name of the currently-open GM category sub-list
+
+function getProgsForCat(cat) {
+  const result = []
+  for (let p = cat.range[0]; p <= cat.range[1]; p++) result.push(p)
+  return result
+}
+function toggleGMCat(name) {
+  expandedGMCat.value = expandedGMCat.value === name ? null : name
+}
 
 function onDocClick() {
   showSynthPicker.value = false
@@ -1287,6 +1314,24 @@ function commitRename() {
   color: #e91e63cc;
 }
 
+/* GM instruments section */
+.synth-pick-cat {
+  display: flex; align-items: center; gap: 6px;
+  cursor: pointer;
+}
+.synth-pick-arrow { margin-left: auto; font-size: 9px; opacity: 0.6; }
+.synth-pick-gm-items {
+  padding-left: 22px;
+  border-left: 1px solid #ffffff12;
+  margin: 2px 0 4px;
+}
+.synth-pick-item--gm {
+  font-size: 9.5px;
+  padding: 3px 8px;
+  opacity: 0.85;
+}
+.synth-pick-item--gm:hover { opacity: 1; background: #ffffff0f; }
+
 /* MIDI section inside synth picker */
 .synth-pick-section--midi { color: #e91e6399; border-top: 1px solid #e91e6322; margin-top: 4px; padding-top: 6px; }
 .synth-pick-item--midi:hover .synth-pick-dot { box-shadow: 0 0 6px #e91e63; }
@@ -1300,7 +1345,7 @@ function commitRename() {
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 7px;
   padding: 5px 0; min-width: 170px;
   box-shadow: 0 10px 36px rgba(0,0,0,0.75);
-  max-height: 340px; overflow-y: auto;
+  max-height: 480px; overflow-y: auto;
 }
 .synth-pick-section {
   padding: 5px 14px 3px;
