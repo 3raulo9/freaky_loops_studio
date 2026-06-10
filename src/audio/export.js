@@ -1,4 +1,14 @@
 import { Mp3Encoder } from '@breezystack/lamejs'
+import { preloadGMInstrument } from './gmSynth.js'
+
+// Mirror of the store's TICKS_PER_STEP (1/16 note). Kept local to avoid importing
+// the whole store module graph into the render path.
+const TICKS_PER_STEP = 120
+
+// Instrument types whose DSP runs in a live AudioWorklet node — these can't be
+// reproduced inside an OfflineAudioContext, so the offline renderer skips them.
+const WORKLET_TYPES = new Set(['wasm', 'custom', 'subterra'])
+export function isOfflineRenderable(ch) { return !WORKLET_TYPES.has(ch?.type) }
 
 // ─── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -21,49 +31,80 @@ function normalizeAudioBuffer(buffer, targetPeak = 0.97) {
 }
 
 // ─── Core: render tracks to an AudioBuffer ─────────────────────────────────────
+// Mirrors the live scheduler: piano channels fire each note at its tick position
+// for its full duration (gate), step channels fire on lit steps. The timeline is
+// `bars` repetitions of `totalSteps` steps — song renders pass bars=1 with a flat
+// totalSteps spanning the whole arrangement; pattern renders repeat the loop.
 async function renderAudioBuffer(tracks, options = {}) {
   const {
-    bpm        = 120,
-    totalSteps = 16,
-    swing      = 0,
-    bars       = 2,
-    sampleRate = 44100,
-    normalize  = true,
-    tail       = 3.5,
+    bpm         = 120,
+    totalSteps  = 16,
+    swing       = 0,
+    bars        = 2,
+    sampleRate  = 44100,
+    normalize   = true,
+    tail        = 3.5,
+    masterPitch = 0,
   } = options
 
   const secPerBeat   = 60 / bpm
   const secPerStep   = secPerBeat / 4
+  const secPerTick   = secPerStep / TICKS_PER_STEP
   const loopDuration = totalSteps * secPerStep * bars
   const totalFrames  = Math.ceil(sampleRate * (loopDuration + tail))
+  const patternTicks = totalSteps * TICKS_PER_STEP
+  const START        = 0.01
 
   const offCtx = new OfflineAudioContext(2, totalFrames, sampleRate)
 
-  for (let bar = 0; bar < bars; bar++) {
-    const barOffset = bar * totalSteps * secPerStep
-    for (let step = 0; step < totalSteps; step++) {
-      const swingOffset = (step % 2 === 1) ? swing * secPerBeat * 0.5 : 0
-      const when = 0.01 + barOffset + step * secPerStep + swingOffset
-
-      tracks.forEach(track => {
-        if (track.muted) return
-        const vol = offCtx.createGain()
-        vol.gain.value = track.volume
-        vol.connect(offCtx.destination)
-
-        if (track.mode === 'piano') {
-          ;(track.pianoNotes || []).filter(n => n.step === step).forEach(note => {
-            track.fn(offCtx, when, { ...track.params, pitch: note.pitch, velocity: note.velocity ?? 1 }, vol)
-          })
-        } else {
-          if (track.pattern[step]) {
-            const vel = track.stepVelocities?.[step] ?? 0.8
-            track.fn(offCtx, when, { ...track.params, velocity: vel }, vol)
-          }
-        }
-      })
-    }
+  // Decode GM soundfont samples into THIS offline context before scheduling, so
+  // sampled GM voices are ready to play synchronously during the render.
+  const gmProgs = [...new Set(
+    tracks.filter(t => !t.muted && isOfflineRenderable(t) && t.params?.gmProgram != null)
+          .map(t => Math.max(0, Math.min(127, t.params.gmProgram)))
+  )]
+  if (gmProgs.length) {
+    try { await Promise.all(gmProgs.map(p => preloadGMInstrument(offCtx, p))) } catch (_) {}
   }
+
+  tracks.forEach(track => {
+    if (track.muted || !isOfflineRenderable(track) || typeof track.fn !== 'function') return
+
+    const swingMix = track.swingMix ?? 1
+    const out = offCtx.createGain();      out.gain.value = track.volume ?? 1
+    const pan = offCtx.createStereoPanner(); pan.pan.value = track.pan ?? 0
+    out.connect(pan); pan.connect(offCtx.destination)
+
+    for (let rep = 0; rep < bars; rep++) {
+      const repSec = rep * patternTicks * secPerTick
+
+      if (track.mode === 'piano') {
+        for (const n of (track.pianoNotes || [])) {
+          if (n.muted) continue
+          const startTick = n.startTick ?? 0
+          const step      = Math.floor(startTick / TICKS_PER_STEP)
+          const swingOff  = (step % 2 === 1) ? swing * swingMix * (secPerStep / 3) : 0
+          const when      = START + repSec + startTick * secPerTick + swingOff
+          const gate      = Math.max(0.05, (n.durationTicks ?? TICKS_PER_STEP) * secPerTick)
+          track.fn(offCtx, when, {
+            ...track.params,
+            pitch:    n.pitch + masterPitch,
+            velocity: n.velocity ?? 1,
+            gate,
+          }, out)
+        }
+      } else {
+        const steps = track.pattern || []
+        for (let s = 0; s < totalSteps; s++) {
+          if (!steps[s]) continue
+          const swingOff = (s % 2 === 1) ? swing * swingMix * (secPerStep / 3) : 0
+          const when     = START + repSec + s * secPerStep + swingOff
+          const vel      = track.stepVelocities?.[s] ?? 0.8
+          track.fn(offCtx, when, { ...track.params, velocity: vel }, out)
+        }
+      }
+    }
+  })
 
   const rendered = await offCtx.startRendering()
   if (normalize) normalizeAudioBuffer(rendered)
@@ -126,9 +167,15 @@ function interleave(buffer, numChannels) {
   return { samples: out, numCh }
 }
 
+// Either render the tracks offline, or use a pre-rendered buffer captured in real
+// time (used when the project contains live AudioWorklet plugins).
+async function resolveBuffer(tracks, options) {
+  return options.buffer ?? await renderAudioBuffer(tracks, options)
+}
+
 export async function renderLoopToWav(tracks, options = {}) {
   const { channels = 2, bitDepth = 16, dither = true } = options
-  const buffer = await renderAudioBuffer(tracks, options)
+  const buffer = await resolveBuffer(tracks, options)
   const { samples, numCh } = interleave(buffer, channels)
   return { blob: encodeWavBlob(samples, numCh, buffer.sampleRate, bitDepth, dither && bitDepth !== 32), ext: 'wav' }
 }
@@ -144,7 +191,7 @@ function f32toI16(f32arr, start, end) {
 
 export async function renderLoopToMp3(tracks, options = {}) {
   const { channels = 2, bitrate = 192 } = options
-  const buffer  = await renderAudioBuffer(tracks, options)
+  const buffer  = await resolveBuffer(tracks, options)
   const numCh   = channels === 1 ? 1 : Math.min(buffer.numberOfChannels, 2)
   const len     = buffer.length
   const leftF32 = buffer.getChannelData(0)
@@ -183,7 +230,7 @@ export function getOggMimeType() {
 
 export async function renderLoopToOgg(tracks, options = {}) {
   const { channels = 2, bitrate = 192 } = options
-  const buffer    = await renderAudioBuffer(tracks, options)
+  const buffer    = await resolveBuffer(tracks, options)
   const mimeType  = getOggMimeType()
   if (!mimeType) throw new Error('OGG/Opus encoding is not supported in this browser.')
 
