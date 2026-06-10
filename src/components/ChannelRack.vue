@@ -341,24 +341,29 @@
             <!-- Mini piano-roll preview -->
             <template v-else>
 
-              <!-- ─ Single-bar: column-per-step grid (unchanged) ─ -->
+              <!-- ─ Single-bar: column-per-step grid ─
+                   Note dots draw only for the focused channel; others show a
+                   cheap note-count summary so the rack stays light. -->
               <div v-if="!isMultiBarChannel(ch)"
                 class="mini-pr" :style="{ '--cols': totalSteps }"
                 @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
                 <div v-for="s in totalSteps" :key="s-1" class="mini-pr-col"
                   :class="{
-                    has:     channelHasNotesAtStep(ch, s-1),
                     playing: isPlaying && displayStep === s-1,
                     beat:    (s-1) % 4 === 0,
                   }">
-                  <div v-for="note in notesAtStep(ch, s-1)"
-                    :key="`${note.startTick ?? note.step}-${note.pitch}`"
-                    class="mini-note" :style="{ bottom: noteBottom(note.pitch) + '%' }" />
+                  <template v-if="ch.id === selectedChannelId">
+                    <div v-for="note in notesAtStep(ch, s-1)"
+                      :key="`${note.startTick ?? note.step}-${note.pitch}`"
+                      class="mini-note" :style="{ bottom: noteBottom(note.pitch) + '%' }" />
+                  </template>
                 </div>
-                <span class="mini-pr-hint">PIANO ROLL</span>
+                <span class="mini-pr-hint">{{ ch.id === selectedChannelId ? 'PIANO ROLL' : miniSummary(ch) }}</span>
               </div>
 
-              <!-- ─ Multi-bar: absolute-positioned panoramic view ─ -->
+              <!-- ─ Multi-bar: absolute-positioned panoramic view ─
+                   The (potentially long) note blocks render only for the focused
+                   channel; unfocused rows keep just bar dividers + a note count. -->
               <div v-else
                 class="mini-pr mini-pr-wide"
                 @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
@@ -367,20 +372,22 @@
                   class="mini-wide-head"
                   :style="{ left: ((displayStep * TICKS_PER_STEP) / channelPatternTicks(ch)) * 100 + '%' }" />
                 <!-- Static content: bar lines + notes. v-memo skips this subtree when only
-                     displayStep changes; it re-renders only when the note count or bar count changes. -->
-                <template v-memo="[ch.id, channelPatternBars(ch), getPianoNotes(ch.id).length]">
+                     displayStep changes; it re-renders on note/bar count change or (un)focus. -->
+                <template v-memo="[ch.id, channelPatternBars(ch), getPianoNotes(ch.id).length, ch.id === selectedChannelId]">
                   <div v-for="bi in (channelPatternBars(ch) - 1)" :key="'bl' + bi"
                     class="mini-bar-line"
                     :style="{ left: (bi / channelPatternBars(ch)) * 100 + '%' }" />
-                  <div v-for="note in getMiniNotes(ch.id)"
-                    :key="`${note.startTick}-${note.pitch}`"
-                    class="mini-note-wide"
-                    :style="{
-                      left:   ((note.startTick ?? 0) / channelPatternTicks(ch)) * 100 + '%',
-                      width:  Math.max(0.5, ((note.durationTicks ?? TICKS_PER_STEP) / channelPatternTicks(ch)) * 100) + '%',
-                      bottom: noteBottom(note.pitch) + '%',
-                    }" />
-                  <span class="mini-pr-bars-label">{{ channelPatternBars(ch) }} BAR</span>
+                  <template v-if="ch.id === selectedChannelId">
+                    <div v-for="note in getMiniNotes(ch.id)"
+                      :key="`${note.startTick}-${note.pitch}`"
+                      class="mini-note-wide"
+                      :style="{
+                        left:   ((note.startTick ?? 0) / channelPatternTicks(ch)) * 100 + '%',
+                        width:  Math.max(0.5, ((note.durationTicks ?? TICKS_PER_STEP) / channelPatternTicks(ch)) * 100) + '%',
+                        bottom: noteBottom(note.pitch) + '%',
+                      }" />
+                  </template>
+                  <span class="mini-pr-bars-label">{{ miniBarLabel(ch) }}</span>
                 </template>
               </div>
 
@@ -929,11 +936,21 @@ function getMiniNotes(chId) {
   const notes = getPianoNotes(chId)
   return notes.length > MINI_NOTE_CAP ? notes.slice(0, MINI_NOTE_CAP) : notes
 }
-function channelHasNotesAtStep(ch, step) {
-  return getPianoNotes(ch.id).some(n => noteStep(n) === step)
-}
 function noteBottom(pitch) {
   return ((pitch - 36) / (84 - 36)) * 100
+}
+
+// Lightweight previews for channels that aren't currently focused — a note count
+// instead of the full melody, so only the selected instrument draws its notes.
+function miniSummary(ch) {
+  const n = getPianoNotes(ch.id).length
+  return n ? `${n} ♪` : 'PIANO ROLL'
+}
+function miniBarLabel(ch) {
+  const bars = channelPatternBars(ch)
+  if (ch.id === selectedChannelId.value) return `${bars} BAR`
+  const n = getPianoNotes(ch.id).length
+  return n ? `${bars} BAR · ${n} ♪` : `${bars} BAR`
 }
 
 // ── Multi-bar detection ───────────────────────────────────────────────────────
