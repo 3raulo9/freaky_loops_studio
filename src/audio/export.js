@@ -30,12 +30,39 @@ function normalizeAudioBuffer(buffer, targetPeak = 0.97) {
   }
 }
 
+// Sum several AudioBuffers (same sample rate) into one stereo buffer the length of
+// the longest, optionally normalizing the result. Used to combine the offline mix
+// with the real-time-captured plugin tracks.
+export function mixBuffers(buffers, { normalize = true } = {}) {
+  const valid = buffers.filter(b => b && b.length)
+  if (!valid.length) return null
+  const sr  = valid[0].sampleRate
+  const len = Math.max(...valid.map(b => b.length))
+  const out = new AudioBuffer({ length: len, numberOfChannels: 2, sampleRate: sr })
+  const L = out.getChannelData(0)
+  const R = out.getChannelData(1)
+  for (const b of valid) {
+    const bl = b.getChannelData(0)
+    const br = b.numberOfChannels > 1 ? b.getChannelData(1) : bl
+    for (let i = 0; i < b.length; i++) { L[i] += bl[i]; R[i] += br[i] }
+  }
+  if (normalize) {
+    let peak = 0
+    for (let i = 0; i < len; i++) { const a = Math.abs(L[i]), b = Math.abs(R[i]); if (a > peak) peak = a; if (b > peak) peak = b }
+    if (peak > 0 && peak < 0.97) {
+      const g = 0.97 / peak
+      for (let i = 0; i < len; i++) { L[i] *= g; R[i] *= g }
+    }
+  }
+  return out
+}
+
 // ─── Core: render tracks to an AudioBuffer ─────────────────────────────────────
 // Mirrors the live scheduler: piano channels fire each note at its tick position
 // for its full duration (gate), step channels fire on lit steps. The timeline is
 // `bars` repetitions of `totalSteps` steps — song renders pass bars=1 with a flat
 // totalSteps spanning the whole arrangement; pattern renders repeat the loop.
-async function renderAudioBuffer(tracks, options = {}) {
+export async function renderAudioBuffer(tracks, options = {}) {
   const {
     bpm         = 120,
     totalSteps  = 16,

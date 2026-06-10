@@ -1,0 +1,231 @@
+/* ══════════════════════════════════════════════════════════════════════════
+   FREAKY LOOPS — MOTION LAYER
+   A global, opt-in animation system layered on top of the component-scoped
+   styles. It only ADDS properties the scoped rules don't declare (animation,
+   transform, Vue <Transition> classes) so nothing in the existing UI breaks.
+
+   Sections:
+     1. Motion tokens (easings + durations)
+     2. Vue <Transition> choreography (view swap, modals, panels, windows)
+     3. Keyframes
+     4. Living chrome  (top-bar sheen, selected-row breathing)
+     5. Step-sequencer life  (playhead pulse, lit pop, firing LED)
+     6. Floating menus / dropdowns entrance
+     7. Channel-row cascade
+     8. Micro-interactions  (hover lift, press squash)
+     9. prefers-reduced-motion kill switch
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. Motion tokens ─────────────────────────────────────────────────────── */
+:root {
+  --ease-flow:   cubic-bezier(0.22, 1, 0.36, 1);     /* long, silky settle      */
+  --ease-soft:   cubic-bezier(0.4, 0, 0.2, 1);       /* material standard       */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);  /* gentle overshoot        */
+
+  --dur-fast: 0.13s;
+  --dur-mid:  0.24s;
+  --dur-slow: 0.42s;
+}
+
+/* ── 2. Vue <Transition> choreography ─────────────────────────────────────── */
+
+/* 2a. Main workspace swap: Channel Rack ⇄ Playlist ⇄ Mixer (mode="out-in") */
+.view-enter-active {
+  transition: opacity var(--dur-mid) var(--ease-flow),
+              transform var(--dur-mid) var(--ease-flow);
+}
+.view-leave-active {
+  transition: opacity 0.15s var(--ease-soft),
+              transform 0.15s var(--ease-soft);
+}
+.view-enter-from { opacity: 0; transform: translateY(12px) scale(0.996); }
+.view-leave-to   { opacity: 0; transform: translateY(-8px) scale(0.996); }
+
+/* 2b. Modal: backdrop fades, the dialog springs up from below */
+.modal-enter-active,
+.modal-leave-active { transition: opacity var(--dur-mid) var(--ease-soft); }
+.modal-enter-from,
+.modal-leave-to     { opacity: 0; }
+
+.modal-enter-active .modal,
+.modal-leave-active .modal {
+  transition: transform var(--dur-mid) var(--ease-spring),
+              opacity var(--dur-mid) var(--ease-soft);
+}
+.modal-enter-from .modal,
+.modal-leave-to   .modal { opacity: 0; transform: translateY(20px) scale(0.94); }
+
+/* 2c. Pop-in: floating windows, MIDI router, detached panels */
+.popin-enter-active {
+  transition: opacity var(--dur-mid) var(--ease-soft),
+              transform var(--dur-mid) var(--ease-spring);
+}
+.popin-leave-active {
+  transition: opacity 0.16s var(--ease-soft),
+              transform 0.16s var(--ease-soft);
+}
+.popin-enter-from { opacity: 0; transform: scale(0.9); }
+.popin-leave-to   { opacity: 0; transform: scale(0.95); }
+
+/* 2d. Slide-up: bottom-docked Piano Roll / synth panels */
+.slideup-enter-active {
+  transition: transform var(--dur-mid) var(--ease-flow),
+              opacity var(--dur-mid) var(--ease-soft);
+}
+.slideup-leave-active {
+  transition: transform 0.18s var(--ease-soft),
+              opacity 0.18s var(--ease-soft);
+}
+.slideup-enter-from,
+.slideup-leave-to { opacity: 0; transform: translateY(26px); }
+
+/* 2e. Side panels slide from their dock edge */
+.slideleft-enter-active,
+.slideleft-leave-active { transition: transform var(--dur-mid) var(--ease-flow), opacity var(--dur-mid) var(--ease-soft); }
+.slideleft-enter-from,
+.slideleft-leave-to     { opacity: 0; transform: translateX(-18px); }
+
+.slideright-enter-active,
+.slideright-leave-active { transition: transform var(--dur-mid) var(--ease-flow), opacity var(--dur-mid) var(--ease-soft); }
+.slideright-enter-from,
+.slideright-leave-to     { opacity: 0; transform: translateX(18px); }
+
+/* 2f. HUD: scale only (its opacity is driven by inline hover state) */
+.hud-enter-active,
+.hud-leave-active { transition: transform var(--dur-mid) var(--ease-spring); }
+.hud-enter-from,
+.hud-leave-to     { transform: scale(0.82); }
+
+/* ── 3. Keyframes ─────────────────────────────────────────────────────────── */
+@keyframes fls-pop {
+  0%   { transform: scale(0.5); }
+  65%  { transform: scale(1.14); }
+  100% { transform: scale(1); }
+}
+@keyframes fls-step-pulse {
+  0%   { transform: scale(1); }
+  45%  { transform: scale(1.16); }
+  100% { transform: scale(1); }
+}
+@keyframes fls-led-pulse {
+  0%, 100% { transform: scale(1); }
+  50%      { transform: scale(1.45); }
+}
+@keyframes fls-bar-breathe {
+  0%, 100% { box-shadow: 0 0 5px var(--accent); }
+  50%      { box-shadow: 0 0 16px var(--accent), 0 0 26px color-mix(in srgb, var(--accent) 45%, transparent); }
+}
+@keyframes fls-sheen {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+@keyframes fls-menu-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes fls-fade-in-up {
+  from { opacity: 0; transform: translateY(7px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ── 4. Living chrome ─────────────────────────────────────────────────────── */
+/* A slow light sweep travelling along the top-bar's edge — keeps the shell
+   feeling alive without distracting from the work surface. */
+.topbar::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(120, 170, 255, 0.45) 45%,
+    rgba(170, 130, 255, 0.5) 55%,
+    transparent 100%);
+  background-size: 200% 100%;
+  animation: fls-sheen 6.5s linear infinite;
+  opacity: 0.7;
+}
+.topbar--bottom::after { bottom: auto; top: 0; }
+
+/* The selected channel's accent bar gently breathes. */
+.channel-row.selected::before { animation: fls-bar-breathe 2.6s ease-in-out infinite; }
+
+/* ── 5. Step-sequencer life ───────────────────────────────────────────────── */
+/* Each step "pops" the instant it's switched on (and on first paint). */
+.istep.lit { animation: fls-pop 0.22s var(--ease-spring); }
+
+/* The playhead breathes through every step it touches. */
+.istep.playing { animation: fls-step-pulse 0.18s var(--ease-soft); }
+
+/* Firing mute-LED throbs in time with its channel. */
+.led.firing { animation: fls-led-pulse 0.16s var(--ease-soft); }
+
+/* ── 6. Floating menus / dropdowns entrance ───────────────────────────────── */
+.synth-picker,
+.options-panel,
+.ctx-menu,
+.tb-menu,
+.df-dropdown,
+.mod-picker,
+.op-submenu,
+.ctx-submenu {
+  animation: fls-menu-in var(--dur-fast) var(--ease-flow);
+  transform-origin: top center;
+}
+
+/* ── 7. Channel-row cascade ───────────────────────────────────────────────── */
+/* Rows wash in from the top whenever the rack (re)mounts or a channel is added,
+   producing a soft cascade when switching into the sequencer view. */
+.channel-row { animation: fls-fade-in-up var(--dur-slow) var(--ease-flow) both; }
+.channel-row:nth-child(1)  { animation-delay: 0.00s; }
+.channel-row:nth-child(2)  { animation-delay: 0.03s; }
+.channel-row:nth-child(3)  { animation-delay: 0.06s; }
+.channel-row:nth-child(4)  { animation-delay: 0.09s; }
+.channel-row:nth-child(5)  { animation-delay: 0.12s; }
+.channel-row:nth-child(6)  { animation-delay: 0.15s; }
+.channel-row:nth-child(7)  { animation-delay: 0.18s; }
+.channel-row:nth-child(8)  { animation-delay: 0.21s; }
+.channel-row:nth-child(9)  { animation-delay: 0.24s; }
+.channel-row:nth-child(10) { animation-delay: 0.27s; }
+.channel-row:nth-child(n+11) { animation-delay: 0.30s; }
+
+/* ── 8. Micro-interactions ────────────────────────────────────────────────── */
+/* Press-squash on a curated allowlist of controls that don't use transform for
+   layout — so we never clobber a translate-centred button. transform isn't
+   declared in these scoped rules, so there is no specificity conflict. */
+.istep:active,
+.ch-name-btn:active,
+.add-ch-btn:active,
+.pat-add-btn:active,
+.pat-nav-btn:active,
+.synth-pick-item:active,
+.df-btn:active { transform: scale(0.95); }
+
+/* Channel name button — the rack's signature control — lifts on hover.
+   !important re-states the scoped transition (filter+box-shadow) and adds
+   transform so the lift eases instead of snapping. */
+.ch-name-btn {
+  transition: filter 0.1s, box-shadow 0.1s, transform 0.16s var(--ease-flow) !important;
+}
+.ch-name-btn:hover { transform: translateY(-1px); }
+
+/* Unzip pill springs on hover (no base transform). */
+.unzip-btn { transition: all 0.12s var(--ease-flow) !important; }
+.unzip-btn:hover { transform: scale(1.12); }
+
+/* Loop toggle keeps its translate-centring while adding a hover spring. */
+.loop-btn { transition: all 0.12s var(--ease-flow) !important; }
+.loop-btn:hover  { transform: translateY(-50%) scale(1.14); }
+.loop-btn:active { transform: translateY(-50%) scale(0.92); }
+
+/* ── 9. Reduced-motion kill switch ────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+  .topbar::after { animation: none !important; opacity: 0; }
+}

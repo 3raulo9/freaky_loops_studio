@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import App from './App.vue'
 import './style.css'
+import './animations.css'
 import { vHint } from './components/toolbar/hintBus.js'
 
 createApp(App)

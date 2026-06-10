@@ -342,8 +342,8 @@
             <template v-else>
 
               <!-- ─ Single-bar: column-per-step grid ─
-                   Note dots draw only for the focused channel; others show a
-                   cheap note-count summary so the rack stays light. -->
+                   Notes draw for every channel; the centred hint sits faintly
+                   behind them as a label / empty-state. -->
               <div v-if="!isMultiBarChannel(ch)"
                 class="mini-pr" :style="{ '--cols': totalSteps }"
                 @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
@@ -352,41 +352,39 @@
                     playing: isPlaying && displayStep === s-1,
                     beat:    (s-1) % 4 === 0,
                   }">
-                  <template v-if="ch.id === selectedChannelId">
-                    <div v-for="note in notesAtStep(ch, s-1)"
-                      :key="`${note.startTick ?? note.step}-${note.pitch}`"
-                      class="mini-note" :style="{ bottom: noteBottom(note.pitch) + '%' }" />
-                  </template>
+                  <div v-for="note in notesAtStep(ch, s-1)"
+                    :key="`${note.startTick ?? note.step}-${note.pitch}`"
+                    class="mini-note" :style="{ bottom: noteBottom(note.pitch) + '%' }" />
                 </div>
-                <span class="mini-pr-hint">{{ ch.id === selectedChannelId ? 'PIANO ROLL' : miniSummary(ch) }}</span>
+                <span class="mini-pr-hint">{{ miniSummary(ch) }}</span>
               </div>
 
               <!-- ─ Multi-bar: absolute-positioned panoramic view ─
-                   The (potentially long) note blocks render only for the focused
-                   channel; unfocused rows keep just bar dividers + a note count. -->
+                   Shows the visible 4-bar window of the melody for every channel;
+                   the window pages with playback (see miniWindowStartBar). -->
               <div v-else
                 class="mini-pr mini-pr-wide"
                 @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
-                <!-- Playhead lives outside v-memo so it updates every tick without re-rendering notes -->
+                <!-- Playhead lives outside v-memo so it updates every tick without re-rendering notes.
+                     Positioned relative to the visible 4-bar window so it tracks the audible part. -->
                 <div v-if="isPlaying && displayStep >= 0"
                   class="mini-wide-head"
-                  :style="{ left: ((displayStep * TICKS_PER_STEP) / channelPatternTicks(ch)) * 100 + '%' }" />
-                <!-- Static content: bar lines + notes. v-memo skips this subtree when only
-                     displayStep changes; it re-renders on note/bar count change or (un)focus. -->
-                <template v-memo="[ch.id, channelPatternBars(ch), getPianoNotes(ch.id).length, ch.id === selectedChannelId]">
-                  <div v-for="bi in (channelPatternBars(ch) - 1)" :key="'bl' + bi"
+                  :style="{ left: miniHeadLeft(ch) + '%' }" />
+                <!-- Static content: bar lines + notes for the current window. v-memo skips this
+                     subtree when only the playhead moves; it re-renders on note/bar count change,
+                     (un)focus, or when playback pages to the next 4-bar window. -->
+                <template v-memo="[ch.id, channelPatternBars(ch), getPianoNotes(ch.id).length, ch.id === selectedChannelId, miniWindowStartBar(ch)]">
+                  <div v-for="bi in (miniVisibleBars(ch) - 1)" :key="'bl' + bi"
                     class="mini-bar-line"
-                    :style="{ left: (bi / channelPatternBars(ch)) * 100 + '%' }" />
-                  <template v-if="ch.id === selectedChannelId">
-                    <div v-for="note in getMiniNotes(ch.id)"
-                      :key="`${note.startTick}-${note.pitch}`"
-                      class="mini-note-wide"
-                      :style="{
-                        left:   ((note.startTick ?? 0) / channelPatternTicks(ch)) * 100 + '%',
-                        width:  Math.max(0.5, ((note.durationTicks ?? TICKS_PER_STEP) / channelPatternTicks(ch)) * 100) + '%',
-                        bottom: noteBottom(note.pitch) + '%',
-                      }" />
-                  </template>
+                    :style="{ left: (bi / miniVisibleBars(ch)) * 100 + '%' }" />
+                  <div v-for="note in getMiniWindowNotes(ch)"
+                    :key="`${note.startTick}-${note.pitch}`"
+                    class="mini-note-wide"
+                    :style="{
+                      left:   miniNoteLeft(ch, note) + '%',
+                      width:  miniNoteWidth(ch, note) + '%',
+                      bottom: noteBottom(note.pitch) + '%',
+                    }" />
                   <span class="mini-pr-bars-label">{{ miniBarLabel(ch) }}</span>
                 </template>
               </div>
@@ -932,12 +930,59 @@ function notesAtStep(ch, step) {
   return getPianoNotes(ch.id).filter(n => noteStep(n) === step)
 }
 const MINI_NOTE_CAP = 200
-function getMiniNotes(chId) {
-  const notes = getPianoNotes(chId)
+function noteBottom(pitch) {
+  // Map C2–C6 across the row height, clamped so notes outside that range pin to
+  // the top/bottom edge and stay visible rather than clipping out of view.
+  const pct = ((pitch - 36) / (84 - 36)) * 100
+  return Math.max(0, Math.min(94, pct))
+}
+
+// ── Mini preview windowing ───────────────────────────────────────────────────
+// The multi-bar preview never shows more than MINI_WINDOW_BARS bars at once.
+// Once a channel runs longer, the visible window pages with the playhead in
+// fixed 4-bar chunks: bars 1–4, then 5–8, … following the part being played.
+const MINI_WINDOW_BARS = 4
+
+// Bars actually rendered in the preview (capped at the window size).
+function miniVisibleBars(ch) {
+  return Math.min(MINI_WINDOW_BARS, channelPatternBars(ch))
+}
+// First bar of the visible window. Pinned to 0 until playback passes the window,
+// then snapped to the 4-bar page containing the playhead (clamped to the last page).
+function miniWindowStartBar(ch) {
+  const total = channelPatternBars(ch)
+  if (total <= MINI_WINDOW_BARS) return 0
+  const playBar = isPlaying.value && displayStep.value >= 0
+    ? Math.floor((displayStep.value * TICKS_PER_STEP) / CR_TICKS_PER_BAR)
+    : 0
+  const page     = Math.floor(playBar / MINI_WINDOW_BARS) * MINI_WINDOW_BARS
+  const lastPage = Math.floor((total - 1) / MINI_WINDOW_BARS) * MINI_WINDOW_BARS
+  return Math.min(page, lastPage)
+}
+// Window bounds in ticks.
+function miniWindowStartTick(ch) { return miniWindowStartBar(ch) * CR_TICKS_PER_BAR }
+function miniWindowTicks(ch)     { return miniVisibleBars(ch) * CR_TICKS_PER_BAR }
+
+// Notes overlapping the current window (capped for performance).
+function getMiniWindowNotes(ch) {
+  const start = miniWindowStartTick(ch)
+  const end   = start + miniWindowTicks(ch)
+  const notes = getPianoNotes(ch.id).filter(n => {
+    const s = n.startTick ?? 0
+    return s < end && s + (n.durationTicks ?? TICKS_PER_STEP) > start
+  })
   return notes.length > MINI_NOTE_CAP ? notes.slice(0, MINI_NOTE_CAP) : notes
 }
-function noteBottom(pitch) {
-  return ((pitch - 36) / (84 - 36)) * 100
+// Note geometry relative to the window (overflow:hidden clips the off-window parts).
+function miniNoteLeft(ch, note) {
+  return (((note.startTick ?? 0) - miniWindowStartTick(ch)) / miniWindowTicks(ch)) * 100
+}
+function miniNoteWidth(ch, note) {
+  return Math.max(0.5, ((note.durationTicks ?? TICKS_PER_STEP) / miniWindowTicks(ch)) * 100)
+}
+// Playhead position relative to the window.
+function miniHeadLeft(ch) {
+  return ((displayStep.value * TICKS_PER_STEP - miniWindowStartTick(ch)) / miniWindowTicks(ch)) * 100
 }
 
 // Lightweight previews for channels that aren't currently focused — a note count
@@ -948,9 +993,13 @@ function miniSummary(ch) {
 }
 function miniBarLabel(ch) {
   const bars = channelPatternBars(ch)
-  if (ch.id === selectedChannelId.value) return `${bars} BAR`
+  // Channels longer than the window show which bars are currently in view.
+  const label = bars > MINI_WINDOW_BARS
+    ? `BAR ${miniWindowStartBar(ch) + 1}–${miniWindowStartBar(ch) + miniVisibleBars(ch)}/${bars}`
+    : `${bars} BAR`
+  if (ch.id === selectedChannelId.value) return label
   const n = getPianoNotes(ch.id).length
-  return n ? `${bars} BAR · ${n} ♪` : `${bars} BAR`
+  return n ? `${label} · ${n} ♪` : label
 }
 
 // ── Multi-bar detection ───────────────────────────────────────────────────────
