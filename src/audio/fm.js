@@ -1444,7 +1444,7 @@ export function playFMKoto(ctx, time, {
 
 // ─── FM HARMONICA ────────────────────────────────────────────────────────────
 export function playFMHarmonica(ctx, time, {
-  pitch = 60, decay = 0.9, reedy = 0.6, velocity = 1,
+  pitch = 60, decay = 0.9, reedy = 0.6, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
@@ -1452,7 +1452,11 @@ export function playFMHarmonica(ctx, time, {
   dest = dest ?? ctx.destination
   const freq = midiToFreq(pitch)
   const attack = 0.04
-  const dur = decay + 0.1
+  // Continuous reed: when a gate (note length / held-key duration) is supplied,
+  // sustain at full level until note-off, then release over decay·½.
+  const dur    = gate !== null ? gate + decay + 0.1 : decay + 0.1
+  const susEnd = Math.max(gate !== null ? time + gate : time + decay - 0.05, time + attack)
+  const relEnd = gate !== null ? time + gate + decay * 0.5 : time + decay
 
   const mix = ctx.createGain(); mix.gain.value = velocity * 0.65
 
@@ -1469,8 +1473,8 @@ export function playFMHarmonica(ctx, time, {
     const depth = (0.4 + reedy * 2) * f * 2
     modDepth.gain.setValueAtTime(0.001, time)
     modDepth.gain.linearRampToValueAtTime(depth, time + attack)
-    modDepth.gain.setValueAtTime(depth, time + decay - 0.05)
-    modDepth.gain.linearRampToValueAtTime(0.001, time + decay)
+    modDepth.gain.setValueAtTime(depth, susEnd)
+    modDepth.gain.linearRampToValueAtTime(0.001, relEnd)
     hGain.gain.value = 1 / (1 + i * 0.7)
     modulator.connect(modDepth); modDepth.connect(carrier.frequency)
     carrier.connect(hGain); hGain.connect(mix)
@@ -1481,8 +1485,8 @@ export function playFMHarmonica(ctx, time, {
   const env = ctx.createGain()
   env.gain.setValueAtTime(0.001, time)
   env.gain.linearRampToValueAtTime(1, time + attack)
-  env.gain.setValueAtTime(1, time + decay - 0.05)
-  env.gain.linearRampToValueAtTime(0.001, time + decay)
+  env.gain.setValueAtTime(1, susEnd)
+  env.gain.linearRampToValueAtTime(0.001, relEnd)
   mix.connect(env)
 
   buildProcessChain(ctx, env, dest, { drive, crunch, distMix, lpCutoff, hpCutoff, filterQ, reverbSend, delaySend })
@@ -1491,7 +1495,7 @@ export function playFMHarmonica(ctx, time, {
 // ─── FM OBOE ─────────────────────────────────────────────────────────────────
 // Double-reed nasal tone: 1:3 ratio with moderate depth for a bright, nasal quality.
 export function playFMOboe(ctx, time, {
-  pitch = 65, decay = 1.0, nasal = 0.6, velocity = 1,
+  pitch = 65, decay = 1.0, nasal = 0.6, velocity = 1, gate = null,
   drive = null, crunch = 0, distMix = 0.5,
   lpCutoff = 20000, hpCutoff = 20, filterQ = 0.7,
   reverbSend = 0, delaySend = 0,
@@ -1499,7 +1503,10 @@ export function playFMOboe(ctx, time, {
   dest = dest ?? ctx.destination
   const freq = midiToFreq(pitch)
   const attack = 0.07
-  const dur = decay + 0.1
+  // Continuous double-reed: sustain for the gate (note / held-key) length, then release.
+  const dur    = gate !== null ? gate + decay + 0.1 : decay + 0.1
+  const susEnd = Math.max(gate !== null ? time + gate : time + decay - 0.07, time + attack)
+  const relEnd = gate !== null ? time + gate + decay * 0.5 : time + decay
 
   const carrier    = ctx.createOscillator()
   const modulator  = ctx.createOscillator()
@@ -1517,15 +1524,15 @@ export function playFMOboe(ctx, time, {
   const depth2 = nasal * 0.5 * freq * 6
   modDepth.gain.setValueAtTime(0.001, time)
   modDepth.gain.linearRampToValueAtTime(depth1, time + attack)
-  modDepth.gain.setValueAtTime(depth1, time + decay - 0.07)
-  modDepth.gain.linearRampToValueAtTime(0.001, time + decay)
+  modDepth.gain.setValueAtTime(depth1, susEnd)
+  modDepth.gain.linearRampToValueAtTime(0.001, relEnd)
   modDepth2.gain.setValueAtTime(depth2, time)
   modDepth2.gain.exponentialRampToValueAtTime(0.001, time + attack + 0.1)
 
   env.gain.setValueAtTime(0.001, time)
   env.gain.linearRampToValueAtTime(velocity * 0.6, time + attack)
-  env.gain.setValueAtTime(velocity * 0.6, time + decay - 0.07)
-  env.gain.linearRampToValueAtTime(0.001, time + decay)
+  env.gain.setValueAtTime(velocity * 0.6, susEnd)
+  env.gain.linearRampToValueAtTime(0.001, relEnd)
 
   modulator.connect(modDepth);   modDepth.connect(carrier.frequency)
   modulator2.connect(modDepth2); modDepth2.connect(carrier.frequency)

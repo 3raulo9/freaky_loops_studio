@@ -205,7 +205,7 @@
       <div class="pr-panel-header" :style="{ '--accent': selectedChannel.color }">
         <span class="pr-panel-title">PIANO ROLL</span>
         <span class="pr-panel-ch" :style="{ color: selectedChannel.color }">{{ selectedChannel.name }}</span>
-        <div class="pr-mode-toggle" v-if="selectedChannel.type === 'melodic'">
+        <div class="pr-mode-toggle" v-if="selectedChannel.type === 'melodic' || selectedChannel.type === 'gm'">
           <button
             class="prm-btn"
             :class="{ active: selectedChannel.mode === 'steps' }"

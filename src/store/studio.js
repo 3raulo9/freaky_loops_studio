@@ -7,7 +7,7 @@ import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
 import { parseMidi } from '../midi/midiParser.js'
 import { convertMidiToTracks } from '../midi/midiImport.js'
-import { makeGMPlayFn, preloadGMInstrument } from '../audio/gmSynth.js'
+import { makeGMPlayFn, preloadGMInstrument, gmSustains } from '../audio/gmSynth.js'
 import { GM_INSTRUMENTS, GM_CATEGORIES } from '../midi/gmDictionary.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
@@ -140,7 +140,7 @@ export const FM_PRESETS = {
     fn: playFMBass,
   },
   organ: {
-    name: 'FM ORGAN', color: '#9b59b6',
+    name: 'FM ORGAN', color: '#9b59b6', sustains: true,
     params: { pitch: 60, decay: 0.6, draw: 0.5 },
     knobs: [
       { key: 'pitch', label: 'NOTE',  min: 24,  max: 96,  decimals: 0 },
@@ -150,7 +150,7 @@ export const FM_PRESETS = {
     fn: playFMOrgan,
   },
   brass: {
-    name: 'FM BRASS', color: '#e67e22',
+    name: 'FM BRASS', color: '#e67e22', sustains: true,
     params: { pitch: 60, decay: 0.7, bright: 0.7 },
     knobs: [
       { key: 'pitch',  label: 'NOTE',   min: 24,  max: 96,  decimals: 0 },
@@ -180,7 +180,7 @@ export const FM_PRESETS = {
     fn: playFMClav,
   },
   pad: {
-    name: 'FM PAD', color: '#3498db',
+    name: 'FM PAD', color: '#3498db', sustains: true,
     params: { pitch: 60, decay: 2.5, depth: 0.5 },
     knobs: [
       { key: 'pitch', label: 'NOTE',  min: 24,  max: 96,  decimals: 0 },
@@ -200,7 +200,7 @@ export const FM_PRESETS = {
     fn: playFMPluck,
   },
   flute: {
-    name: 'FM FLUTE', color: '#16a085',
+    name: 'FM FLUTE', color: '#16a085', sustains: true,
     params: { pitch: 72, decay: 1.2, breath: 0.4 },
     knobs: [
       { key: 'pitch',  label: 'NOTE',   min: 48,  max: 96,  decimals: 0 },
@@ -260,7 +260,7 @@ export const FM_PRESETS = {
     fn: playFMXylophone,
   },
   strings: {
-    name: 'FM STRINGS', color: '#6c9bd2',
+    name: 'FM STRINGS', color: '#6c9bd2', sustains: true,
     params: { pitch: 60, decay: 3.0, ensemble: 0.5 },
     knobs: [
       { key: 'pitch',    label: 'NOTE',  min: 24,  max: 96,  decimals: 0 },
@@ -270,7 +270,7 @@ export const FM_PRESETS = {
     fn: playFMStrings,
   },
   cello: {
-    name: 'FM CELLO', color: '#8b6914',
+    name: 'FM CELLO', color: '#8b6914', sustains: true,
     params: { pitch: 48, decay: 1.5, bow: 0.5 },
     knobs: [
       { key: 'pitch', label: 'NOTE',  min: 24,  max: 72,  decimals: 0 },
@@ -280,7 +280,7 @@ export const FM_PRESETS = {
     fn: playFMCello,
   },
   trumpet: {
-    name: 'FM TRUMPET', color: '#cc4400',
+    name: 'FM TRUMPET', color: '#cc4400', sustains: true,
     params: { pitch: 67, decay: 0.8, bright: 0.8 },
     knobs: [
       { key: 'pitch',  label: 'NOTE',  min: 48,  max: 96,  decimals: 0 },
@@ -290,7 +290,7 @@ export const FM_PRESETS = {
     fn: playFMTrumpet,
   },
   clarinet: {
-    name: 'FM CLARINET', color: '#5c8a5e',
+    name: 'FM CLARINET', color: '#5c8a5e', sustains: true,
     params: { pitch: 60, decay: 1.0, reedy: 0.5 },
     knobs: [
       { key: 'pitch', label: 'NOTE',  min: 48,  max: 84,  decimals: 0 },
@@ -330,7 +330,7 @@ export const FM_PRESETS = {
     fn: playFMGlocken,
   },
   wobble: {
-    name: 'FM WOBBLE', color: '#4a4e69',
+    name: 'FM WOBBLE', color: '#4a4e69', sustains: true,
     params: { pitch: 36, decay: 0.6, rate: 0.5 },
     knobs: [
       { key: 'pitch', label: 'NOTE',  min: 24,  max: 60,  decimals: 0 },
@@ -340,7 +340,7 @@ export const FM_PRESETS = {
     fn: playFMWobble,
   },
   choir: {
-    name: 'FM CHOIR', color: '#c77dff',
+    name: 'FM CHOIR', color: '#c77dff', sustains: true,
     params: { pitch: 60, decay: 2.5, vowel: 0.5 },
     knobs: [
       { key: 'pitch', label: 'NOTE',  min: 24,  max: 84,  decimals: 0 },
@@ -380,7 +380,7 @@ export const FM_PRESETS = {
     fn: playFMDistGtr,
   },
   moog: {
-    name: 'FM MOOG', color: '#660099',
+    name: 'FM MOOG', color: '#660099', sustains: true,
     params: { pitch: 48, decay: 0.7, cutoff: 0.5 },
     knobs: [
       { key: 'pitch',  label: 'NOTE',   min: 24,  max: 72,  decimals: 0 },
@@ -420,7 +420,7 @@ export const FM_PRESETS = {
     fn: playFMKoto,
   },
   harmonica: {
-    name: 'FM HARMONICA', color: '#cd853f',
+    name: 'FM HARMONICA', color: '#cd853f', sustains: true,
     params: { pitch: 60, decay: 0.9, reedy: 0.6 },
     knobs: [
       { key: 'pitch', label: 'NOTE',  min: 48,  max: 84,  decimals: 0 },
@@ -430,7 +430,7 @@ export const FM_PRESETS = {
     fn: playFMHarmonica,
   },
   oboe: {
-    name: 'FM OBOE', color: '#2e8b57',
+    name: 'FM OBOE', color: '#2e8b57', sustains: true,
     params: { pitch: 65, decay: 1.0, nasal: 0.6 },
     knobs: [
       { key: 'pitch', label: 'NOTE',  min: 48,  max: 84,  decimals: 0 },
@@ -449,6 +449,16 @@ export const FM_PRESETS = {
     ],
     fn: playFMTabla,
   },
+}
+
+// Infer the continuous-voice flag for projects saved before `sustains` existed,
+// from the GM program (sampled voices) or the FM/synth play-function key.
+function deriveChannelSustains(ch) {
+  if (ch.params?.gmProgram != null) return gmSustains(ch.params.gmProgram)
+  const fk = ch.fnKey
+  if (fk === 'melodic') return true
+  if (typeof fk === 'string' && fk.startsWith('fm:')) return !!FM_PRESETS[fk.slice(3)]?.sustains
+  return false
 }
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
@@ -519,6 +529,10 @@ function makeChannel(overrides = {}) {
     loopLength:  16,
     cutSelf:     false,
     swingMix:    1.0,
+    // Continuous-voice flag: when true, a held live note sustains until release
+    // (set on synth/FM/GM channels whose timbre rings continuously). Plucked and
+    // percussive voices leave this false and keep their natural decay.
+    sustains:    false,
     groupId:        null,
     activeModules:  [],
     instrumentType: '',
@@ -700,12 +714,14 @@ export function useStudio() {
       } else {
         const prog = Math.max(0, Math.min(127, track.gmProgram ?? 0))
         ch = makeChannel({
-          name:   track.name,
-          color:  gmChannelColor(prog),
-          mode:   'piano',
-          fn:     makeGMPlayFn(prog),
-          params: { gmProgram: prog },
-          knobs:  [],
+          name:     track.name,
+          color:    gmChannelColor(prog),
+          type:     'gm',
+          mode:     'piano',
+          sustains: gmSustains(prog),
+          fn:       makeGMPlayFn(prog),
+          params:   makeGMParams(prog),
+          knobs:    gmKnobs(),
         })
       }
 
@@ -2099,21 +2115,86 @@ export function useStudio() {
   const pressedKeys     = new Set()
   const pressedKeyPitch = new Map()  // key code → MIDI pitch (so keyUp knows what to stop)
 
-  function playNote(ch, pitch) {
+  // Held-voice registry for continuous built-in synths (sawtooth / FM / GM).
+  // Maps `${channelId}:${pitch}` → { release(when) }. A live note on a sustaining
+  // voice is kept open and only ends when the key is released — so the sound lasts
+  // exactly as long as the key is held, with a release tail.
+  const liveVoices = new Map()
+  const HOLD_MAX   = 30   // s — upper bound a single held note can sustain (oscillator safety cap)
+
+  function _releaseLiveVoice(key, when) {
+    const v = liveVoices.get(key)
+    if (!v) return
+    liveVoices.delete(key)
+    try { v.release(when) } catch (_) {}
+  }
+
+  // sustain=true → held voice that lasts until stopNote (live keyboard / piano keys).
+  // sustain=false → brief one-shot audition (note drawing) with the instrument's
+  // own natural decay; never leaves a voice open.
+  function playNote(ch, pitch, sustain = true) {
     if (!audioCtx) initAudio()
     const ci   = channels.indexOf(ch)
     const dest = (ci >= 0 && trackGains[ci]) ? trackGains[ci] : audioCtx.destination
     const when = audioCtx.currentTime + 0.005
-    ch.fn(audioCtx, when, { ...ch.params, pitch: pitch + masterPitchSemis.value, velocity: 1 }, dest)
+    const p    = pitch + masterPitchSemis.value
+    const key  = ch.id + ':' + pitch
+
+    // Retrigger: release any voice already sounding for this exact key first.
+    _releaseLiveVoice(key, when)
+
+    // Continuous built-in synths (sawtooth + FM): sustain the note open-ended via a
+    // generous gate, routed through a dedicated release-gain so note-off applies a
+    // controllable release tail regardless of the instrument's internal envelope.
+    if (sustain && ch.sustains && ch.type === 'melodic') {
+      const relGain = audioCtx.createGain()
+      relGain.gain.value = 1
+      relGain.connect(dest)
+      ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1, gate: HOLD_MAX, hold: true }, relGain)
+      const relTime = Math.max(0.06, Math.min(2.5, ch.params.release ?? ch.params.decay ?? 0.4))
+      liveVoices.set(key, {
+        release(t) {
+          const tt = Math.max(t ?? audioCtx.currentTime, audioCtx.currentTime)
+          try {
+            relGain.gain.cancelScheduledValues(tt)
+            relGain.gain.setValueAtTime(Math.max(relGain.gain.value, 0.0001), tt)
+            relGain.gain.exponentialRampToValueAtTime(0.0001, tt + relTime)
+          } catch (_) {}
+          setTimeout(() => { try { relGain.disconnect() } catch (_) {} }, (relTime + 0.2) * 1000)
+        },
+      })
+      registerVoice(when, 1)
+      return
+    }
+
+    // Continuous GM voices: loop-sustain the sample until note-off (node.stop runs
+    // the ADSR release).
+    if (sustain && ch.sustains && ch.type === 'gm') {
+      const node = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1, hold: true }, dest)
+      if (node) {
+        liveVoices.set(key, {
+          release(t) {
+            const tt = Math.max(t ?? audioCtx.currentTime, audioCtx.currentTime)
+            try { node.stop(tt) } catch (_) {}
+          },
+        })
+      }
+      registerVoice(when, 1)
+      return
+    }
+
+    // Plucked / percussive / one-shot voices: fire-and-forget, natural decay.
+    ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1 }, dest)
     registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.35) + 0.15)
   }
 
-  // Stop an active note — essential for WASM/JS/Custom Synth plugins which
-  // sustain until noteOff. For Web Audio (FM/melodic) channels the oscillators
-  // are already scheduled to stop on their own, so this is a no-op for them.
+  // Stop an active note. Continuous built-in synths (sawtooth/FM/GM) release their
+  // held voice here; plugin channels (WASM/JS/Custom/SUBTERRA) get a noteOff message.
+  // Plucked/percussive Web-Audio voices self-stop, so this is a no-op for them.
   function stopNote(ch, pitch) {
     if (!ch || !audioCtx) return
     const t = audioCtx.currentTime + 0.005
+    _releaseLiveVoice(ch.id + ':' + pitch, t)
     if (ch.type === 'wasm') {
       const node = wasmNodes.get(ch.id)
       if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
@@ -2124,6 +2205,18 @@ export function useStudio() {
       const node = subterraNodes.get(ch.id)
       if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
     }
+  }
+
+  // Safety net: if the window loses focus mid-hold the keyup may never arrive, so
+  // release every held voice (otherwise a looping GM sample could ring forever).
+  if (typeof window !== 'undefined') {
+    window.addEventListener('blur', () => {
+      if (!audioCtx || !liveVoices.size) return
+      const t = audioCtx.currentTime
+      for (const key of [...liveVoices.keys()]) _releaseLiveVoice(key, t)
+      pressedKeys.clear()
+      pressedKeyPitch.clear()
+    })
   }
 
   // Panic — instantly silence everything currently playing.
@@ -2137,6 +2230,8 @@ export function useStudio() {
     if (!audioCtx) return
 
     const t = audioCtx.currentTime
+    // Release every held continuous voice immediately.
+    for (const key of [...liveVoices.keys()]) _releaseLiveVoice(key, t)
     customSynthNodes.forEach(node => {
       try { node.port.postMessage({ type: 'allNotesOff', time: t }) } catch (_) {}
     })
@@ -2399,6 +2494,7 @@ export function useStudio() {
     const ch = makeChannel({
       name:  'SYNTH ' + (channels.filter(c => c.type === 'melodic').length + 1),
       color: COLORS[colorCursor++ % COLORS.length],
+      sustains: true,   // sawtooth synth is a continuous voice
     })
     channels.push(ch)
     if (audioCtx) rebuildGains()
@@ -2409,11 +2505,12 @@ export function useStudio() {
     const preset = FM_PRESETS[presetKey]
     if (!preset) return
     const ch = makeChannel({
-      name:   preset.name,
-      color:  preset.color,
-      params: { ...preset.params },
-      knobs:  preset.knobs.map(k => ({ ...k })),
-      fn:     preset.fn,
+      name:     preset.name,
+      color:    preset.color,
+      sustains: !!preset.sustains,
+      params:   { ...preset.params },
+      knobs:    preset.knobs.map(k => ({ ...k })),
+      fn:       preset.fn,
     })
     channels.push(ch)
     if (audioCtx) rebuildGains()
@@ -2432,16 +2529,37 @@ export function useStudio() {
     return GM_CAT_COLORS[idx] ?? '#6b7280'
   }
 
+  // Default params + editable knobs shared by every GM instrument channel
+  // (created from the picker or imported from MIDI). Gives the sample-based GM
+  // voices the same DAW-style controls as the FM synths: a NOTE knob that sets
+  // the pitch in step-sequencer mode, a full ADSR amplitude envelope and an
+  // output level. NOTE is overridden per-note in piano-roll mode.
+  function makeGMParams(prog) {
+    return { gmProgram: prog, pitch: 60, attack: 0, decay: 0.4, sustain: 0.9, release: 0.3, level: 1.0 }
+  }
+  function gmKnobs() {
+    return [
+      { key: 'pitch',   label: 'NOTE',  min: 24,   max: 96,  decimals: 0 },
+      { key: 'attack',  label: 'ATCK',  min: 0,    max: 1.5, decimals: 2 },
+      { key: 'decay',   label: 'DECAY', min: 0.01, max: 3.0, decimals: 2 },
+      { key: 'sustain', label: 'SUS',   min: 0,    max: 1,   decimals: 2 },
+      { key: 'release', label: 'REL',   min: 0.01, max: 3.0, decimals: 2 },
+      { key: 'level',   label: 'LEVEL', min: 0,    max: 1.5, decimals: 2 },
+    ]
+  }
+
   function addGMChannel(program) {
     const prog = Math.max(0, Math.min(127, program))
     const name = (GM_INSTRUMENTS[prog] ?? 'SYNTH').split(/[\s(]/)[0].toUpperCase().slice(0, 10)
     const ch = makeChannel({
       name,
-      color:  gmChannelColor(prog),
-      mode:   'piano',
-      fn:     makeGMPlayFn(prog),
-      params: { gmProgram: prog },
-      knobs:  [],
+      color:    gmChannelColor(prog),
+      type:     'gm',
+      mode:     'piano',
+      sustains: gmSustains(prog),
+      fn:       makeGMPlayFn(prog),
+      params:   makeGMParams(prog),
+      knobs:    gmKnobs(),
     })
     channels.push(ch)
     if (audioCtx) rebuildGains()
@@ -2777,6 +2895,7 @@ export function useStudio() {
         loopLength:  ch.loopLength,
         cutSelf:     ch.cutSelf  ?? false,
         swingMix:    ch.swingMix ?? 1.0,
+        sustains:    ch.sustains ?? false,
         groupId:     ch.groupId,
         params:         { ...ch.params },
         knobs:          ch.knobs.map(k => ({ ...k })),
@@ -2860,7 +2979,10 @@ export function useStudio() {
       id:          ch.id,
       name:        ch.name,
       color:       ch.color,
-      type:        ch.type        ?? 'melodic',
+      // GM channels are identified by a saved program number; normalise older
+      // projects (saved before the dedicated 'gm' type existed) so the rack
+      // shows their instrument controls instead of the melodic wave selector.
+      type:        ch.params?.gmProgram != null ? 'gm' : (ch.type ?? 'melodic'),
       mode:        ch.mode        ?? 'piano',
       volume:      ch.volume      ?? 0.8,
       pan:         ch.pan         ?? 0,
@@ -2873,12 +2995,18 @@ export function useStudio() {
       loopLength:  ch.loopLength  ?? 16,
       cutSelf:     ch.cutSelf     ?? false,
       swingMix:    ch.swingMix    ?? 1.0,
+      // Continuous-voice flag; derive it for projects saved before it existed.
+      sustains:    ch.sustains ?? deriveChannelSustains(ch),
       groupId:     ch.groupId     ?? null,
       params:         { ...(ch.params ?? {}) },
       knobs:          (ch.knobs ?? []).map(k => ({ ...k })),
-      fn:             ch.type === 'sample' && ch.sampleSpec
-                        ? makeSampleFn(ch.sampleSpec)
-                        : (FN_FROM_KEY[ch.fnKey] ?? playMelodicNote),
+      // GM voices use a per-program closure that isn't in FN_KEY_MAP, so rebuild
+      // it from the saved program number instead of the (meaningless) fnKey.
+      fn:             ch.params?.gmProgram != null
+                        ? makeGMPlayFn(ch.params.gmProgram)
+                        : ch.type === 'sample' && ch.sampleSpec
+                          ? makeSampleFn(ch.sampleSpec)
+                          : (FN_FROM_KEY[ch.fnKey] ?? playMelodicNote),
       activeModules:  [...(ch.activeModules ?? [])],
       instrumentType: ch.instrumentType ?? '',
       sampleSpec:     ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
@@ -2956,6 +3084,14 @@ export function useStudio() {
     _gid      = Math.max(_gid,      ...channelGroups.map(g  => parseInt(g.id.replace(/^g/, ''))  || 0))
 
     if (audioCtx) rebuildGains()
+
+    // Warm up GM sample sets so loaded projects are audible without a first-note delay.
+    if (audioCtx) {
+      channels.forEach(ch => {
+        if (ch.params?.gmProgram != null) preloadGMInstrument(audioCtx, ch.params.gmProgram)
+      })
+    }
+
     undoStack.length = 0
     redoStack.length = 0
   }

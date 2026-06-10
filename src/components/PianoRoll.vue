@@ -581,6 +581,9 @@ let keyHeld = false
 function onKeyPress(pitch) { keyHeld = true; activePitch.value = pitch; playNote(targetCh.value, pitch) }
 function onKeyHover(pitch) {
   if (!keyHeld || activePitch.value === pitch) return
+  // Gliding across keys: release the previous held note before sounding the next,
+  // so sustaining voices don't pile up.
+  if (activePitch.value !== null) stopNote(targetCh.value, activePitch.value)
   activePitch.value = pitch; playNote(targetCh.value, pitch)
 }
 
@@ -641,7 +644,7 @@ function doPaint(x, y) {
   const notes = getPatData(targetChId.value).pianoNotes
   if (!notes.some(n => Math.round(n.startTick) === startTick && n.pitch === paintStroke.pitch)) {
     notes.push({ startTick, pitch: paintStroke.pitch, velocity: 0.8, durationTicks: snapTicks.value })
-    playNote(targetCh.value, paintStroke.pitch)
+    playNote(targetCh.value, paintStroke.pitch, false)   // brief audition, not a held note
   }
 }
 
@@ -756,7 +759,7 @@ function onGridDown(e) {
   selectedNotes.value = new Set()
   const notes = getPatData(targetChId.value).pianoNotes
   notes.push({ startTick, pitch, velocity: 0.8, durationTicks: snapTicks.value })
-  playNote(targetCh.value, pitch)
+  playNote(targetCh.value, pitch, false)   // brief audition, not a held note
   drag = {
     type: 'create', noteIdx: notes.length - 1,
     startClientX: e.clientX, origDurationTicks: snapTicks.value,

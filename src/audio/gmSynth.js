@@ -75,6 +75,23 @@ export function getSoundfontName(program) {
   return GM_SOUNDFONT_NAMES[Math.max(0, Math.min(127, program))] ?? 'acoustic_grand_piano'
 }
 
+// Whether a GM program is a *continuous* voice (organ, strings, winds, pads…) that
+// should sustain for as long as a key is held, versus a naturally-decaying / plucked
+// voice (piano, guitar, mallets, percussion) that rings out on its own. Used to
+// decide whether held live notes loop-sustain until note-off.
+export function gmSustains(program) {
+  const p = Math.max(0, Math.min(127, program | 0))
+  // Decaying exceptions that fall inside otherwise-sustaining ranges:
+  // 45 pizzicato strings · 46 orchestral harp · 47 timpani · 55 orchestra hit
+  if (p === 45 || p === 46 || p === 47 || p === 55) return false
+  if (p >= 16 && p <= 23)  return true   // Organ
+  if (p >= 40 && p <= 54)  return true   // Strings + Ensemble (minus exceptions)
+  if (p >= 56 && p <= 79)  return true   // Brass + Reed + Pipe
+  if (p >= 80 && p <= 103) return true   // Synth Lead + Pad + FX
+  if (p === 109 || p === 110 || p === 111) return true  // bagpipe, fiddle, shanai
+  return false
+}
+
 // Start loading a GM instrument. Returns a Promise<Instrument>.
 // Safe to call multiple times — results are cached per (audioCtx, program).
 export function preloadGMInstrument(audioCtx, program) {
@@ -90,26 +107,57 @@ export function preloadGMInstrument(audioCtx, program) {
 }
 
 // Returns a play function compatible with the studio channel fn API:
-//   fn(audioCtx, time, { pitch, velocity, gate }, destNode)
+//   fn(audioCtx, time, { pitch, velocity, gate, attack, decay, sustain, release, level }, destNode)
+//
+// Beyond pitch/velocity/gate, the channel's editable knobs feed a full ADSR
+// amplitude envelope + output level so GM voices can be sound-shaped like any
+// other instrument in the rack (sample-player applies the envelope on top of
+// the PCM sample). The envelope is passed as an `adsr` array because that path
+// honours exact zero values, whereas the individual options fall back to the
+// library defaults on a falsy `0`.
 //
 // The instrument loads lazily on first call; notes are silent while loading
 // (typically < 2 seconds on first visit, instant from cache on return).
 export function makeGMPlayFn(program) {
-  const prog = Math.max(0, Math.min(127, program))
+  const prog      = Math.max(0, Math.min(127, program))
+  const _sustains = gmSustains(prog)
   let _inst = null
 
+  // Returns the playing voice node (with a `.stop(when)` that runs the release
+  // envelope) when started in `hold` mode on a sustaining program, so the caller
+  // can release it on note-off. Otherwise returns undefined (fire-and-forget).
   return function playGM(audioCtx, time, params, dest) {
-    const { pitch = 60, velocity = 1, gate = 0.5 } = params
+    const {
+      pitch = 60, velocity = 1, gate = 0.5, hold = false,
+      attack = 0, decay = 0.4, sustain = 0.9, release = 0.3, level = 1,
+    } = params
 
     if (!_inst) {
       preloadGMInstrument(audioCtx, prog).then(inst => { _inst = inst })
       return
     }
 
+    const adsr = [
+      Math.max(0,     attack),
+      Math.max(0.001, decay),
+      Math.max(0, Math.min(1, sustain)),
+      Math.max(0.001, release),
+    ]
+    const gain        = Math.max(0.0001, Math.min(2, velocity * 0.85 * level))
+    const destination = dest ?? audioCtx.destination
+
+    // Held live note on a continuous voice: loop the sample so it sustains until
+    // the key is released (no fixed duration). The returned node's .stop(when)
+    // applies the ADSR release tail.
+    if (hold && _sustains) {
+      return _inst.play(pitch, time, { gain, adsr, loop: true, destination })
+    }
+
     _inst.play(pitch, time, {
-      gain:        Math.min(1, velocity * 0.85),
-      duration:    Math.max(0.05, gate),
-      destination: dest ?? audioCtx.destination,
+      gain,
+      duration: Math.max(0.05, gate),
+      adsr,
+      destination,
     })
   }
 }

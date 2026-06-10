@@ -709,8 +709,13 @@ function toggleGMCat(name) {
   expandedGMCat.value = expandedGMCat.value === name ? null : name
 }
 
-function onDocClick() {
-  showSynthPicker.value = false
+function onDocClick(e) {
+  // Keep the synth picker open while the user interacts inside it — expanding a
+  // GM instrument category is a two-step action (open category → pick program),
+  // and this capture-phase handler would otherwise close the picker on the very
+  // first click, making the entire GM section unreachable. Leaf items still
+  // close it explicitly after adding a channel.
+  if (!e.target?.closest?.('.add-synth-wrap')) showSynthPicker.value = false
   optionsOpen.value = false
   dfOpen.value = false
 }
