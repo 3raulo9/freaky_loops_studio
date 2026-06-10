@@ -2111,6 +2111,138 @@ export function useStudio() {
     isPlaying.value ? pausePlay() : startPlay()
   }
 
+  // ── Real-time render capture ──────────────────────────────────────────────────
+  //   Renders by playing the project through the *live* audio graph and recording
+  //   the master bus, so every voice — including the AudioWorklet plugins (Custom
+  //   Synth / SUBTERRA / WASM) that an OfflineAudioContext can't reproduce — is
+  //   captured exactly as it sounds. Slower than offline (real time) but complete.
+  //   `tracks` is the same resolved list the offline renderer takes (per channel:
+  //   { id, mode, fn, params, volume, pan, muted, swingMix, pattern, pianoNotes,
+  //     stepVelocities }). Returns an AudioBuffer at the live context sample rate.
+  async function renderRealtimeToBuffer(tracks, opts = {}) {
+    const {
+      bpm: bpmV = bpm.value, totalSteps: tsteps = totalSteps.value,
+      swing: swingV = 0, bars = 1, tail = 3, normalize = true, onProgress,
+    } = opts
+
+    initAudio()
+    if (isPlaying.value) stopPlay()
+    try { await audioCtx.resume() } catch (_) {}
+
+    const secPerStep   = (60 / bpmV) / 4
+    const secPerTick   = secPerStep / TICKS_PER_STEP
+    const patternTicks = tsteps * TICKS_PER_STEP
+    const timelineSec  = tsteps * secPerStep * bars
+
+    // Decode any GM soundfonts into the live context up-front so they're audible.
+    const gmProgs = [...new Set(
+      tracks.filter(t => !t.muted && t.params?.gmProgram != null)
+            .map(t => Math.max(0, Math.min(127, t.params.gmProgram)))
+    )]
+    if (gmProgs.length) {
+      try { await Promise.all(gmProgs.map(p => preloadGMInstrument(audioCtx, p))) } catch (_) {}
+    }
+
+    // Build a flat, time-sorted event list (offsets relative to render start).
+    const chIndex = new Map(channels.map((c, i) => [c.id, i]))
+    const events  = []
+    for (const track of tracks) {
+      if (track.muted || typeof track.fn !== 'function') continue
+      const ci = chIndex.get(track.id)
+      if (ci == null) continue
+      const dest     = cutGains[ci] ?? trackGains[ci] ?? masterGain
+      const swingMix = track.swingMix ?? 1
+      for (let rep = 0; rep < bars; rep++) {
+        const repSec = rep * patternTicks * secPerTick
+        if (track.mode === 'piano') {
+          for (const n of (track.pianoNotes || [])) {
+            if (n.muted) continue
+            const startTick = n.startTick ?? 0
+            const step      = Math.floor(startTick / TICKS_PER_STEP)
+            const swingOff  = (step % 2 === 1) ? swingV * swingMix * (secPerStep / 3) : 0
+            const offset    = repSec + startTick * secPerTick + swingOff
+            const gate      = Math.max(0.05, (n.durationTicks ?? TICKS_PER_STEP) * secPerTick)
+            events.push({ offset, fn: track.fn, dest, params: {
+              ...track.params, pitch: n.pitch + masterPitchSemis.value, velocity: n.velocity ?? 1, gate,
+            } })
+          }
+        } else {
+          const steps = track.pattern || []
+          for (let s = 0; s < tsteps; s++) {
+            if (!steps[s]) continue
+            const swingOff = (s % 2 === 1) ? swingV * swingMix * (secPerStep / 3) : 0
+            const offset   = repSec + s * secPerStep + swingOff
+            events.push({ offset, fn: track.fn, dest, params: {
+              ...track.params, velocity: track.stepVelocities?.[s] ?? 0.8,
+            } })
+          }
+        }
+      }
+    }
+    events.sort((a, b) => a.offset - b.offset)
+
+    // Recorder tap on the limited master bus (post mixer + limiter, pre monitor trim).
+    const rec      = audioCtx.createScriptProcessor(4096, 2, 2)
+    const chunksL  = []
+    const chunksR  = []
+    const startAt  = audioCtx.currentTime + 0.3
+    const endAt    = startAt + timelineSec + tail
+    let   armed    = false
+    rec.onaudioprocess = (e) => {
+      if (!armed) { if (audioCtx.currentTime < startAt) return; armed = true }
+      if (audioCtx.currentTime > endAt + 0.2) return
+      chunksL.push(e.inputBuffer.getChannelData(0).slice(0))
+      chunksR.push(e.inputBuffer.getChannelData(1).slice(0))
+    }
+    masterLimiter.connect(rec)
+    const sink = audioCtx.createGain(); sink.gain.value = 0   // keep the processor pulled without re-outputting
+    rec.connect(sink); sink.connect(audioCtx.destination)
+
+    // Real-time lookahead dispatch: fire events ~0.3 s before they sound so we
+    // never create the whole song's worth of nodes at once.
+    const LOOK = 0.3
+    let ei = 0
+    await new Promise(resolve => {
+      const iv = setInterval(() => {
+        const now = audioCtx.currentTime
+        while (ei < events.length && startAt + events[ei].offset <= now + LOOK) {
+          const ev = events[ei++]
+          try { ev.fn(audioCtx, startAt + ev.offset, ev.params, ev.dest) } catch (_) {}
+        }
+        if (onProgress) onProgress(Math.max(0, Math.min(0.99, (now - startAt) / (timelineSec + tail))))
+        if (now >= endAt) { clearInterval(iv); resolve() }
+      }, 25)
+    })
+
+    try { masterLimiter.disconnect(rec) } catch (_) {}
+    try { rec.disconnect() } catch (_) {}
+    try { sink.disconnect() } catch (_) {}
+    rec.onaudioprocess = null
+
+    // Assemble captured chunks into an AudioBuffer.
+    const sr     = audioCtx.sampleRate
+    const want   = Math.max(1, Math.ceil((timelineSec + tail) * sr))
+    const total  = chunksL.reduce((a, c) => a + c.length, 0)
+    const frames = Math.min(want, total || 1)
+    const buf    = audioCtx.createBuffer(2, frames, sr)
+    const outL = buf.getChannelData(0), outR = buf.getChannelData(1)
+    let off = 0
+    for (let i = 0; i < chunksL.length && off < frames; i++) {
+      const cL = chunksL[i], cR = chunksR[i]
+      for (let j = 0; j < cL.length && off < frames; j++, off++) { outL[off] = cL[j]; outR[off] = cR[j] }
+    }
+
+    if (normalize) {
+      let peak = 0
+      for (let i = 0; i < frames; i++) { const a = Math.abs(outL[i]), b = Math.abs(outR[i]); if (a > peak) peak = a; if (b > peak) peak = b }
+      if (peak > 0 && peak < 0.97) {
+        const g = 0.97 / peak
+        for (let i = 0; i < frames; i++) { outL[i] *= g; outR[i] *= g }
+      }
+    }
+    return buf
+  }
+
   // ── Keyboard live play ────────────────────────────────────────────────────────
   const pressedKeys     = new Set()
   const pressedKeyPitch = new Map()  // key code → MIDI pitch (so keyUp knows what to stop)
@@ -3190,6 +3322,8 @@ export function useStudio() {
     loopRegion, setLoopRegion, clearLoopRegion,
     // Project save / load
     saveProject, loadProjectFile,
+    // Real-time render capture (covers live AudioWorklet plugins)
+    renderRealtimeToBuffer,
     // Drum modules
     addDrumModule, removeDrumModule,
   }

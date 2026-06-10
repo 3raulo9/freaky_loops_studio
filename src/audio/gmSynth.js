@@ -66,9 +66,19 @@ const GM_SOUNDFONT_NAMES = [
 // WeakMap lets GC clean up when the AudioContext is closed.
 const _cache = new WeakMap()
 
+// Synchronously-resolved instruments per context. A play call needs the live
+// Instrument object *now* (no awaiting), and an instrument is bound to the exact
+// AudioContext it was decoded on — so live and offline (render) contexts each get
+// their own entry. WeakMap<AudioContext, Map<program, Instrument>>.
+const _resolved = new WeakMap()
+
 function getCtxCache(ctx) {
   if (!_cache.has(ctx)) _cache.set(ctx, new Map())
   return _cache.get(ctx)
+}
+
+function getResolved(ctx, prog) {
+  return _resolved.get(ctx)?.get(prog) ?? null
 }
 
 export function getSoundfontName(program) {
@@ -98,10 +108,17 @@ export function preloadGMInstrument(audioCtx, program) {
   const prog = Math.max(0, Math.min(127, program))
   const cache = getCtxCache(audioCtx)
   if (!cache.has(prog)) {
-    cache.set(prog, Soundfont.instrument(audioCtx, GM_SOUNDFONT_NAMES[prog], {
+    const promise = Soundfont.instrument(audioCtx, GM_SOUNDFONT_NAMES[prog], {
       soundfont: 'FluidR3_GM',
       format:    'mp3',
-    }))
+    }).then(inst => {
+      // Record the resolved instrument for synchronous lookup during playback.
+      let m = _resolved.get(audioCtx)
+      if (!m) { m = new Map(); _resolved.set(audioCtx, m) }
+      m.set(prog, inst)
+      return inst
+    })
+    cache.set(prog, promise)
   }
   return cache.get(prog)
 }
@@ -117,11 +134,12 @@ export function preloadGMInstrument(audioCtx, program) {
 // library defaults on a falsy `0`.
 //
 // The instrument loads lazily on first call; notes are silent while loading
-// (typically < 2 seconds on first visit, instant from cache on return).
+// (typically < 2 seconds on first visit, instant from cache on return). Playback
+// resolves the instrument for the *call's* audioCtx, so the same channel renders
+// correctly on both the live context and an offline render context.
 export function makeGMPlayFn(program) {
   const prog      = Math.max(0, Math.min(127, program))
   const _sustains = gmSustains(prog)
-  let _inst = null
 
   // Returns the playing voice node (with a `.stop(when)` that runs the release
   // envelope) when started in `hold` mode on a sustaining program, so the caller
@@ -132,8 +150,10 @@ export function makeGMPlayFn(program) {
       attack = 0, decay = 0.4, sustain = 0.9, release = 0.3, level = 1,
     } = params
 
-    if (!_inst) {
-      preloadGMInstrument(audioCtx, prog).then(inst => { _inst = inst })
+    const inst = getResolved(audioCtx, prog)
+    if (!inst) {
+      // Not yet decoded for this context — kick off the load; this note is silent.
+      preloadGMInstrument(audioCtx, prog)
       return
     }
 
@@ -150,10 +170,10 @@ export function makeGMPlayFn(program) {
     // the key is released (no fixed duration). The returned node's .stop(when)
     // applies the ADSR release tail.
     if (hold && _sustains) {
-      return _inst.play(pitch, time, { gain, adsr, loop: true, destination })
+      return inst.play(pitch, time, { gain, adsr, loop: true, destination })
     }
 
-    _inst.play(pitch, time, {
+    inst.play(pitch, time, {
       gain,
       duration: Math.max(0.05, gate),
       adsr,

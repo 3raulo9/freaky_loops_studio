@@ -31,6 +31,13 @@
           ⚠ OGG encoding plays back audio in real time to capture it — it takes as long as the audio duration.
         </div>
 
+        <!-- ── Worklet-plugin notice ──────────────────────────── -->
+        <div v-if="workletChannels.length" class="notice">
+          ⚙ {{ workletChannels.length }} plugin channel{{ workletChannels.length > 1 ? 's' : '' }}
+          ({{ workletChannels.map(c => c.name).join(', ') }}) —
+          when used, the render runs in real time through the live engine to capture them, so it takes as long as the audio.
+        </div>
+
         <!-- ── WAV settings ───────────────────────────────────── -->
         <template v-if="format === 'wav'">
           <section class="sect">
@@ -252,21 +259,35 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { useStudio } from '../store/studio.js'
+import { useStudio, TICKS_PER_STEP } from '../store/studio.js'
 import {
   renderLoopToWav,
   renderLoopToMp3,
   renderLoopToOgg,
   getOggMimeType,
+  isOfflineRenderable,
 } from '../audio/export.js'
 
 defineEmits(['close'])
 
 const {
-  channels, bpm, totalSteps, swing,
+  channels, bpm, totalSteps, swing, masterPitchSemis,
   getPatData, currentPatternId,
   patterns, playlistClips, playlistTracks,
+  renderRealtimeToBuffer,
 } = useStudio()
+
+// Channels whose DSP runs in a live AudioWorklet (Custom Synth / SUBTERRA / WASM).
+// These can't run inside an OfflineAudioContext, so when one actually plays in the
+// render we capture the live engine in real time instead (slower, but complete).
+const workletChannels = computed(() => channels.filter(c => !isOfflineRenderable(c)))
+
+// True when a resolved track set includes an audible worklet voice → use real-time
+// capture so those plugins are rendered.
+function tracksNeedRealtime(tracks) {
+  return tracks.some(t => !isOfflineRenderable(t) && !t.muted &&
+    ((t.pianoNotes && t.pianoNotes.length) || (t.pattern && t.pattern.some(Boolean))))
+}
 
 // ── Render mode ───────────────────────────────────────────────────────────────
 const renderMode      = ref('song')           // 'song' | 'pattern'
@@ -328,9 +349,19 @@ function resolvedSongTracks() {
               vels[absStep]  = d.stepVelocities?.[patStep] ?? 0.8
             }
           } else {
-            d.pianoNotes.filter(n => n.step === patStep).forEach(note => {
-              pianoNotes.push({ ...note, step: absStep })
-            })
+            // Map each pattern note (tick-based) to its absolute position in the
+            // song timeline, preserving its sub-step offset and full duration.
+            for (const n of d.pianoNotes) {
+              const nStep = Math.floor((n.startTick ?? 0) / TICKS_PER_STEP)
+              if (nStep !== patStep) continue
+              const subTick = (n.startTick ?? 0) - nStep * TICKS_PER_STEP
+              pianoNotes.push({
+                startTick:     absStep * TICKS_PER_STEP + subTick,
+                pitch:         n.pitch,
+                velocity:      n.velocity ?? 0.8,
+                durationTicks: n.durationTicks ?? TICKS_PER_STEP,
+              })
+            }
           }
         }
       })
@@ -470,25 +501,7 @@ async function startRender() {
   isRendering.value = true
   progress.value    = 0
   errorMsg.value    = ''
-
-  // For OGG: fake progress doesn't work (it's real-time), show pulsing instead
-  const isOgg = format.value === 'ogg'
   let timer
-
-  if (!isOgg) {
-    progressLabel.value = 'Rendering offline…'
-    timer = setInterval(() => {
-      if (progress.value < 88) progress.value += (90 - progress.value) * 0.06
-    }, 80)
-  } else {
-    progressLabel.value = 'Encoding in real time (plays back audio)…'
-    // Fake a time-based progress for OGG
-    const est = duration.value * 1000
-    const start = Date.now()
-    timer = setInterval(() => {
-      progress.value = Math.min(95, ((Date.now() - start) / est) * 100)
-    }, 100)
-  }
 
   try {
     // Resolve tracks and timing based on render mode
@@ -505,42 +518,65 @@ async function startRender() {
     }
 
     const shared = {
-      bpm:        bpm.value,
-      totalSteps: renderTotalSteps,
-      swing:      swing.value,
-      bars:       renderBars,
-      tail:       tail.value,
+      bpm:         bpm.value,
+      totalSteps:  renderTotalSteps,
+      swing:       swing.value,
+      bars:        renderBars,
+      tail:        tail.value,
+      masterPitch: masterPitchSemis.value,
     }
+
+    const normalize = format.value === 'wav' ? wav.value.normalize
+                    : format.value === 'mp3' ? mp3.value.normalize
+                    : ogg.value.normalize
+
+    // Real-time capture when the render contains a live AudioWorklet plugin; the
+    // engine plays the project through and we record the master. Otherwise render
+    // offline (fast). Either way produces a buffer the encoders consume.
+    const useRealtime = tracksNeedRealtime(tracks)
+    let buffer = null
+    if (useRealtime) {
+      progressLabel.value = 'Rendering in real time — playing through the live engine…'
+      buffer = await renderRealtimeToBuffer(tracks, {
+        ...shared, normalize,
+        onProgress: p => { progress.value = Math.min(96, p * 100) },
+      })
+      progressLabel.value = 'Encoding…'
+    } else if (format.value === 'ogg') {
+      progressLabel.value = 'Encoding in real time (plays back audio)…'
+      const est = duration.value * 1000
+      const start = Date.now()
+      timer = setInterval(() => { progress.value = Math.min(95, ((Date.now() - start) / est) * 100) }, 100)
+    } else {
+      progressLabel.value = 'Rendering offline…'
+      timer = setInterval(() => { if (progress.value < 88) progress.value += (90 - progress.value) * 0.06 }, 80)
+    }
+
+    const encOpts = extra => ({ ...shared, ...extra, buffer })
 
     let result
     if (format.value === 'wav') {
-      progressLabel.value = `Rendering WAV — ${wav.value.sampleRate/1000}kHz · ${wav.value.bitDepth}-bit…`
-      result = await renderLoopToWav(tracks, {
-        ...shared,
+      result = await renderLoopToWav(tracks, encOpts({
         sampleRate: wav.value.sampleRate,
         bitDepth:   wav.value.bitDepth,
         channels:   wav.value.channels,
         normalize:  wav.value.normalize,
         dither:     wav.value.dither,
-      })
+      }))
     } else if (format.value === 'mp3') {
-      progressLabel.value = `Rendering audio, then encoding MP3 at ${mp3.value.bitrate} kbps…`
-      result = await renderLoopToMp3(tracks, {
-        ...shared,
-        bitrate:   mp3.value.bitrate,
-        channels:  mp3.value.channels,
-        normalize: mp3.value.normalize,
+      result = await renderLoopToMp3(tracks, encOpts({
+        bitrate:    mp3.value.bitrate,
+        channels:   mp3.value.channels,
+        normalize:  mp3.value.normalize,
         sampleRate: 44100,
-      })
+      }))
     } else if (format.value === 'ogg') {
-      progressLabel.value = `Encoding OGG/Opus at ${ogg.value.bitrate} kbps — playing back in real time…`
-      result = await renderLoopToOgg(tracks, {
-        ...shared,
-        bitrate:   ogg.value.bitrate,
-        channels:  ogg.value.channels,
-        normalize: ogg.value.normalize,
+      result = await renderLoopToOgg(tracks, encOpts({
+        bitrate:    ogg.value.bitrate,
+        channels:   ogg.value.channels,
+        normalize:  ogg.value.normalize,
         sampleRate: 48000,
-      })
+      }))
     }
 
     clearInterval(timer)
