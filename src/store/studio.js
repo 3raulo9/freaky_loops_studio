@@ -2132,7 +2132,6 @@ export function useStudio() {
     const secPerStep   = (60 / bpmV) / 4
     const secPerTick   = secPerStep / TICKS_PER_STEP
     const patternTicks = tsteps * TICKS_PER_STEP
-    const timelineSec  = tsteps * secPerStep * bars
 
     // Decode any GM soundfonts into the live context up-front so they're audible.
     const gmProgs = [...new Set(
@@ -2181,12 +2180,22 @@ export function useStudio() {
     }
     events.sort((a, b) => a.offset - b.offset)
 
+    // Only capture as long as the passed instruments actually play (up to their
+    // last note's end), not the whole arrangement — so a short plugin part inside
+    // a long song records its own span instead of trailing silence to the end.
+    let contentSec = 0
+    for (const ev of events) {
+      const end = ev.offset + (ev.params.gate ?? 0.35)
+      if (end > contentSec) contentSec = end
+    }
+    const captureSec = contentSec
+
     // Recorder tap on the limited master bus (post mixer + limiter, pre monitor trim).
     const rec      = audioCtx.createScriptProcessor(4096, 2, 2)
     const chunksL  = []
     const chunksR  = []
     const startAt  = audioCtx.currentTime + 0.3
-    const endAt    = startAt + timelineSec + tail
+    const endAt    = startAt + captureSec + tail
     let   armed    = false
     rec.onaudioprocess = (e) => {
       if (!armed) { if (audioCtx.currentTime < startAt) return; armed = true }
@@ -2209,7 +2218,7 @@ export function useStudio() {
           const ev = events[ei++]
           try { ev.fn(audioCtx, startAt + ev.offset, ev.params, ev.dest) } catch (_) {}
         }
-        if (onProgress) onProgress(Math.max(0, Math.min(0.99, (now - startAt) / (timelineSec + tail))))
+        if (onProgress) onProgress(Math.max(0, Math.min(0.99, (now - startAt) / (captureSec + tail))))
         if (now >= endAt) { clearInterval(iv); resolve() }
       }, 25)
     })
@@ -2221,7 +2230,7 @@ export function useStudio() {
 
     // Assemble captured chunks into an AudioBuffer.
     const sr     = audioCtx.sampleRate
-    const want   = Math.max(1, Math.ceil((timelineSec + tail) * sr))
+    const want   = Math.max(1, Math.ceil((captureSec + tail) * sr))
     const total  = chunksL.reduce((a, c) => a + c.length, 0)
     const frames = Math.min(want, total || 1)
     const buf    = audioCtx.createBuffer(2, frames, sr)

@@ -35,7 +35,7 @@
         <div v-if="workletChannels.length" class="notice">
           ⚙ {{ workletChannels.length }} plugin channel{{ workletChannels.length > 1 ? 's' : '' }}
           ({{ workletChannels.map(c => c.name).join(', ') }}) —
-          when used, the render runs in real time through the live engine to capture them, so it takes as long as the audio.
+          when used, only that part is captured in real time and mixed with the rest, which renders instantly.
         </div>
 
         <!-- ── WAV settings ───────────────────────────────────── -->
@@ -266,6 +266,8 @@ import {
   renderLoopToOgg,
   getOggMimeType,
   isOfflineRenderable,
+  renderAudioBuffer,
+  mixBuffers,
 } from '../audio/export.js'
 
 defineEmits(['close'])
@@ -281,13 +283,6 @@ const {
 // These can't run inside an OfflineAudioContext, so when one actually plays in the
 // render we capture the live engine in real time instead (slower, but complete).
 const workletChannels = computed(() => channels.filter(c => !isOfflineRenderable(c)))
-
-// True when a resolved track set includes an audible worklet voice → use real-time
-// capture so those plugins are rendered.
-function tracksNeedRealtime(tracks) {
-  return tracks.some(t => !isOfflineRenderable(t) && !t.muted &&
-    ((t.pianoNotes && t.pianoNotes.length) || (t.pattern && t.pattern.some(Boolean))))
-}
 
 // ── Render mode ───────────────────────────────────────────────────────────────
 const renderMode      = ref('song')           // 'song' | 'pattern'
@@ -530,17 +525,27 @@ async function startRender() {
                     : format.value === 'mp3' ? mp3.value.normalize
                     : ogg.value.normalize
 
-    // Real-time capture when the render contains a live AudioWorklet plugin; the
-    // engine plays the project through and we record the master. Otherwise render
-    // offline (fast). Either way produces a buffer the encoders consume.
-    const useRealtime = tracksNeedRealtime(tracks)
+    // Smart split: instruments that an OfflineAudioContext can reproduce (synth,
+    // FM, GM, drums, samples) render offline — fast, regardless of song length.
+    // Live AudioWorklet plugins (Custom Synth / SUBTERRA / WASM) can't, so only
+    // *those* tracks are captured in real time, and only for as long as they
+    // actually play. The two are then mixed. So a simple MIDI song is instant, and
+    // a song with one plugin only pays real-time for that plugin's part.
+    const realtimeTracks = tracks.filter(t => !isOfflineRenderable(t) && !t.muted &&
+      ((t.pianoNotes && t.pianoNotes.length) || (t.pattern && t.pattern.some(Boolean))))
+
     let buffer = null
-    if (useRealtime) {
-      progressLabel.value = 'Rendering in real time — playing through the live engine…'
-      buffer = await renderRealtimeToBuffer(tracks, {
-        ...shared, normalize,
-        onProgress: p => { progress.value = Math.min(96, p * 100) },
+    if (realtimeTracks.length) {
+      progressLabel.value = 'Capturing plugins in real time…'
+      const rtBuf = await renderRealtimeToBuffer(realtimeTracks, {
+        ...shared, normalize: false,
+        onProgress: p => { progress.value = Math.min(90, p * 88) },
       })
+      // Render everything else offline at the captured buffer's rate, then mix.
+      progressLabel.value = 'Rendering the rest offline & mixing…'
+      const offlineTracks = tracks.filter(t => isOfflineRenderable(t))
+      const offBuf = await renderAudioBuffer(offlineTracks, { ...shared, sampleRate: rtBuf.sampleRate, normalize: false })
+      buffer = mixBuffers([offBuf, rtBuf], { normalize })
       progressLabel.value = 'Encoding…'
     } else if (format.value === 'ogg') {
       progressLabel.value = 'Encoding in real time (plays back audio)…'

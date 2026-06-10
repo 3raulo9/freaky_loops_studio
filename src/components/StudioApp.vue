@@ -7,28 +7,33 @@
     <div class="studio-body">
 
       <!-- ── Browser sidebar (docked: W_main = W_total − W_browser) ──── -->
-      <aside
-        v-if="browserOpen && !detachedWindows.browser"
-        class="browser-sidebar"
-        :style="{ width: browserWidth + 'px', minWidth: browserWidth + 'px' }"
-      >
-        <BrowserPanel />
-        <div class="browser-resize" @mousedown.prevent="startBrowserResize" title="Drag to resize" />
-      </aside>
+      <Transition name="slideleft">
+        <aside
+          v-if="browserOpen && !detachedWindows.browser"
+          class="browser-sidebar"
+          :style="{ width: browserWidth + 'px', minWidth: browserWidth + 'px' }"
+        >
+          <BrowserPanel />
+          <div class="browser-resize" @mousedown.prevent="startBrowserResize" title="Drag to resize" />
+        </aside>
+      </Transition>
 
       <!-- ── Left: Channel Rack / Playlist / Mixer ─────────────────── -->
       <div class="main-area">
-        <ChannelRack v-if="mainView === 'sequencer' && !detachedWindows.rack" />
-        <Playlist    v-else-if="mainView === 'playlist' && !detachedWindows.playlist" />
-        <Mixer       v-else-if="mainView === 'mixer' && !detachedWindows.mixer" />
-        <div v-else class="detached-placeholder">
-          <span class="dp-icon">⇱</span>
-          <span class="dp-text">{{ mainViewTitle }} is detached</span>
-          <button class="dp-btn" @click="redockWindow(detachedIdForView)">Re-dock</button>
-        </div>
+        <Transition name="view" mode="out-in">
+          <ChannelRack v-if="mainView === 'sequencer' && !detachedWindows.rack" key="rack" />
+          <Playlist    v-else-if="mainView === 'playlist' && !detachedWindows.playlist" key="playlist" />
+          <Mixer       v-else-if="mainView === 'mixer' && !detachedWindows.mixer" key="mixer" />
+          <div v-else class="detached-placeholder" key="placeholder">
+            <span class="dp-icon">⇱</span>
+            <span class="dp-text">{{ mainViewTitle }} is detached</span>
+            <button class="dp-btn" @click="redockWindow(detachedIdForView)">Re-dock</button>
+          </div>
+        </Transition>
       </div>
 
       <!-- ── Right: Properties panel (sequencer only) ────────────────── -->
+      <Transition name="slideright">
       <aside class="props-panel" v-if="mainView === 'sequencer' && !detachedWindows.rack" @click="showModulePicker = false">
         <div class="props-header" :style="{ borderColor: selectedChannel.color }">
           <span class="props-name" :style="{ color: selectedChannel.color }">{{ selectedChannel.name }}</span>
@@ -160,19 +165,27 @@
         <!-- Clear button -->
         <button class="props-clr" @click="clearChannel(selectedChannel.id)">CLR PATTERN</button>
       </aside>
+      </Transition>
 
     </div>
 
     <!-- ── Render modal ──────────────────────────────────────────────── -->
-    <RenderModal v-if="renderModalOpen" @close="renderModalOpen = false" />
+    <Transition name="modal">
+      <RenderModal v-if="renderModalOpen" @close="renderModalOpen = false" />
+    </Transition>
 
     <!-- ── Theme modal ───────────────────────────────────────────────── -->
-    <ThemeModal v-if="themeModalOpen" @close="themeModalOpen = false" />
+    <Transition name="modal">
+      <ThemeModal v-if="themeModalOpen" @close="themeModalOpen = false" />
+    </Transition>
 
     <!-- ── MIDI Port Router ──────────────────────────────────────────── -->
-    <MidiPortRouter v-if="midiRouterOpen" @close="midiRouterOpen = false" />
+    <Transition name="popin">
+      <MidiPortRouter v-if="midiRouterOpen" @close="midiRouterOpen = false" />
+    </Transition>
 
     <!-- ── Bottom: Custom Synth panel (when custom synth selected + piano roll closed) ── -->
+    <Transition name="slideup">
     <div
       v-if="selectedChannel.type === 'custom' && mainView === 'sequencer' && !pianoRollOpen"
       class="custom-synth-panel"
@@ -181,8 +194,10 @@
       <div class="pr-resize-handle" @mousedown="startCustomSynthResize" title="Drag to resize" />
       <CustomSynth />
     </div>
+    </Transition>
 
     <!-- ── Bottom: SUBTERRA bass panel (when subterra channel selected + piano roll closed) ── -->
+    <Transition name="slideup">
     <div
       v-if="selectedChannel.type === 'subterra' && mainView === 'sequencer' && !pianoRollOpen"
       class="custom-synth-panel"
@@ -191,8 +206,10 @@
       <div class="pr-resize-handle" @mousedown="startCustomSynthResize" title="Drag to resize" />
       <Subterra />
     </div>
+    </Transition>
 
     <!-- ── Bottom: Piano Roll panel ──────────────────────────────────── -->
+    <Transition name="slideup">
     <div
       v-if="pianoRollOpen && mainView === 'sequencer' && !detachedWindows.piano"
       class="piano-roll-panel"
@@ -224,16 +241,19 @@
       <PianoRoll v-if="selectedChannel.mode === 'piano'" :ch="selectedChannel" />
       <StepGrid  v-else :ch="selectedChannel" />
     </div>
+    </Transition>
 
     <!-- ── Detached (floating) windows layer ─────────────────────────── -->
-    <FloatWindow v-if="detachedWindows.rack"     id="rack"     title="CHANNEL RACK" accent="#9b59b6"><ChannelRack /></FloatWindow>
-    <FloatWindow v-if="detachedWindows.playlist" id="playlist" title="PLAYLIST"     accent="#3498db"><Playlist /></FloatWindow>
-    <FloatWindow v-if="detachedWindows.mixer"    id="mixer"    title="MIXER"        accent="#3498db"><Mixer /></FloatWindow>
-    <FloatWindow v-if="detachedWindows.piano"    id="piano"    title="PIANO ROLL"   :accent="selectedChannel.color"><PianoRoll :ch="selectedChannel" /></FloatWindow>
-    <FloatWindow v-if="detachedWindows.browser"  id="browser"  title="BROWSER"      accent="#f1c40f"><BrowserPanel /></FloatWindow>
+    <Transition name="popin"><FloatWindow v-if="detachedWindows.rack"     id="rack"     title="CHANNEL RACK" accent="#9b59b6"><ChannelRack /></FloatWindow></Transition>
+    <Transition name="popin"><FloatWindow v-if="detachedWindows.playlist" id="playlist" title="PLAYLIST"     accent="#3498db"><Playlist /></FloatWindow></Transition>
+    <Transition name="popin"><FloatWindow v-if="detachedWindows.mixer"    id="mixer"    title="MIXER"        accent="#3498db"><Mixer /></FloatWindow></Transition>
+    <Transition name="popin"><FloatWindow v-if="detachedWindows.piano"    id="piano"    title="PIANO ROLL"   :accent="selectedChannel.color"><PianoRoll :ch="selectedChannel" /></FloatWindow></Transition>
+    <Transition name="popin"><FloatWindow v-if="detachedWindows.browser"  id="browser"  title="BROWSER"      accent="#f1c40f"><BrowserPanel /></FloatWindow></Transition>
 
     <!-- ── Extended Hint Panel (floating HUD) ────────────────────────── -->
-    <ExtendedHud v-if="extendedHudOpen" />
+    <Transition name="hud">
+      <ExtendedHud v-if="extendedHudOpen" />
+    </Transition>
 
   </div>
 </template>
