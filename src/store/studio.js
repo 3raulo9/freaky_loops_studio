@@ -1004,6 +1004,214 @@ export function useStudio() {
     if (t) t.locked = val
   }
 
+  function clonePlaylistTrack(id) {
+    const srcIdx = playlistTracks.findIndex(t => t.id === id)
+    if (srcIdx < 0) return
+    const src   = playlistTracks[srcIdx]
+    const newId = 'pt' + Date.now()
+    playlistTracks.splice(srcIdx + 1, 0, { ...src, id: newId, name: src.name + ' (copy)', _soloed: false })
+    playlistClips.filter(c => c.trackId === id)
+      .forEach(c => playlistClips.push({ ...c, id: 'c' + (++_clipId), trackId: newId }))
+    automationClips.filter(a => a.trackId === id)
+      .forEach(a => automationClips.push({ ...a, id: 'a' + (++_autoId), trackId: newId, nodes: a.nodes.map(n => ({ ...n })) }))
+  }
+
+  function movePlaylistTrackUp(id) {
+    const idx = playlistTracks.findIndex(t => t.id === id)
+    if (idx <= 0) return
+    const [t] = playlistTracks.splice(idx, 1)
+    playlistTracks.splice(idx - 1, 0, t)
+  }
+
+  function movePlaylistTrackDown(id) {
+    const idx = playlistTracks.findIndex(t => t.id === id)
+    if (idx < 0 || idx >= playlistTracks.length - 1) return
+    const [t] = playlistTracks.splice(idx, 1)
+    playlistTracks.splice(idx + 1, 0, t)
+  }
+
+  function setTrackColor(id, color) {
+    const t = playlistTracks.find(t => t.id === id)
+    if (t) t.color = color
+  }
+
+  function autoNameTrack(id) {
+    const firstClip = [...playlistClips].filter(c => c.trackId === id).sort((a, b) => a.cell - b.cell)[0]
+    if (!firstClip) return
+    const pat = patterns.find(p => p.id === firstClip.patternId)
+    if (!pat) return
+    const t = playlistTracks.find(t => t.id === id)
+    if (t) { t.name = pat.name; t.color = pat.color }
+  }
+
+  // ── Insert / Delete time ──────────────────────────────────────────────────────
+  function insertTime(fromCell, numCells) {
+    playlistClips.forEach(c  => { if (c.cell >= fromCell) c.cell += numCells })
+    automationClips.forEach(a => { if (a.cell >= fromCell) a.cell += numCells })
+    timeMarkers.forEach(m   => { if (m.cell >= fromCell) m.cell += numCells })
+  }
+
+  function deleteTime(fromCell, toCell) {
+    const span = toCell - fromCell
+    for (let i = playlistClips.length - 1; i >= 0; i--) {
+      const c = playlistClips[i], end = c.cell + (c.width || 1)
+      if (c.cell >= fromCell && end <= toCell) { playlistClips.splice(i, 1) }
+      else if (c.cell >= toCell)               { c.cell -= span }
+    }
+    for (let i = automationClips.length - 1; i >= 0; i--) {
+      const a = automationClips[i], end = a.cell + (a.width || 1)
+      if (a.cell >= fromCell && end <= toCell) { automationClips.splice(i, 1) }
+      else if (a.cell >= toCell)               { a.cell -= span }
+    }
+    for (let i = timeMarkers.length - 1; i >= 0; i--) {
+      const m = timeMarkers[i]
+      if (m.cell >= fromCell && m.cell < toCell) { timeMarkers.splice(i, 1) }
+      else if (m.cell >= toCell)                 { m.cell -= span }
+    }
+  }
+
+  // ── Beat / Bar slice ──────────────────────────────────────────────────────────
+  function beatSliceClip(clipId, mode = 'bar') {
+    const clip = playlistClips.find(c => c.id === clipId)
+    if (!clip || (mode === 'bar' && (clip.width || 1) <= 1)) return
+    const totalBars = clip.width || 1
+    const startCell = clip.cell, startSlip = clip.slipOffset ?? 0
+    const tid = clip.trackId, pid = clip.patternId, mt = clip.muted
+    const count        = mode === 'bar' ? totalBars : totalBars * 4
+    const barFrac      = mode === 'bar' ? 1 : 0.25
+    const stepsPerSlice = mode === 'bar' ? totalSteps.value : Math.ceil(totalSteps.value / 4)
+    removeClip(clipId)
+    for (let i = 0; i < count; i++) {
+      playlistClips.push({
+        id: 'c' + (++_clipId), trackId: tid,
+        cell: startCell + i * barFrac, patternId: pid,
+        width: barFrac, slipOffset: startSlip + i * stepsPerSlice, muted: mt,
+      })
+    }
+  }
+
+  // ── Duplicate selected clips (Ctrl+B) ─────────────────────────────────────────
+  function duplicateClips(clipIds) {
+    const clips = playlistClips.filter(c => clipIds.has(c.id))
+    if (!clips.length) return new Set()
+    const minStart = Math.min(...clips.map(c => c.cell))
+    const maxEnd   = Math.max(...clips.map(c => c.cell + (c.width || 1)))
+    const offset   = maxEnd - minStart
+    const newIds   = new Set()
+    clips.forEach(c => {
+      const newId = 'c' + (++_clipId)
+      playlistClips.push({ ...c, id: newId, cell: c.cell + offset })
+      newIds.add(newId)
+    })
+    return newIds
+  }
+
+  // ── FL Studio Arrangements (multiple Playlist layouts) ─────────────────────────
+  const playlists = reactive([{ id: 'pl1', name: 'Arrangement 1' }])
+  const currentPlaylistId = ref('pl1')
+  const _playlistSnapshots = reactive({})
+
+  function _saveCurrentPlaylistSnapshot() {
+    _playlistSnapshots[currentPlaylistId.value] = {
+      tracks:    playlistTracks.map(t => ({ ...t })),
+      clips:     playlistClips.map(c => ({ ...c })),
+      markers:   timeMarkers.map(m => ({ ...m })),
+      autoClips: automationClips.map(a => ({ ...a, nodes: a.nodes.map(n => ({ ...n })) })),
+    }
+  }
+
+  function _loadPlaylistSnapshot(id) {
+    const data = _playlistSnapshots[id]
+    if (!data) return
+    playlistTracks.splice(0, playlistTracks.length, ...data.tracks.map(t => ({ ...t, _soloed: false })))
+    playlistClips.splice(0, playlistClips.length, ...data.clips.map(c => ({ ...c })))
+    timeMarkers.splice(0, timeMarkers.length, ...data.markers.map(m => ({ ...m })))
+    automationClips.splice(0, automationClips.length, ...data.autoClips.map(a => ({ ...a, nodes: a.nodes.map(n => ({ ...n })) })))
+  }
+
+  function switchPlaylist(id) {
+    if (id === currentPlaylistId.value) return
+    _saveCurrentPlaylistSnapshot()
+    currentPlaylistId.value = id
+    if (!_playlistSnapshots[id]) {
+      _playlistSnapshots[id] = {
+        tracks: [
+          { id: 'pt1', name: 'Track 1', color: '#e74c3c', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null },
+          { id: 'pt2', name: 'Track 2', color: '#3498db', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null },
+        ],
+        clips: [], markers: [], autoClips: [],
+      }
+    }
+    _loadPlaylistSnapshot(id)
+  }
+
+  function clonePlaylist(name) {
+    _saveCurrentPlaylistSnapshot()
+    const newId = 'pl' + Date.now()
+    playlists.push({ id: newId, name: name || 'Arrangement ' + (playlists.length + 1) })
+    _playlistSnapshots[newId] = {
+      tracks:    playlistTracks.map(t => ({ ...t })),
+      clips:     playlistClips.map(c => ({ ...c })),
+      markers:   timeMarkers.map(m => ({ ...m })),
+      autoClips: automationClips.map(a => ({ ...a, nodes: a.nodes.map(n => ({ ...n })) })),
+    }
+    currentPlaylistId.value = newId
+  }
+
+  function addPlaylist() {
+    const newId = 'pl' + Date.now()
+    playlists.push({ id: newId, name: 'Arrangement ' + (playlists.length + 1) })
+    _saveCurrentPlaylistSnapshot()
+    _playlistSnapshots[newId] = {
+      tracks: [
+        { id: 'pt1', name: 'Track 1', color: '#e74c3c', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null },
+        { id: 'pt2', name: 'Track 2', color: '#3498db', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null },
+      ],
+      clips: [], markers: [], autoClips: [],
+    }
+    currentPlaylistId.value = newId
+    _loadPlaylistSnapshot(newId)
+  }
+
+  function renamePlaylist(id, name) {
+    const pl = playlists.find(p => p.id === id)
+    if (pl && name.trim()) pl.name = name.trim()
+  }
+
+  function deletePlaylist(id) {
+    if (playlists.length <= 1) return
+    _saveCurrentPlaylistSnapshot()
+    const idx = playlists.findIndex(p => p.id === id)
+    if (idx < 0) return
+    playlists.splice(idx, 1)
+    delete _playlistSnapshots[id]
+    if (currentPlaylistId.value === id) {
+      const newId = playlists[Math.max(0, idx - 1)].id
+      currentPlaylistId.value = newId
+      _loadPlaylistSnapshot(newId)
+    }
+  }
+
+  function mergePlaylist(sourceId, position = 'end', mode = 'merge') {
+    _saveCurrentPlaylistSnapshot()
+    const src  = _playlistSnapshots[sourceId]
+    const dest = _playlistSnapshots[currentPlaylistId.value]
+    if (!src || !dest) return
+    let offset = 0
+    if (position === 'end' && dest.clips.length)
+      offset = Math.max(...dest.clips.map(c => c.cell + (c.width || 1)))
+    const srcClips = src.clips.map(c => ({ ...c, id: 'c' + (++_clipId), cell: c.cell + offset }))
+    if (mode === 'replace') {
+      dest.clips = srcClips
+    } else if (mode === 'insert') {
+      const srcLen = src.clips.length ? Math.max(...src.clips.map(c => c.cell + (c.width || 1))) : 0
+      dest.clips   = dest.clips.map(c => ({ ...c, cell: c.cell + srcLen })).concat(srcClips)
+    } else {
+      dest.clips = dest.clips.concat(srcClips)
+    }
+    _loadPlaylistSnapshot(currentPlaylistId.value)
+  }
+
   // ── Automation clips ───────────────────────────────────────────────────────────
   const automationClips = reactive([])
   let _autoId = 0
@@ -3735,8 +3943,15 @@ export function useStudio() {
     placeClip, removeClip, moveClip, resizeClip, splitClip, setSlipOffset, makeUniqueClip, consolidateTrack,
     addTimeMarker, removeTimeMarker,
     PLAYLIST_CELLS,
-    // Track groups/lock
+    // Track groups/lock/ops
     groupTrackWithAbove, ungroupTrack, toggleTrackCollapse, setTrackLocked,
+    clonePlaylistTrack, movePlaylistTrackUp, movePlaylistTrackDown, setTrackColor, autoNameTrack,
+    // Insert/Delete time
+    insertTime, deleteTime,
+    // Beat slice + duplicate
+    beatSliceClip, duplicateClips,
+    // Arrangements
+    playlists, currentPlaylistId, switchPlaylist, clonePlaylist, addPlaylist, renamePlaylist, deletePlaylist, mergePlaylist,
     // Automation
     automationClips, addAutomationClip, removeAutomationClip,
     addAutoNode, removeAutoNode, resizeAutomationClip,

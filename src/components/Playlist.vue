@@ -13,6 +13,16 @@
     <!-- ── Toolbar ─────────────────────────────────────────────────────────────── -->
     <div class="pl-toolbar">
 
+      <!-- Arrangements dropdown -->
+      <div class="arr-group" title="Playlist Arrangements">
+        <select class="arr-select" :value="currentPlaylistId" @change="switchPlaylist($event.target.value)">
+          <option v-for="pl in playlists" :key="pl.id" :value="pl.id">{{ pl.name }}</option>
+        </select>
+        <button class="arr-btn" @click="openArrMenu" title="Arrangement options">▾</button>
+      </div>
+
+      <div class="divider" />
+
       <!-- Clip focus icons -->
       <div class="focus-group" title="Clip layer focus">
         <button class="focus-btn" :class="{ active: clipFocusMode === 'pattern' }"
@@ -38,11 +48,38 @@
 
       <div class="divider" />
 
+      <!-- Snap -->
+      <label class="tb-label">SNAP</label>
+      <select class="tb-select snap-select" v-model="localSnap" title="Snap resolution">
+        <option value="none">None</option>
+        <option value="beat">1 Beat</option>
+        <option value="bar">1 Bar</option>
+        <option value="2bar">2 Bars</option>
+        <option value="4bar">4 Bars</option>
+      </select>
+
       <div class="divider" />
 
+      <!-- Zoom -->
       <label class="tb-label">ZOOM</label>
+      <div class="zoom-quick-btns">
+        <button class="zoom-q" @click="cellWidth = 32"  title="Shift+1">◾</button>
+        <button class="zoom-q" @click="cellWidth = 64"  title="Shift+2">◾</button>
+        <button class="zoom-q" @click="cellWidth = 96"  title="Shift+3">◾</button>
+        <button class="zoom-q" @click="cellWidth = 140" title="Shift+4">◾</button>
+        <button class="zoom-q" @click="cellWidth = 200" title="Shift+5">◾</button>
+      </div>
       <input type="range" v-model.number="cellWidth" min="32" max="200" step="8" class="zoom-slider" />
-      <span class="tb-val">{{ cellWidth }}px</span>
+
+      <div class="divider" />
+
+      <!-- Loop region toggle -->
+      <button class="loop-btn"
+        :class="{ active: !!loopRegion }"
+        @click="toggleLoopRegion"
+        title="Toggle loop region (drawn in ruler by Ctrl+drag)">
+        ⟳ LOOP
+      </button>
 
       <div class="divider" />
 
@@ -63,6 +100,18 @@
         <button class="tb-btn" @click="addMarkerPrompt">+ MARKER</button>
       </div>
 
+    </div>
+
+    <!-- Arrangement menu -->
+    <div v-if="arrMenu" class="ctx-menu" :style="{ top: arrMenu.y + 'px', left: arrMenu.x + 'px' }" @click.stop>
+      <div class="ctx-item" @click="ctxCloneArr">Clone arrangement</div>
+      <div class="ctx-item" @click="ctxAddArr">Add empty arrangement</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxRenameArr">Rename current…</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item" @click="openMergeDialog">Merge with…</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item danger" @click="ctxDeleteArr" :class="{ disabled: playlists.length <= 1 }">Delete arrangement</div>
     </div>
 
     <!-- ── Mini-map ────────────────────────────────────────────────────────────── -->
@@ -166,6 +215,11 @@
               <span class="ruler-num">{{ c }}</span>
               <div v-if="markerAt(c - 1)" class="time-marker">{{ markerAt(c - 1).label }}</div>
             </div>
+            <!-- Loop region highlight band -->
+            <div v-if="loopRegion" class="loop-region-band"
+              :style="loopRegionBandStyle"
+              title="Loop region — right-click to clear"
+              @contextmenu.prevent="clearLoopRegion()" />
             <!-- Playhead needle drawn by canvas overlay -->
           </div>
         </div>
@@ -255,7 +309,7 @@
                     @mousedown.stop="onLeftResizeStart($event, clip)" />
 
                   <!-- Title bar: solid theme color strip with name + dropdown -->
-                  <div class="clip-titlebar" :style="{ background: patternColor(clip.patternId) }">
+                  <div class="clip-titlebar" :style="{ background: clipColor(clip) }">
                     <button
                       class="clip-dropdown-btn"
                       @mousedown.stop
@@ -265,7 +319,7 @@
                     <span
                       class="clip-titlebar-name"
                       :class="{ 'name-muted': clip.muted }"
-                    >{{ patternName(clip.patternId) }}</span>
+                    >{{ clipLabel(clip) }}</span>
                     <!-- Step 11: source-offset badge ("⊳N" shows which bar content starts from) -->
                     <span v-if="(clip.slipOffset ?? 0) > 0"
                       class="clip-offset-badge"
@@ -281,7 +335,7 @@
                   </div>
 
                   <!-- Body: translucent theme color with canvas note preview -->
-                  <div class="clip-body" :style="{ background: hexToRgba(patternColor(clip.patternId), 0.18) }">
+                  <div class="clip-body" :style="{ background: hexToRgba(clipColor(clip), 0.18) }">
                     <canvas
                       :ref="el => onClipCanvasRef(clip.id, el)"
                       class="clip-note-canvas"
@@ -389,16 +443,29 @@
       @click.stop
     >
       <div class="ctx-item" @click="ctxRename">Rename…</div>
+      <div class="ctx-item" @click="ctxAutoName">Auto name</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxPickTrackColor">
+        Change color…
+        <input ref="trackColorInput" type="color" class="hidden-color"
+          @change="onTrackColorPicked($event)" />
+      </div>
+      <div class="ctx-sep" />
       <div v-if="!trackMenu.track.groupParentId" class="ctx-item" @click="ctxGroupAbove">Group with above track</div>
       <div v-else class="ctx-item" @click="ctxUngroup">Remove from group</div>
       <div v-if="hasChildren(trackMenu.track)" class="ctx-item" @click="ctxToggleCollapse">
         {{ trackMenu.track.collapsed ? 'Expand group' : 'Collapse group' }}
       </div>
       <div class="ctx-item" @click="ctxToggleLock">
-        {{ trackMenu.track.locked ? '🔓 Unlock track' : '⚿ Lock to content' }}
+        {{ trackMenu.track.locked ? 'Unlock track' : 'Lock to content' }}
       </div>
       <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxCloneTrack">Clone track</div>
+      <div class="ctx-item" @click="ctxMoveUp">Move up</div>
+      <div class="ctx-item" @click="ctxMoveDown">Move down</div>
+      <div class="ctx-sep" />
       <div class="ctx-item" @click="ctxConsolidate">Consolidate lane clips</div>
+      <div class="ctx-item" @click="ctxMergePatternClips">Merge pattern clips</div>
       <div class="ctx-sep" />
       <div class="ctx-item danger" @click="ctxRemoveTrack">Remove track</div>
     </div>
@@ -410,8 +477,19 @@
       :style="{ top: clipMenu.y + 'px', left: clipMenu.x + 'px' }"
       @click.stop
     >
+      <div class="ctx-item" @click="ctxRenameClip">Rename and color…</div>
+      <div class="ctx-item" @click="ctxPickClipColor">
+        Change color…
+        <input ref="clipColorInput" type="color" class="hidden-color"
+          @change="onClipColorPicked($event)" />
+      </div>
+      <div class="ctx-sep" />
       <div class="ctx-item" @click="ctxDuplicateClip">Duplicate clip</div>
       <div class="ctx-item" @click="ctxMakeUnique">Make Unique</div>
+      <div class="ctx-item" @click="ctxSelectSimilar">Select all similar clips</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxBeatSlice('bar')">Chop into Bars</div>
+      <div class="ctx-item" @click="ctxBeatSlice('beat')">Chop into Beats</div>
       <div class="ctx-sep" />
       <div class="ctx-item danger" @click="ctxRemoveClip">Remove clip</div>
     </div>
@@ -455,6 +533,71 @@
       </div>
     </div>
 
+    <!-- ── Clip rename dialog ──────────────────────────────────────────────────── -->
+    <div v-if="clipRenameDialog" class="rename-overlay" @click.self="clipRenameDialog = false">
+      <div class="rename-box">
+        <span class="rename-label">Rename clip</span>
+        <input ref="clipRenameInput" v-model="clipRenameName" class="rename-input"
+          @keydown.enter="commitClipRename" @keydown.esc="clipRenameDialog = false" maxlength="32" />
+        <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+          <label style="font-family:Rajdhani,sans-serif;font-size:11px;color:#606080">Color</label>
+          <input type="color" v-model="clipRenameColor" style="width:36px;height:24px;border:none;background:none;cursor:pointer" />
+        </div>
+        <div class="rename-btns">
+          <button class="rename-ok" @click="commitClipRename">OK</button>
+          <button class="rename-cancel" @click="clipRenameDialog = false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Arrangement rename dialog ──────────────────────────────────────────── -->
+    <div v-if="arrRenameDialog" class="rename-overlay" @click.self="arrRenameDialog = false">
+      <div class="rename-box">
+        <span class="rename-label">Rename arrangement</span>
+        <input ref="arrRenameInput" v-model="arrRenameName" class="rename-input"
+          @keydown.enter="commitArrRename" @keydown.esc="arrRenameDialog = false" maxlength="32" />
+        <div class="rename-btns">
+          <button class="rename-ok" @click="commitArrRename">OK</button>
+          <button class="rename-cancel" @click="arrRenameDialog = false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Merge arrangement dialog ────────────────────────────────────────────── -->
+    <div v-if="mergeDialog" class="rename-overlay" @click.self="mergeDialog = false">
+      <div class="rename-box" style="min-width:340px">
+        <span class="rename-label">Merge arrangement</span>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:4px">
+          <div style="display:flex;align-items:center;gap:8px">
+            <label class="rename-label" style="min-width:120px">Source</label>
+            <select class="tb-select" v-model="mergeSourceId" style="flex:1">
+              <option v-for="pl in playlists" :key="pl.id" :value="pl.id"
+                :disabled="pl.id === currentPlaylistId">{{ pl.name }}</option>
+            </select>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <label class="rename-label" style="min-width:120px">Position</label>
+            <select class="tb-select" v-model="mergePosition" style="flex:1">
+              <option value="start">Start</option>
+              <option value="end">End</option>
+            </select>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <label class="rename-label" style="min-width:120px">Mode</label>
+            <select class="tb-select" v-model="mergeMode" style="flex:1">
+              <option value="merge">Merge</option>
+              <option value="insert">Insert</option>
+              <option value="replace">Replace</option>
+            </select>
+          </div>
+        </div>
+        <div class="rename-btns" style="margin-top:12px">
+          <button class="rename-ok" @click="commitMerge">Accept</button>
+          <button class="rename-cancel" @click="mergeDialog = false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 
@@ -468,10 +611,14 @@ const {
   playlistTracks, playlistClips, automationClips, timeMarkers, usePlaylist,
   playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, displayStep, playbackStartCell, isPlaying,
   bpm, totalSteps, getPlayheadTimeSeconds, gridSnap, ppq, snapBars,
+  loopRegion, setLoopRegion, clearLoopRegion,
   addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
   placeClip, removeClip, moveClip, resizeClip, splitClip, setSlipOffset, makeUniqueClip, consolidateTrack,
   addTimeMarker, removeTimeMarker,
   groupTrackWithAbove, ungroupTrack, toggleTrackCollapse, setTrackLocked,
+  clonePlaylistTrack, movePlaylistTrackUp, movePlaylistTrackDown, setTrackColor, autoNameTrack,
+  insertTime, deleteTime, beatSliceClip, duplicateClips,
+  playlists, currentPlaylistId, switchPlaylist, clonePlaylist, addPlaylist, renamePlaylist, deletePlaylist, mergePlaylist,
   addAutomationClip, removeAutomationClip, addAutoNode, removeAutoNode, resizeAutomationClip,
   getUnusedPatternIds, getPatternLengthTicks,
   PLAYLIST_CELLS,
@@ -530,8 +677,10 @@ function hasChildren(track) {
 // ── Clip helpers ──────────────────────────────────────────────────────────────
 function patternClipsForTrack(trackId) { return playlistClips.filter(c => c.trackId === trackId) }
 function autoClipsForTrack(trackId)    { return automationClips.filter(a => a.trackId === trackId) }
-function patternName(pid)  { return patterns.find(p => p.id === pid)?.name  ?? '?' }
-function patternColor(pid) { return patterns.find(p => p.id === pid)?.color ?? '#4ecdc4' }
+function patternName(pid)    { return patterns.find(p => p.id === pid)?.name  ?? '?' }
+function patternColor(pid)   { return patterns.find(p => p.id === pid)?.color ?? '#4ecdc4' }
+function clipLabel(clip)     { return clip._label ?? patternName(clip.patternId) }
+function clipColor(clip)     { return clip._color  ?? patternColor(clip.patternId) }
 
 // In-clip playhead position (px from clip left edge), or -1 when out of range.
 // Used by Step 6 to draw the real-time bar:beat indicator inside the clip body.
@@ -556,7 +705,7 @@ function patternBarLabel(patId) {
 }
 
 function patternClipStyle(clip) {
-  const color = patternColor(clip.patternId)
+  const color = clipColor(clip)
   return {
     left:  clip.cell * cellWidth.value + 'px',
     width: (clip.width || 1) * cellWidth.value - 2 + 'px',
@@ -703,7 +852,7 @@ function drawClipCanvas(clipId, canvas) {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, clipW, clipH)
 
-  const color    = patternColor(clip.patternId)
+  const color    = clipColor(clip)
   const isActive = clip.patternId === currentPatternId.value || clip.patternId === pickerPatternId.value
   const noteAlpha = isActive ? 0.85 : 0.28
   const clipBars  = clip.width || 1   // 1 playlist cell = 1 bar
@@ -863,6 +1012,22 @@ function addAutoTrack() {
   pickerTab.value     = 'automation'
 }
 
+// ── Local snap (overrides global gridSnap for Playlist) ──────────────────────
+const SNAP_OPTIONS = [
+  { id: 'none', label: 'None', cells: 0 },
+  { id: 'beat', label: '1 Beat', cells: 0.25 },
+  { id: 'bar',  label: '1 Bar',  cells: 1 },
+  { id: '2bar', label: '2 Bars', cells: 2 },
+  { id: '4bar', label: '4 Bars', cells: 4 },
+]
+const localSnap = ref('bar')
+
+function snapCellLocal(rawCell) {
+  const opt = SNAP_OPTIONS.find(o => o.id === localSnap.value)
+  if (!opt || opt.cells === 0) return rawCell
+  return Math.round(rawCell / opt.cells) * opt.cells
+}
+
 // ── Snap helper — routes through the global PPQ quantization engine ───────────
 //   1 playlist cell = 1 bar. Line mode adapts its division to the zoom level.
 function lineTau() {
@@ -872,9 +1037,30 @@ function lineTau() {
   return bar / frac
 }
 function snapCell(raw) {
-  return snapBars(raw, gridSnap.value, gridSnap.value === 'line' ? lineTau() : undefined)
+  const local = snapCellLocal(raw)
+  return local
 }
 function cellFromX(x) { return snapCell(x / cellWidth.value) }
+
+// ── Loop region ───────────────────────────────────────────────────────────────
+const loopRegionBandStyle = computed(() => {
+  if (!loopRegion.value) return {}
+  const TICKS = totalSteps.value * 4    // ticks per bar (cell)
+  const startCell = loopRegion.value.startTick / TICKS
+  const endCell   = loopRegion.value.endTick   / TICKS
+  const startPx = startCell * cellWidth.value
+  const width   = (endCell - startCell) * cellWidth.value
+  return { left: startPx + 'px', width: width + 'px' }
+})
+
+function toggleLoopRegion() {
+  if (loopRegion.value) { clearLoopRegion(); return }
+  const TICKS = totalSteps.value * 4
+  setLoopRegion(displayCell.value * TICKS, (displayCell.value + 4) * TICKS)
+}
+
+// ── Ruler loop-region drag (Ctrl+drag to set loop region) ──────────────────
+let loopDragStart = -1
 
 // ── Pattern clip mouse interactions ──────────────────────────────────────────
 const draggingClip  = ref(null)
@@ -1148,7 +1334,7 @@ function onClipMouseDown(e, clip, track) {
   if (tool !== 'draw') return
   if (track.locked) return
   draggingClip.value = clip
-  dragGhost.value = { trackId: track.id, cell: clip.cell, width: clip.width || 1, color: patternColor(clip.patternId) }
+  dragGhost.value = { trackId: track.id, cell: clip.cell, width: clip.width || 1, color: clipColor(clip) }
   window.addEventListener('mousemove', onDragMove)
   window.addEventListener('mouseup',   onDragEnd, { once: true })
 }
@@ -1164,7 +1350,7 @@ function onDragMove(e) {
   if (!track) return
   const relX = e.clientX - tlRect.left + tl.scrollLeft - 140
   const cell = Math.max(0, Math.min(PLAYLIST_CELLS - (draggingClip.value.width || 1), Math.floor(cellFromX(relX))))
-  dragGhost.value = { trackId: track.id, cell, width: draggingClip.value.width || 1, color: patternColor(draggingClip.value.patternId) }
+  dragGhost.value = { trackId: track.id, cell, width: draggingClip.value.width || 1, color: clipColor(draggingClip.value) }
 }
 
 function onDragEnd() {
@@ -1301,8 +1487,25 @@ function ctxGroupAbove()     { groupTrackWithAbove(trackMenu.value.track.id); tr
 function ctxUngroup()        { ungroupTrack(trackMenu.value.track.id); trackMenu.value = null }
 function ctxToggleCollapse() { toggleTrackCollapse(trackMenu.value.track.id); trackMenu.value = null }
 function ctxToggleLock()     { setTrackLocked(trackMenu.value.track.id, !trackMenu.value.track.locked); trackMenu.value = null }
-function ctxConsolidate()    { consolidateTrack(trackMenu.value.track.id); trackMenu.value = null }
-function ctxRemoveTrack()    { removePlaylistTrack(trackMenu.value.track.id); trackMenu.value = null }
+function ctxConsolidate()         { consolidateTrack(trackMenu.value.track.id); trackMenu.value = null }
+function ctxMergePatternClips()   { consolidateTrack(trackMenu.value.track.id); trackMenu.value = null }
+function ctxRemoveTrack()         { removePlaylistTrack(trackMenu.value.track.id); trackMenu.value = null }
+function ctxCloneTrack()          { clonePlaylistTrack(trackMenu.value.track.id); trackMenu.value = null }
+function ctxMoveUp()              { movePlaylistTrackUp(trackMenu.value.track.id); trackMenu.value = null }
+function ctxMoveDown()            { movePlaylistTrackDown(trackMenu.value.track.id); trackMenu.value = null }
+function ctxAutoName()            { autoNameTrack(trackMenu.value.track.id); trackMenu.value = null }
+
+const trackColorInput = ref(null)
+let   _trackColorTarget = null
+function ctxPickTrackColor() {
+  _trackColorTarget = trackMenu.value?.track
+  trackMenu.value = null
+  nextTick(() => trackColorInput.value?.click())
+}
+function onTrackColorPicked(e) {
+  if (_trackColorTarget) setTrackColor(_trackColorTarget.id, e.target.value)
+  _trackColorTarget = null
+}
 
 // ── Clip context menu ─────────────────────────────────────────────────────────
 const clipMenu = ref(null)
@@ -1312,9 +1515,96 @@ function ctxDuplicateClip() {
   placeClip(c.trackId, c.cell + (c.width || 1), c.patternId, c.width || 1)
   clipMenu.value = null
 }
-function ctxMakeUnique() { makeUniqueClip(clipMenu.value.clip.id); clipMenu.value = null }
-function ctxRemoveClip() { removeClip(clipMenu.value.clip.id); clipMenu.value = null }
-function closeMenus()    { trackMenu.value = null; clipMenu.value = null }
+function ctxMakeUnique()   { makeUniqueClip(clipMenu.value.clip.id); clipMenu.value = null }
+function ctxRemoveClip()   { removeClip(clipMenu.value.clip.id); clipMenu.value = null }
+function ctxSelectSimilar() {
+  const pid = clipMenu.value.clip.patternId
+  selectedClipIds.value = new Set(playlistClips.filter(c => c.patternId === pid).map(c => c.id))
+  clipMenu.value = null
+}
+function ctxBeatSlice(mode) {
+  beatSliceClip(clipMenu.value.clip.id, mode)
+  clipMenu.value = null
+}
+
+// ── Clip rename ───────────────────────────────────────────────────────────────
+const clipRenameDialog = ref(false)
+const clipRenameName   = ref('')
+const clipRenameColor  = ref('#4ecdc4')
+const clipRenameInput  = ref(null)
+let   _clipRenameTarget = null
+function ctxRenameClip() {
+  _clipRenameTarget = clipMenu.value.clip
+  clipRenameName.value  = _clipRenameTarget._label ?? patternName(_clipRenameTarget.patternId)
+  clipRenameColor.value = _clipRenameTarget._color ?? patternColor(_clipRenameTarget.patternId)
+  clipMenu.value        = null
+  clipRenameDialog.value = true
+  nextTick(() => clipRenameInput.value?.select())
+}
+function commitClipRename() {
+  if (_clipRenameTarget) {
+    _clipRenameTarget._label = clipRenameName.value.trim() || undefined
+    _clipRenameTarget._color = clipRenameColor.value
+  }
+  clipRenameDialog.value = false
+}
+
+// ── Clip color picker ─────────────────────────────────────────────────────────
+const clipColorInput  = ref(null)
+let   _clipColorTarget = null
+function ctxPickClipColor() {
+  _clipColorTarget = clipMenu.value?.clip
+  clipMenu.value = null
+  nextTick(() => clipColorInput.value?.click())
+}
+function onClipColorPicked(e) {
+  if (_clipColorTarget) _clipColorTarget._color = e.target.value
+  _clipColorTarget = null
+}
+
+function closeMenus() { trackMenu.value = null; clipMenu.value = null; arrMenu.value = null }
+
+// ── Arrangements menu ─────────────────────────────────────────────────────────
+const arrMenu = ref(null)
+function openArrMenu(e) {
+  closeMenus()
+  const btn = e.currentTarget.getBoundingClientRect()
+  arrMenu.value = { x: btn.left, y: btn.bottom + 4 }
+}
+function ctxCloneArr()  { clonePlaylist(); arrMenu.value = null }
+function ctxAddArr()    { addPlaylist();   arrMenu.value = null }
+function ctxDeleteArr() { deletePlaylist(currentPlaylistId.value); arrMenu.value = null }
+
+const arrRenameDialog = ref(false)
+const arrRenameName   = ref('')
+const arrRenameInput  = ref(null)
+function ctxRenameArr() {
+  const pl = playlists.find(p => p.id === currentPlaylistId.value)
+  arrRenameName.value = pl?.name ?? ''
+  arrMenu.value = null
+  arrRenameDialog.value = true
+  nextTick(() => arrRenameInput.value?.select())
+}
+function commitArrRename() {
+  renamePlaylist(currentPlaylistId.value, arrRenameName.value)
+  arrRenameDialog.value = false
+}
+
+// ── Merge dialog ──────────────────────────────────────────────────────────────
+const mergeDialog   = ref(false)
+const mergeSourceId = ref('')
+const mergePosition = ref('end')
+const mergeMode     = ref('merge')
+function openMergeDialog() {
+  const other = playlists.find(p => p.id !== currentPlaylistId.value)
+  mergeSourceId.value = other?.id ?? ''
+  arrMenu.value   = null
+  mergeDialog.value = true
+}
+function commitMerge() {
+  if (mergeSourceId.value) mergePlaylist(mergeSourceId.value, mergePosition.value, mergeMode.value)
+  mergeDialog.value = false
+}
 
 // ── Track rename ──────────────────────────────────────────────────────────────
 const trackRenaming    = ref(false)
@@ -1408,6 +1698,22 @@ let isScrubbing = false
 
 function onRulerMouseDown(e, cell) {
   if (e.button !== 0) return
+  if (e.ctrlKey) {
+    loopDragStart = cell
+    const TICKS = totalSteps.value * 4
+    setLoopRegion(cell * TICKS, (cell + 1) * TICKS)
+    const onMove = (me) => {
+      if (!timelineRef.value) return
+      const tl  = timelineRef.value
+      const relX = me.clientX - tl.getBoundingClientRect().left + tl.scrollLeft - HEADER_W
+      const c2   = Math.max(0, Math.min(PLAYLIST_CELLS, Math.floor(relX / cellWidth.value)))
+      const s = Math.min(loopDragStart, c2), end = Math.max(loopDragStart + 1, c2 + 1)
+      setLoopRegion(s * TICKS, end * TICKS)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', () => window.removeEventListener('mousemove', onMove), { once: true })
+    return
+  }
   isScrubbing = true
   setPlayheadCell(cell)
   window.addEventListener('mousemove', onRulerScrubMove)
@@ -1502,7 +1808,7 @@ function minimapClipStyle(clip) {
     width:      ((clip.width || 1) / PLAYLIST_CELLS * 100) + '%',
     top:        (tIdx / total * 100) + '%',
     height:     (1 / total * 100) + '%',
-    background: patternColor(clip.patternId),
+    background: clipColor(clip),
     opacity:    0.7,
   }
 }
@@ -1540,17 +1846,59 @@ function onMinimapClick(e) {
 // ── Keyboard shortcuts ─────────────────────────────────────────────────────────
 function onKeyDown(e) {
   if (['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return
-  if (e.key === 'd' || e.key === 'D') playlistTool.value = 'draw'
-  if (e.key === 'p' || e.key === 'P') playlistTool.value = 'paint'
-  if (e.key === 'x' || e.key === 'X') playlistTool.value = 'erase'
-  if (e.key === 'e' || e.key === 'E') playlistTool.value = 'select'
-  if (e.key === 'c' || e.key === 'C') playlistTool.value = 'slice'
-  if (e.key === 't' || e.key === 'T') playlistTool.value = 'mute'
-  if (e.key === 's' || e.key === 'S') playlistTool.value = 'slip'
+
+  // Tool shortcuts
+  if (!e.ctrlKey && !e.shiftKey && !e.altKey) {
+    if (e.key === 'd' || e.key === 'D') playlistTool.value = 'draw'
+    if (e.key === 'p' || e.key === 'P') playlistTool.value = 'paint'
+    if (e.key === 'x' || e.key === 'X') playlistTool.value = 'erase'
+    if (e.key === 'e' || e.key === 'E') playlistTool.value = 'select'
+    if (e.key === 'c' || e.key === 'C') playlistTool.value = 'slice'
+    if (e.key === 't' || e.key === 'T') playlistTool.value = 'mute'
+    if (e.key === 's' || e.key === 'S') playlistTool.value = 'slip'
+  }
+
   if (e.key === 'Escape') { closeMenus(); selectedClipIds.value = new Set() }
+
+  // Delete selected clips
   if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipIds.value.size > 0) {
     selectedClipIds.value.forEach(id => removeClip(id))
     selectedClipIds.value = new Set()
+    e.preventDefault()
+  }
+
+  // Ctrl+B — duplicate selection
+  if (e.ctrlKey && (e.key === 'b' || e.key === 'B') && selectedClipIds.value.size > 0) {
+    const newIds = duplicateClips(selectedClipIds.value)
+    if (newIds?.size) selectedClipIds.value = newIds
+    e.preventDefault()
+  }
+
+  // Shift+Up/Down — move selected clips to adjacent track
+  if (e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && selectedClipIds.value.size > 0) {
+    const dir = e.key === 'ArrowUp' ? -1 : 1
+    selectedClipIds.value.forEach(id => {
+      const clip = playlistClips.find(c => c.id === id)
+      if (!clip) return
+      const vis   = visibleTracks.value
+      const idx   = vis.findIndex(t => t.id === clip.trackId)
+      const newT  = vis[idx + dir]
+      if (newT) moveClip(id, newT.id, clip.cell)
+    })
+    e.preventDefault()
+  }
+
+  // Page Up / Down — vertical zoom
+  if (e.key === 'PageUp')   { cellWidth.value = Math.min(200, cellWidth.value + 16); e.preventDefault() }
+  if (e.key === 'PageDown') { cellWidth.value = Math.max(32,  cellWidth.value - 16); e.preventDefault() }
+
+  // Shift+1-5 — quick zoom presets
+  if (e.shiftKey) {
+    if (e.key === '1') { cellWidth.value = 32;  e.preventDefault() }
+    if (e.key === '2') { cellWidth.value = 64;  e.preventDefault() }
+    if (e.key === '3') { cellWidth.value = 96;  e.preventDefault() }
+    if (e.key === '4') { cellWidth.value = 140; e.preventDefault() }
+    if (e.key === '5') { cellWidth.value = 200; e.preventDefault() }
   }
 }
 let _viewRO = null
@@ -1987,4 +2335,61 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(231, 76, 60, 0.7);
   border-radius: 2px;
 }
+
+/* ── Arrangements group ──────────────────────────────────────────────────────── */
+.arr-group { display: flex; align-items: center; gap: 2px; }
+.arr-select {
+  background: var(--bg-control); border: 1px solid var(--border); color: var(--text-muted);
+  padding: 3px 6px; border-radius: 4px 0 0 4px;
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
+  letter-spacing: 0.07em; cursor: pointer; outline: none; max-width: 160px;
+}
+.arr-btn {
+  height: 26px; padding: 0 6px; background: var(--bg-control); border: 1px solid var(--border);
+  border-left: none; border-radius: 0 4px 4px 0; color: #606080; cursor: pointer;
+  font-size: 11px; transition: color 0.1s;
+}
+.arr-btn:hover { color: #4ecdc4; }
+
+/* ── Snap selector ───────────────────────────────────────────────────────────── */
+.snap-select { width: 80px; font-size: 11px; }
+
+/* ── Quick zoom buttons ──────────────────────────────────────────────────────── */
+.zoom-quick-btns { display: flex; align-items: flex-end; gap: 2px; }
+.zoom-q {
+  background: transparent; border: none; color: #303050;
+  cursor: pointer; padding: 0 2px; font-size: 10px; transition: color 0.1s;
+  line-height: 1; display: flex; align-items: flex-end;
+}
+.zoom-q:nth-child(1) { font-size: 6px; }
+.zoom-q:nth-child(2) { font-size: 8px; }
+.zoom-q:nth-child(3) { font-size: 10px; }
+.zoom-q:nth-child(4) { font-size: 12px; }
+.zoom-q:nth-child(5) { font-size: 14px; }
+.zoom-q:hover { color: #4ecdc4; }
+
+/* ── Loop region button ──────────────────────────────────────────────────────── */
+.loop-btn {
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.1em; padding: 4px 10px; border: 1px solid var(--border);
+  border-radius: 5px; background: transparent; color: #404058; cursor: pointer; transition: all 0.12s;
+}
+.loop-btn:hover  { border-color: #27ae60; color: #27ae60; }
+.loop-btn.active { border-color: #27ae60; background: #0a1a0e; color: #27ae60; }
+
+/* ── Loop region ruler band ──────────────────────────────────────────────────── */
+.loop-region-band {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(39, 174, 96, 0.15);
+  border-left:  2px solid rgba(39, 174, 96, 0.7);
+  border-right: 2px solid rgba(39, 174, 96, 0.7);
+  pointer-events: auto; cursor: pointer; z-index: 2;
+}
+
+/* ── Hidden color input ──────────────────────────────────────────────────────── */
+.hidden-color { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+.ctx-item { position: relative; }
+
+/* ── Disabled ctx item ───────────────────────────────────────────────────────── */
+.ctx-item.disabled { opacity: 0.35; pointer-events: none; }
 </style>
