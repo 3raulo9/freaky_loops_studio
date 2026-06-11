@@ -137,6 +137,46 @@
 
       <div class="op-item" @click="zipSelectedOp(); closeAllMenus()">Zip selected <span class="op-kb">Alt+Z</span></div>
       <div class="op-item" @click="unzipAll(); closeAllMenus()">Unzip all <span class="op-kb">Alt+U</span></div>
+
+      <div class="op-sep"/>
+
+      <!-- Transpose -->
+      <div class="op-item" @click="openTransposeDialog(); closeAllMenus()">Transpose selected…</div>
+
+      <!-- Set swing mix for selected -->
+      <div class="op-sub-trigger" @mouseenter="activeSub='swing-sel'" @mouseleave="activeSub=null">
+        Set swing mix for selected ▶
+        <div v-if="activeSub==='swing-sel'" class="op-submenu">
+          <div class="op-item" @click="setSwingMixForSelected(0); closeAllMenus()">0%</div>
+          <div class="op-item" @click="setSwingMixForSelected(0.25); closeAllMenus()">25%</div>
+          <div class="op-item" @click="setSwingMixForSelected(0.5); closeAllMenus()">50%</div>
+          <div class="op-item" @click="setSwingMixForSelected(0.75); closeAllMenus()">75%</div>
+          <div class="op-item" @click="setSwingMixForSelected(1); closeAllMenus()">100%</div>
+        </div>
+      </div>
+
+      <!-- Assign to free mixer tracks -->
+      <div class="op-item" @click="doAssignFreeTrack(); closeAllMenus()">
+        Assign selected to free mixer track(s) <span class="op-kb">Ctrl+L</span>
+      </div>
+
+      <div class="op-sep"/>
+
+      <!-- Mute removed steps toggle -->
+      <div class="op-item" :class="{ 'ctx-active': muteRemovedSteps }"
+        @click="muteRemovedSteps = !muteRemovedSteps">
+        <span class="ctx-check-mark">{{ muteRemovedSteps ? '✓' : ' ' }}</span>
+        Mute removed steps
+      </div>
+
+      <!-- Set truncate swing notes for selected -->
+      <div class="op-sub-trigger" @mouseenter="activeSub='truncate-sel'" @mouseleave="activeSub=null">
+        Set truncate swing notes for selected ▶
+        <div v-if="activeSub==='truncate-sel'" class="op-submenu">
+          <div class="op-item" @click="setTruncateSwingForSelected(true); closeAllMenus()">On</div>
+          <div class="op-item" @click="setTruncateSwingForSelected(false); closeAllMenus()">Off</div>
+        </div>
+      </div>
     </div>
 
     <!-- ── Rack toolbar ──────────────────────────────────────────────── -->
@@ -402,9 +442,12 @@
             </template>
 
             <!-- Loop toggle (overlaid on seq area) -->
-            <button class="loop-btn" :class="{ active: ch.loopEnabled }"
+            <button class="loop-btn"
+              :class="{ active: ch.loopEnabled, colorful: colorfulLoopControls }"
+              :style="colorfulLoopControls ? { '--ch-color': ch.color } : {}"
               @click.stop="ch.loopEnabled = !ch.loopEnabled"
-              :title="ch.loopEnabled ? 'Loop ON — click to disable' : 'Loop OFF — click to enable'">∞</button>
+              @contextmenu.prevent.stop="showLoopCtx($event, ch)"
+              :title="ch.loopEnabled ? 'Loop ON — right-click for options' : 'Loop OFF — right-click for options'">∞</button>
           </div>
 
           <!-- ── Graph Editor strip ──────────────────────────────── -->
@@ -423,7 +466,9 @@
             </div>
 
             <!-- Bar chart -->
-            <div class="ge-chart" @mousedown.prevent="startGeDrag($event, ch)">
+            <div class="ge-chart"
+              @mousedown.prevent="startGeDrag($event, ch)"
+              @contextmenu.prevent="startGeRamp($event, ch)">
               <div v-for="s in totalSteps" :key="s-1" class="ge-col"
                 :class="{
                   beat:    (s-1) % 4 === 0,
@@ -431,8 +476,8 @@
                   playing: isPlaying && displayStep === s-1,
                 }">
                 <div class="ge-bar-bg"/>
-                <!-- Center line for pan and pitch -->
-                <div v-if="graphParam === 'pan' || graphParam === 'pitch'" class="ge-center-line"/>
+                <!-- Center line for bipolar params -->
+                <div v-if="graphParam === 'pan' || graphParam === 'pitch' || graphParam === 'shift'" class="ge-center-line"/>
                 <div class="ge-bar"
                   :style="{
                     height: getGeBarHeight(ch.id, s-1) + '%',
@@ -461,13 +506,16 @@
       </div>
       <div class="ctx-item" v-if="ctxMenu.channel?.mode === 'piano'"
         @click="ctxAction('to-steps')">Switch to Steps</div>
+      <div class="ctx-item" @click="ctxAction('graph-editor')">Graph editor</div>
+      <div class="ctx-sep"/>
+      <div class="ctx-item" @click="ctxAction('rename-color')">Rename, color and icon…</div>
       <div class="ctx-item" @click="ctxAction('rename')">Rename</div>
       <div class="ctx-item" @click="ctxAction('clone')">Clone</div>
       <div class="ctx-item" @click="ctxAction('clear')">Clear Pattern</div>
       <template v-if="ctxMenu.channel?.mode === 'steps'">
         <div class="ctx-sep"/>
-        <div class="ctx-item" @click="ctxAction('shift-left')">Shift steps ◄</div>
-        <div class="ctx-item" @click="ctxAction('shift-right')">Shift steps ►</div>
+        <div class="ctx-item" @click="ctxAction('shift-left')">Rotate left <span class="op-kb">Shift+◄</span></div>
+        <div class="ctx-item" @click="ctxAction('shift-right')">Rotate right <span class="op-kb">Shift+►</span></div>
         <div class="ctx-item" @click="ctxAction('invert')">Invert steps</div>
       </template>
       <div class="ctx-sep"/>
@@ -515,6 +563,27 @@
         <span class="ctx-check-mark">{{ ctxMenu.channel?.cutSelf ? '✓' : ' ' }}</span>
         Cut itself
       </div>
+      <!-- MIDI channel through toggle -->
+      <div class="ctx-item" :class="{ 'ctx-active': ctxMenu.channel?.midiChannelThrough }"
+        @click="ctxAction('midi-thru')">
+        <span class="ctx-check-mark">{{ ctxMenu.channel?.midiChannelThrough ? '✓' : ' ' }}</span>
+        MIDI channel through
+      </div>
+      <!-- Receive notes from placeholder -->
+      <div class="ctx-sub-trigger"
+        @mouseenter="ctxSubOpen = 'recv-notes'"
+        @mouseleave="ctxSubOpen = null">
+        Receive notes from ▶
+        <div v-if="ctxSubOpen === 'recv-notes'" class="ctx-submenu">
+          <div class="ctx-item" style="color:#606080;pointer-events:none">— No MIDI sources —</div>
+        </div>
+      </div>
+      <!-- Truncate swing notes toggle -->
+      <div class="ctx-item" :class="{ 'ctx-active': ctxMenu.channel?.truncateSwingNotes !== false }"
+        @click="ctxAction('truncate-swing')">
+        <span class="ctx-check-mark">{{ ctxMenu.channel?.truncateSwingNotes !== false ? '✓' : ' ' }}</span>
+        Truncate swing notes
+      </div>
       <div class="ctx-sep"/>
       <div class="ctx-item" @click="ctxAction('zip')">
         {{ ctxMenu.channel?.zipped ? 'Unzip' : 'Zip' }}
@@ -525,6 +594,43 @@
       <div class="ctx-item" @click="ctxAction('move-down')">Move Down</div>
       <div class="ctx-sep"/>
       <div class="ctx-item danger" @click="ctxAction('delete')">Delete</div>
+    </div>
+
+    <!-- ── Loop right-click context menu ────────────────────────────── -->
+    <div v-if="loopCtx.open" class="ctx-menu"
+      :style="{ top: loopCtx.y+'px', left: loopCtx.x+'px' }"
+      @mouseleave="loopCtx.open=false">
+      <div class="ctx-section-label">Loop type</div>
+      <div class="ctx-item" :class="{ 'ctx-active': globalLoopMode==='step' }"
+        @click="globalLoopMode='step'; loopCtx.open=false">
+        <span class="ctx-check-mark">{{ globalLoopMode==='step' ? '✓' : ' ' }}</span>
+        Loop step channels
+      </div>
+      <div class="ctx-item" :class="{ 'ctx-active': globalLoopMode==='all' }"
+        @click="globalLoopMode='all'; loopCtx.open=false">
+        <span class="ctx-check-mark">{{ globalLoopMode==='all' ? '✓' : ' ' }}</span>
+        Loop all channels
+      </div>
+      <div class="ctx-item" :class="{ 'ctx-active': globalLoopMode==='advanced' }"
+        @click="globalLoopMode='advanced'; loopCtx.open=false">
+        <span class="ctx-check-mark">{{ globalLoopMode==='advanced' ? '✓' : ' ' }}</span>
+        Advanced looping
+      </div>
+      <div class="ctx-sep"/>
+      <div class="ctx-section-label">Burn to pattern</div>
+      <div class="ctx-item" @click="loopCtxBurnToPattern()">Burn loop to new pattern</div>
+      <div class="ctx-sep"/>
+      <div class="ctx-section-label">Options</div>
+      <div class="ctx-item" :class="{ 'ctx-active': colorfulLoopControls }"
+        @click="colorfulLoopControls = !colorfulLoopControls">
+        <span class="ctx-check-mark">{{ colorfulLoopControls ? '✓' : ' ' }}</span>
+        Colorful loop controls
+      </div>
+      <div class="ctx-item" :class="{ 'ctx-active': alwaysShowAdvancedLoopControls }"
+        @click="alwaysShowAdvancedLoopControls = !alwaysShowAdvancedLoopControls">
+        <span class="ctx-check-mark">{{ alwaysShowAdvancedLoopControls ? '✓' : ' ' }}</span>
+        Always show advanced controls
+      </div>
     </div>
 
     <!-- ── Rename inline prompt ──────────────────────────────────────── -->
@@ -549,6 +655,49 @@
         <div class="rename-btns">
           <button class="rename-ok" @click="commitGroupPrompt">OK</button>
           <button class="rename-cancel" @click="groupPrompt.open=false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Rename + Color + Icon dialog ─────────────────────────────── -->
+    <div v-if="colorRenaming" class="rename-overlay" @click.self="colorRenaming=false">
+      <div class="rename-box color-rename-box">
+        <span class="rename-label">Rename, color and icon</span>
+        <input ref="colorRenameInput" v-model="colorRenameName" class="rename-input"
+          @keydown.enter="commitRenameColor" @keydown.esc="colorRenaming=false" maxlength="20"
+          placeholder="Channel name" />
+        <div class="color-rename-row">
+          <label class="grad-label">Color</label>
+          <input type="color" v-model="colorRenameColor" class="grad-color-input" />
+        </div>
+        <div class="color-rename-swatches">
+          <div v-for="sw in COLOR_SWATCHES" :key="sw"
+            class="color-swatch"
+            :class="{ selected: colorRenameColor === sw }"
+            :style="{ background: sw }"
+            @click="colorRenameColor = sw" />
+        </div>
+        <div class="rename-btns">
+          <button class="rename-ok" @click="commitRenameColor">OK</button>
+          <button class="rename-cancel" @click="colorRenaming=false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Transpose dialog ──────────────────────────────────────────── -->
+    <div v-if="transposeDialog.open" class="rename-overlay" @click.self="transposeDialog.open=false">
+      <div class="rename-box">
+        <span class="rename-label">Transpose selected channels</span>
+        <div class="transpose-row">
+          <button class="transpose-step" @click="transposeDialog.semitones -= 12">-12</button>
+          <button class="transpose-step" @click="transposeDialog.semitones -= 1">-1</button>
+          <div class="transpose-val">{{ transposeDialog.semitones > 0 ? '+' : '' }}{{ transposeDialog.semitones }}</div>
+          <button class="transpose-step" @click="transposeDialog.semitones += 1">+1</button>
+          <button class="transpose-step" @click="transposeDialog.semitones += 12">+12</button>
+        </div>
+        <div class="rename-btns">
+          <button class="rename-ok" @click="commitTranspose">Apply</button>
+          <button class="rename-cancel" @click="transposeDialog.open=false">Cancel</button>
         </div>
       </div>
     </div>
@@ -589,14 +738,18 @@ const {
   channelGroups, addGroup, removeGroup, renameGroup, assignChannelsToGroup,
   graphEditorOpen, graphParam,
   getStepVelocities, setStepVelocity, getStepPans, setStepPan, getStepPitches, setStepPitch,
+  getStepModX, setStepModX, getStepModY, setStepModY, getStepShift, setStepShift, getStepRep, setStepRep,
   fillSteps, cloneChannel, sortChannelsBy, colorChannelsRandom, colorChannelsGradient,
   assignChannelToMixerTrack, mixerTracks,
   setCutSelf, splitByChannel,
+  assignToFreeMixerTracks, transposeChannelNotes,
+  globalLoopMode, colorfulLoopControls, alwaysShowAdvancedLoopControls, muteRemovedSteps,
   rotateSteps, invertSteps,
   getPatternLengthTicks,
   importMidiFile,
   replaceChannelInstrument, addInstrumentChannel,
   instrumentDrag, startInstrumentDrag,
+  pushUndo,
 } = useStudio()
 
 // Local MIDI-tick constant (matches store's TICKS_PER_STEP = 120)
@@ -739,9 +892,13 @@ function onRowDrop(e, ch) {
 // ── Graph editor tabs ─────────────────────────────────────────────────────────
 const GE_TABS = [
   { key: 'velocity', label: 'VEL' },
+  { key: 'release',  label: 'REL' },
   { key: 'pan',      label: 'PAN' },
   { key: 'pitch',    label: 'PCH' },
-  { key: 'release',  label: 'REL' },
+  { key: 'modx',     label: 'MOD X' },
+  { key: 'mody',     label: 'MOD Y' },
+  { key: 'shift',    label: 'SHIFT' },
+  { key: 'rep',      label: 'REP' },
 ]
 
 // ── Multi-select ──────────────────────────────────────────────────────────────
@@ -789,8 +946,15 @@ function onDocClick(e) {
   optionsOpen.value = false
   dfOpen.value = false
 }
+function onRackKeydown(e) {
+  if (e.ctrlKey && e.key === 'l') {
+    e.preventDefault()
+    doAssignFreeTrack()
+  }
+}
 onMounted(() => {
   document.addEventListener('click', onDocClick, true)
+  document.addEventListener('keydown', onRackKeydown)
   if (rackEl.value) {
     rackWidth.value = rackEl.value.clientWidth
     _rackRO = new ResizeObserver(es => { rackWidth.value = es[0].contentRect.width })
@@ -799,6 +963,7 @@ onMounted(() => {
 })
 onUnmounted(() => {
   document.removeEventListener('click', onDocClick, true)
+  document.removeEventListener('keydown', onRackKeydown)
   _rackRO?.disconnect()
 })
 
@@ -919,6 +1084,7 @@ function closeAllMenus() {
   dfOpen.value        = false
   showSynthPicker.value = false
   ctxMenu.open        = false
+  loopCtx.open        = false
   patCtx.open         = false
   groupCtx.open       = false
   ctxSubOpen.value    = null
@@ -1095,6 +1261,10 @@ function getGeBarHeight(chId, step) {
     case 'release':  return (getStepVelocities(chId)[step] ?? 0.8) * 100
     case 'pan':      return Math.abs(getStepPans(chId)[step] ?? 0) * 50
     case 'pitch':    return Math.abs(getStepPitches(chId)[step] ?? 0) / 12 * 50
+    case 'modx':     return (getStepModX(chId)[step] ?? 0.5) * 100
+    case 'mody':     return (getStepModY(chId)[step] ?? 0.5) * 100
+    case 'shift':    return Math.abs(getStepShift(chId)[step] ?? 0) * 50
+    case 'rep':      return (getStepRep(chId)[step] ?? 0) * 100
     default:         return (getStepVelocities(chId)[step] ?? 0.8) * 100
   }
 }
@@ -1107,38 +1277,134 @@ function getGeBarBottom(chId, step) {
     const v = getStepPitches(chId)?.[step] ?? 0
     return v < 0 ? 0 : 50
   }
+  if (graphParam.value === 'shift') {
+    const v = getStepShift(chId)?.[step] ?? 0
+    return v < 0 ? 0 : 50
+  }
   return 0
 }
 
+// ── Graph Editor helpers ──────────────────────────────────────────────────────
+function _geStep(rect, clientX) {
+  return Math.max(0, Math.min(totalSteps.value - 1,
+    Math.floor(((clientX - rect.left) / rect.width) * totalSteps.value)
+  ))
+}
+function _geValue(relY) {
+  switch (graphParam.value) {
+    case 'velocity': case 'release': return Math.max(0, Math.min(1, 1 - relY))
+    case 'pan':   return Math.max(-1, Math.min(1, (0.5 - relY) * 2))
+    case 'pitch': return Math.round(Math.max(-12, Math.min(12, (0.5 - relY) * 24)))
+    case 'modx':  return Math.max(0, Math.min(1, 1 - relY))
+    case 'mody':  return Math.max(0, Math.min(1, 1 - relY))
+    case 'shift': return Math.max(-1, Math.min(1, (0.5 - relY) * 2))
+    case 'rep':   return Math.max(0, Math.min(1, 1 - relY))
+    default:      return Math.max(0, Math.min(1, 1 - relY))
+  }
+}
+function _geDefault() {
+  switch (graphParam.value) {
+    case 'velocity': case 'release': return 0.8
+    case 'pan':    return 0
+    case 'pitch':  return 0
+    case 'modx':   return 0.5
+    case 'mody':   return 0.5
+    case 'shift':  return 0
+    case 'rep':    return 0
+    default:       return 0.8
+  }
+}
+function _geSet(chId, step, val) {
+  switch (graphParam.value) {
+    case 'velocity': case 'release': setStepVelocity(chId, step, val); break
+    case 'pan':    setStepPan(chId, step, val);   break
+    case 'pitch':  setStepPitch(chId, step, val); break
+    case 'modx':   setStepModX(chId, step, val);  break
+    case 'mody':   setStepModY(chId, step, val);  break
+    case 'shift':  setStepShift(chId, step, val); break
+    case 'rep':    setStepRep(chId, step, val);   break
+  }
+}
+function _geGet(chId, step) {
+  switch (graphParam.value) {
+    case 'velocity': case 'release': return getStepVelocities(chId)[step] ?? 0.8
+    case 'pan':    return getStepPans(chId)[step]    ?? 0
+    case 'pitch':  return getStepPitches(chId)[step] ?? 0
+    case 'modx':   return getStepModX(chId)[step]    ?? 0.5
+    case 'mody':   return getStepModY(chId)[step]    ?? 0.5
+    case 'shift':  return getStepShift(chId)[step]   ?? 0
+    case 'rep':    return getStepRep(chId)[step]     ?? 0
+    default:       return 0.8
+  }
+}
+
+// Left-click drag: paint values. Ctrl+drag: scale all proportionally.
 function startGeDrag(e, ch) {
+  if (e.altKey) { _geResetAll(ch); return }
   const chart = e.currentTarget
+  const isCtrl = e.ctrlKey
+  // snapshot initial values for proportional scaling
+  const initVals = isCtrl
+    ? Array.from({ length: totalSteps.value }, (_, i) => _geGet(ch.id, i))
+    : null
+  pushUndo()
   const doUpdate = (me) => {
-    const rect = chart.getBoundingClientRect()
-    const step = Math.max(0, Math.min(totalSteps.value - 1,
-      Math.floor(((me.clientX - rect.left) / rect.width) * totalSteps.value)
-    ))
-    const relY = (me.clientY - rect.top) / rect.height
-    switch (graphParam.value) {
-      case 'velocity':
-      case 'release':
-        setStepVelocity(ch.id, step, Math.max(0, Math.min(1, 1 - relY)))
-        break
-      case 'pan':
-        setStepPan(ch.id, step, Math.max(-1, Math.min(1, (0.5 - relY) * 2)))
-        break
-      case 'pitch':
-        setStepPitch(ch.id, step, Math.round(Math.max(-12, Math.min(12, (0.5 - relY) * 24))))
-        break
+    const rect  = chart.getBoundingClientRect()
+    const step  = _geStep(rect, me.clientX)
+    const relY  = (me.clientY - rect.top) / rect.height
+    const newVal = _geValue(relY)
+    if (me.ctrlKey && initVals) {
+      // Proportional scale: ratio between new and original for the dragged column
+      const orig = initVals[step]
+      if (Math.abs(orig) < 0.001) return
+      const ratio = newVal / orig
+      for (let i = 0; i < totalSteps.value; i++) {
+        _geSet(ch.id, i, initVals[i] * ratio)
+      }
+    } else {
+      _geSet(ch.id, step, newVal)
     }
   }
   doUpdate(e)
   const onMove = (me) => doUpdate(me)
-  const onUp = () => {
-    window.removeEventListener('mousemove', onMove)
-    window.removeEventListener('mouseup', onUp)
-  }
+  const onUp   = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
   window.addEventListener('mousemove', onMove)
   window.addEventListener('mouseup', onUp)
+}
+
+// Right-click drag: ramp-interpolate between start and end steps.
+function startGeRamp(e, ch) {
+  const chart = e.currentTarget
+  const rect  = chart.getBoundingClientRect()
+  const startStep = _geStep(rect, e.clientX)
+  const startRelY = (e.clientY - rect.top) / rect.height
+  const startVal  = _geValue(startRelY)
+  pushUndo()
+  const onMove = (me) => {
+    const endStep = _geStep(rect, me.clientX)
+    const endRelY = (me.clientY - rect.top) / rect.height
+    const endVal  = _geValue(endRelY)
+    const lo = Math.min(startStep, endStep)
+    const hi = Math.max(startStep, endStep)
+    const span = hi - lo
+    for (let i = lo; i <= hi; i++) {
+      const t = span === 0 ? 0 : (i - lo) / span
+      const v = startStep <= endStep
+        ? startVal + (endVal - startVal) * t
+        : endVal   + (startVal - endVal) * (1 - t)
+      _geSet(ch.id, i, v)
+    }
+  }
+  const onUp = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
+
+// Alt+click on the chart: reset all bars to default.
+function _geResetAll(ch) {
+  pushUndo()
+  const def = _geDefault()
+  for (let i = 0; i < totalSteps.value; i++) _geSet(ch.id, i, def)
 }
 
 // ── Activity LED ──────────────────────────────────────────────────────────────
@@ -1212,7 +1478,9 @@ function ctxAction(action) {
   if (action === 'to-piano')  { setChannelMode(ch.id, 'piano'); openOrSelectChannel(ch) }
   if (action === 'to-steps')  { setChannelMode(ch.id, 'steps') }
   if (action === 'piano-roll')   openOrSelectChannel(ch)
+  if (action === 'graph-editor') { graphEditorOpen.value = true }
   if (action === 'rename')       startRename(ch)
+  if (action === 'rename-color') startRenameColor(ch)
   if (action === 'clone')        cloneChannel(ch.id)
   if (action === 'clear')        clearChannel(ch.id)
   if (action === 'move-up')      moveChannel(ch.id, -1)
@@ -1221,6 +1489,8 @@ function ctxAction(action) {
   if (action === 'zip')          ch.zipped = !ch.zipped
   if (action === 'color-random') colorChannelsRandom([ch.id])
   if (action === 'cut-self')     setCutSelf(ch.id, !ch.cutSelf)
+  if (action === 'midi-thru')    ch.midiChannelThrough = !ch.midiChannelThrough
+  if (action === 'truncate-swing') ch.truncateSwingNotes = ch.truncateSwingNotes === false ? true : false
   if (action === 'shift-left')   rotateSteps(ch.id, -1)
   if (action === 'shift-right')  rotateSteps(ch.id, +1)
   if (action === 'invert')       invertSteps(ch.id)
@@ -1244,6 +1514,77 @@ function ctxSetSwingMix(val) {
   ctxSubOpen.value = null
   if (!ch) return
   ch.swingMix = val
+}
+
+// ── Loop right-click context ──────────────────────────────────────────────────
+const loopCtx = reactive({ open: false, x: 0, y: 0, channel: null })
+function showLoopCtx(e, ch) {
+  loopCtx.channel = ch
+  loopCtx.x = e.clientX
+  loopCtx.y = e.clientY
+  loopCtx.open = true
+}
+function loopCtxBurnToPattern() {
+  loopCtx.open = false
+  const ch = loopCtx.channel
+  if (!ch) return
+  pushUndo()
+  const newId = 'p' + Date.now()
+  // Placeholder: a real burn would copy looped steps into new pattern
+  console.log('[FreakyLoops] Burn loop to pattern — channel', ch.name)
+}
+
+// ── Rename + Color + Icon dialog ──────────────────────────────────────────────
+const COLOR_SWATCHES = [
+  '#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c','#4ecdc4',
+  '#3498db','#9b59b6','#e91e63','#ff5722','#8bc34a','#00bcd4',
+  '#607d8b','#9e9e9e','#ffffff','#795548',
+]
+const colorRenaming     = ref(false)
+const colorRenameTarget = ref(null)
+const colorRenameName   = ref('')
+const colorRenameColor  = ref('#4ecdc4')
+const colorRenameInput  = ref(null)
+function startRenameColor(ch) {
+  colorRenameTarget.value = ch
+  colorRenameName.value   = ch.name
+  colorRenameColor.value  = ch.color
+  colorRenaming.value     = true
+  nextTick(() => colorRenameInput.value?.select())
+}
+function commitRenameColor() {
+  const ch = colorRenameTarget.value
+  if (ch) {
+    if (colorRenameName.value.trim()) ch.name = colorRenameName.value.trim().toUpperCase()
+    ch.color = colorRenameColor.value
+  }
+  colorRenaming.value = false
+}
+
+// ── Transpose dialog ──────────────────────────────────────────────────────────
+const transposeDialog = reactive({ open: false, semitones: 0 })
+function openTransposeDialog() {
+  transposeDialog.semitones = 0
+  transposeDialog.open = true
+}
+function commitTranspose() {
+  transposeChannelNotes(getOpTargets(), transposeDialog.semitones)
+  transposeDialog.open = false
+}
+function setSwingMixForSelected(val) {
+  getOpTargets().forEach(id => {
+    const ch = channels.find(c => c.id === id)
+    if (ch) ch.swingMix = val
+  })
+}
+function setTruncateSwingForSelected(val) {
+  getOpTargets().forEach(id => {
+    const ch = channels.find(c => c.id === id)
+    if (ch) ch.truncateSwingNotes = val
+  })
+}
+function doAssignFreeTrack() {
+  assignToFreeMixerTracks(getOpTargets())
 }
 
 // ── Rename ────────────────────────────────────────────────────────────────────
@@ -1901,5 +2242,49 @@ function commitRename() {
 .grad-color-input {
   width: 40px; height: 28px; border: 1px solid #3a3a5a;
   border-radius: 4px; background: transparent; cursor: pointer; padding: 1px;
+}
+
+/* ── Context menu section label ─────────────────────────────────── */
+.ctx-section-label {
+  padding: 4px 14px 2px;
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.14em; color: #555575; text-transform: uppercase;
+  pointer-events: none;
+}
+
+/* ── Loop button colorful mode ──────────────────────────────────── */
+.loop-btn.colorful { border-color: var(--ch-color, #4ecdc4); color: var(--ch-color, #4ecdc4); }
+
+/* ── Rename+Color dialog ────────────────────────────────────────── */
+.color-rename-box { min-width: 320px; }
+.color-rename-row {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.color-rename-swatches {
+  display: flex; gap: 5px; flex-wrap: wrap; margin-top: 4px;
+}
+.color-swatch {
+  width: 20px; height: 20px; border-radius: 4px; cursor: pointer;
+  border: 2px solid transparent; transition: border-color 0.1s, transform 0.1s;
+  flex-shrink: 0;
+}
+.color-swatch:hover { transform: scale(1.2); }
+.color-swatch.selected { border-color: #fff; }
+
+/* ── Transpose dialog ───────────────────────────────────────────── */
+.transpose-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.transpose-step {
+  padding: 4px 12px; background: #2a2a3a; border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text-primary); cursor: pointer;
+  font-family: 'Rajdhani', sans-serif; font-size: 13px; font-weight: 700;
+  transition: background 0.1s;
+}
+.transpose-step:hover { background: #3a3a55; }
+.transpose-val {
+  flex: 1; text-align: center;
+  font-family: 'Rajdhani', sans-serif; font-size: 22px; font-weight: 800;
+  color: #4ecdc4; letter-spacing: 0.05em; min-width: 50px;
 }
 </style>

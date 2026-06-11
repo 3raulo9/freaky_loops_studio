@@ -539,6 +539,8 @@ function makeChannel(overrides = {}) {
     // (set on synth/FM/GM channels whose timbre rings continuously). Plucked and
     // percussive voices leave this false and keep their natural decay.
     sustains:    false,
+    midiChannelThrough:  false,
+    truncateSwingNotes:  true,
     groupId:        null,
     activeModules:  [],
     // Per-channel insert FX chain (processed between the channel panner and the
@@ -631,12 +633,20 @@ export function useStudio() {
         stepVelocities: Array(32).fill(0.8),
         stepPans:       Array(32).fill(0),
         stepPitches:    Array(32).fill(0),
+        stepModX:       Array(32).fill(0.5),
+        stepModY:       Array(32).fill(0.5),
+        stepShift:      Array(32).fill(0),
+        stepRep:        Array(32).fill(0),
       })
     }
     const d = patternData[patternId][channelId]
     if (!d.stepVelocities) d.stepVelocities = Array(32).fill(0.8)
     if (!d.stepPans)       d.stepPans       = Array(32).fill(0)
     if (!d.stepPitches)    d.stepPitches    = Array(32).fill(0)
+    if (!d.stepModX)       d.stepModX       = Array(32).fill(0.5)
+    if (!d.stepModY)       d.stepModY       = Array(32).fill(0.5)
+    if (!d.stepShift)      d.stepShift      = Array(32).fill(0)
+    if (!d.stepRep)        d.stepRep        = Array(32).fill(0)
     return d
   }
 
@@ -1300,6 +1310,10 @@ export function useStudio() {
           stepVelocities: [...(d.stepVelocities || Array(32).fill(0.8))],
           stepPans: [...(d.stepPans || Array(32).fill(0))],
           stepPitches: [...(d.stepPitches || Array(32).fill(0))],
+          stepModX:  [...(d.stepModX  || Array(32).fill(0.5))],
+          stepModY:  [...(d.stepModY  || Array(32).fill(0.5))],
+          stepShift: [...(d.stepShift || Array(32).fill(0))],
+          stepRep:   [...(d.stepRep   || Array(32).fill(0))],
         }
       })
     })
@@ -1318,6 +1332,10 @@ export function useStudio() {
         if (s.stepVelocities) s.stepVelocities.forEach((v, i) => { d.stepVelocities[i] = v })
         if (s.stepPans)       s.stepPans.forEach((v, i) => { d.stepPans[i] = v })
         if (s.stepPitches)    s.stepPitches.forEach((v, i) => { d.stepPitches[i] = v })
+        if (s.stepModX)       s.stepModX.forEach((v, i) => { d.stepModX[i] = v })
+        if (s.stepModY)       s.stepModY.forEach((v, i) => { d.stepModY[i] = v })
+        if (s.stepShift)      s.stepShift.forEach((v, i) => { d.stepShift[i] = v })
+        if (s.stepRep)        s.stepRep.forEach((v, i) => { d.stepRep[i] = v })
       })
     })
   }
@@ -3145,6 +3163,10 @@ export function useStudio() {
   function getStepVelocities(channelId, patternId) { return getPatData(channelId, patternId).stepVelocities }
   function getStepPans(channelId, patternId)        { return getPatData(channelId, patternId).stepPans }
   function getStepPitches(channelId, patternId)     { return getPatData(channelId, patternId).stepPitches }
+  function getStepModX(channelId, patternId)        { return getPatData(channelId, patternId).stepModX }
+  function getStepModY(channelId, patternId)        { return getPatData(channelId, patternId).stepModY }
+  function getStepShift(channelId, patternId)       { return getPatData(channelId, patternId).stepShift }
+  function getStepRep(channelId, patternId)         { return getPatData(channelId, patternId).stepRep }
 
   function setStepVelocity(channelId, step, val, patternId) {
     const d = getPatData(channelId, patternId)
@@ -3157,6 +3179,49 @@ export function useStudio() {
   function setStepPitch(channelId, step, val, patternId) {
     const d = getPatData(channelId, patternId)
     d.stepPitches[step] = Math.max(-12, Math.min(12, Math.round(val)))
+  }
+  function setStepModX(channelId, step, val, patternId) {
+    getPatData(channelId, patternId).stepModX[step] = Math.max(0, Math.min(1, val))
+  }
+  function setStepModY(channelId, step, val, patternId) {
+    getPatData(channelId, patternId).stepModY[step] = Math.max(0, Math.min(1, val))
+  }
+  function setStepShift(channelId, step, val, patternId) {
+    getPatData(channelId, patternId).stepShift[step] = Math.max(-1, Math.min(1, val))
+  }
+  function setStepRep(channelId, step, val, patternId) {
+    getPatData(channelId, patternId).stepRep[step] = Math.max(0, Math.min(1, val))
+  }
+
+  // ── Global loop mode + batch ops ──────────────────────────────────────────
+  const globalLoopMode             = ref('step')   // 'step' | 'beat' | 'all' | 'advanced'
+  const colorfulLoopControls       = ref(false)
+  const alwaysShowAdvancedLoopControls = ref(false)
+  const muteRemovedSteps           = ref(false)
+
+  function assignToFreeMixerTracks(channelIds) {
+    let nextTrack = 1
+    channelIds.forEach(id => {
+      const ch = channels.find(c => c.id === id)
+      if (!ch) return
+      while (nextTrack < mixerTracks.length) {
+        const used = channels.some(c => c.id !== id && c.mixerTrack === nextTrack)
+        if (!used) break
+        nextTrack++
+      }
+      if (nextTrack < mixerTracks.length) { ch.mixerTrack = nextTrack++ }
+    })
+    if (audioCtx) rebuildGains()
+  }
+
+  function transposeChannelNotes(channelIds, semitones) {
+    if (!semitones) return
+    pushUndo()
+    channelIds.forEach(chId => {
+      const d = getPatData(chId)
+      d.pianoNotes.forEach(n => { n.pitch = Math.max(0, Math.min(127, n.pitch + semitones)) })
+      d.stepPitches.forEach((p, i) => { d.stepPitches[i] = Math.max(-12, Math.min(12, p + semitones)) })
+    })
   }
 
   // ── Fill steps ─────────────────────────────────────────────────────────────
@@ -3263,6 +3328,10 @@ export function useStudio() {
         stepVelocities: [...(d.stepVelocities || Array(32).fill(0.8))],
         stepPans:       [...(d.stepPans       || Array(32).fill(0))],
         stepPitches:    [...(d.stepPitches    || Array(32).fill(0))],
+        stepModX:       [...(d.stepModX       || Array(32).fill(0.5))],
+        stepModY:       [...(d.stepModY       || Array(32).fill(0.5))],
+        stepShift:      [...(d.stepShift      || Array(32).fill(0))],
+        stepRep:        [...(d.stepRep        || Array(32).fill(0))],
       })
     })
     return createdAny
@@ -3335,6 +3404,10 @@ export function useStudio() {
               stepVelocities: [...(d.stepVelocities || Array(32).fill(0.8))],
               stepPans:       [...(d.stepPans       || Array(32).fill(0))],
               stepPitches:    [...(d.stepPitches    || Array(32).fill(0))],
+              stepModX:       [...(d.stepModX       || Array(32).fill(0.5))],
+              stepModY:       [...(d.stepModY       || Array(32).fill(0.5))],
+              stepShift:      [...(d.stepShift      || Array(32).fill(0))],
+              stepRep:        [...(d.stepRep        || Array(32).fill(0))],
             }
           })
         })
@@ -3448,6 +3521,10 @@ export function useStudio() {
           stepVelocities: [...(d.stepVelocities ?? Array(32).fill(0.8))],
           stepPans:       [...(d.stepPans       ?? Array(32).fill(0))],
           stepPitches:    [...(d.stepPitches    ?? Array(32).fill(0))],
+          stepModX:       [...(d.stepModX       ?? Array(32).fill(0.5))],
+          stepModY:       [...(d.stepModY       ?? Array(32).fill(0.5))],
+          stepShift:      [...(d.stepShift      ?? Array(32).fill(0))],
+          stepRep:        [...(d.stepRep        ?? Array(32).fill(0))],
         })
       })
     })
@@ -3542,6 +3619,10 @@ export function useStudio() {
     getStepVelocities, setStepVelocity,
     getStepPans, setStepPan,
     getStepPitches, setStepPitch,
+    getStepModX, setStepModX,
+    getStepModY, setStepModY,
+    getStepShift, setStepShift,
+    getStepRep, setStepRep,
     fillSteps,
     // Channel groups
     channelGroups, addGroup, removeGroup, renameGroup, assignChannelsToGroup,
@@ -3550,6 +3631,9 @@ export function useStudio() {
     // Channel operations
     cloneChannel, sortChannelsBy, colorChannelsRandom, colorChannelsGradient,
     setCutSelf, splitByChannel,
+    assignToFreeMixerTracks, transposeChannelNotes,
+    // Global loop + batch flags
+    globalLoopMode, colorfulLoopControls, alwaysShowAdvancedLoopControls, muteRemovedSteps,
     // Playlist
     playlistTracks, playlistClips, timeMarkers, usePlaylist,
     playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell,
