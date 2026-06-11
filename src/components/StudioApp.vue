@@ -182,8 +182,8 @@
 
         <!-- Keyboard hint -->
         <div class="props-kb-hint">
-          <div class="kb-row">⌨ Z–M&nbsp;&nbsp;Q–U</div>
-          <div class="kb-row">[ ] octave: {{ kbOctave }}</div>
+          <div class="kb-row">⌨ Z–/&nbsp;&nbsp;Q–]</div>
+          <div class="kb-row">- = octave: {{ kbOctave }}</div>
         </div>
 
         <!-- Clear button -->

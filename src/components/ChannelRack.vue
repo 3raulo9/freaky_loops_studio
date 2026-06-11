@@ -172,7 +172,7 @@
         @click="graphEditorOpen = !graphEditorOpen" title="Graph Editor (Ctrl+K)">GE</button>
 
       <div class="rack-right">
-        <span class="kb-badge">⌨ Z–M · {{ kbOctave }}</span>
+        <span class="kb-badge">⌨ Z–/ · {{ kbOctave }}</span>
 
         <!-- MIDI import status toast -->
         <span v-if="midiImportMsg" class="midi-import-msg">{{ midiImportMsg }}</span>
