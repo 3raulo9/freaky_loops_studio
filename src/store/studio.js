@@ -11,6 +11,7 @@ import { makeGMPlayFn, preloadGMInstrument, gmSustains } from '../audio/gmSynth.
 import { GM_INSTRUMENTS, GM_CATEGORIES } from '../midi/gmDictionary.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
+import { createEffect, makeEffect, EFFECT_DEFS } from '../audio/effects.js'
 import {
   playFMBell, playFMRhodes, playFMBass, playFMOrgan, playFMBrass,
   playFMMarimba, playFMClav, playFMPad, playFMPluck, playFMFlute, playFMMetal,
@@ -506,6 +507,7 @@ const KB_SEMITONES = {
 const wasmNodes         = new Map()  // channelId -> AudioWorkletNode (WASM plugins)
 const customSynthNodes  = new Map()  // channelId -> AudioWorkletNode (Custom Synth)
 const subterraNodes     = new Map()  // channelId -> AudioWorkletNode (SUBTERRA bass)
+const channelFxChains   = new Map()  // channelId -> (live FX handle | null)[] aligned to ch.effects
 
 // ─── Channel factory ───────────────────────────────────────────────────────────
 let _cid = 0
@@ -535,6 +537,9 @@ function makeChannel(overrides = {}) {
     sustains:    false,
     groupId:        null,
     activeModules:  [],
+    // Per-channel insert FX chain (processed between the channel panner and the
+    // mixer/master). Each entry: { type, enabled, ...params }. See audio/effects.js.
+    effects:        [],
     instrumentType: '',
     params: { pitch: 60, decay: 0.4, attack: 0.01, wave: 'sawtooth' },
     knobs: [
@@ -1633,6 +1638,21 @@ export function useStudio() {
     })
   }
 
+  // Build the live insert-FX handles for a channel, aligned 1:1 with ch.effects
+  // (disabled effects → null so the UI index still maps to a handle slot).
+  function buildChannelFx(ch) {
+    const list = ch.effects ?? []
+    return list.map(fx => {
+      if (!fx || !fx.enabled) return null
+      try { return createEffect(audioCtx, fx) } catch (_) { return null }
+    })
+  }
+
+  function disposeChannelFx() {
+    channelFxChains.forEach(chain => chain?.forEach(h => h?.dispose?.()))
+    channelFxChains.clear()
+  }
+
   function rebuildGains() {
     if (!audioCtx || !masterGain) return
     // Disconnect WASM nodes from old track gains before they are destroyed
@@ -1640,6 +1660,7 @@ export function useStudio() {
     trackGains.forEach(g => { try { g.disconnect() } catch (e) {} })
     trackPanners.forEach(p => { try { p.disconnect() } catch (e) {} })
     cutGains.forEach(cg => { if (cg) try { cg.disconnect() } catch (e) {} })
+    disposeChannelFx()                       // tear down previous FX graphs (stop LFOs)
     trackGains = []; trackPanners = []; cutGains = []
     channels.forEach(ch => {
       const g = audioCtx.createGain(); g.gain.value = ch.volume
@@ -1649,7 +1670,12 @@ export function useStudio() {
       const dest = (mtIdx >= 1 && mixerInsertNodes[mtIdx - 1])
         ? mixerInsertNodes[mtIdx - 1].eqLow
         : masterGain
-      p.connect(dest)
+      // Insert the channel's FX chain between its panner and the mixer/master.
+      const chain = buildChannelFx(ch)
+      channelFxChains.set(ch.id, chain)
+      let tail = p
+      for (const h of chain) { if (!h) continue; tail.connect(h.input); tail = h.output }
+      tail.connect(dest)
       trackGains.push(g); trackPanners.push(p)
       // Cut-self gain node: sits between fn output and trackGain
       if (ch.cutSelf) {
@@ -2812,6 +2838,248 @@ export function useStudio() {
     return subterraNodes.get(channelId) ?? null
   }
 
+  // ── Per-channel insert FX ────────────────────────────────────────────────────
+  //   Effects live as plain reactive data on ch.effects[]; the audible graph is
+  //   (re)built in rebuildGains. Parameter tweaks update the running node in place
+  //   so knob drags stay click-free; structural changes rebuild the chain.
+  function addChannelEffect(channelId, type) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch) return
+    const fx = makeEffect(type)
+    if (!fx) return
+    if (!ch.effects) ch.effects = []
+    ch.effects.push(fx)
+    initAudio()
+    rebuildGains()
+    markDirty()
+  }
+
+  function removeChannelEffect(channelId, idx) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch?.effects || idx < 0 || idx >= ch.effects.length) return
+    ch.effects.splice(idx, 1)
+    if (audioCtx) rebuildGains()
+    markDirty()
+  }
+
+  function reorderChannelEffects(channelId, from, to) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch?.effects) return
+    if (from < 0 || to < 0 || from >= ch.effects.length || to >= ch.effects.length) return
+    const [moved] = ch.effects.splice(from, 1)
+    ch.effects.splice(to, 0, moved)
+    if (audioCtx) rebuildGains()
+    markDirty()
+  }
+
+  function updateChannelEffect(channelId, idx, key, value) {
+    const ch = channels.find(c => c.id === channelId)
+    const fx = ch?.effects?.[idx]
+    if (!fx) return
+    fx[key] = value
+    markDirty()
+    // Enabling/disabling changes the graph topology → full rebuild.
+    if (key === 'enabled') { if (audioCtx) rebuildGains(); return }
+    // Otherwise tweak the running node in place for a glitch-free knob drag.
+    const handle = channelFxChains.get(channelId)?.[idx]
+    if (handle) handle.update(key, value)
+    else if (audioCtx) rebuildGains()
+  }
+
+  // ── Instrument hot-swap (drag/drop replace) ──────────────────────────────────
+  //   Rewrites the instrument-defining fields of an existing channel in place,
+  //   keeping its id, pattern data, volume/pan/mixer routing, loop + FX settings.
+  //   `spec` is the same payload used by addInstrumentChannel:
+  //     { t:'synth' } | { t:'fm', key } | { t:'gm', program } | { t:'custom' }
+  //     | { t:'subterra' } | { t:'wasm' } | { t:'sample', asset }
+  function configureChannelInstrument(ch, spec) {
+    // Tear down any worklet node previously bound to this channel id.
+    for (const map of [customSynthNodes, subterraNodes, wasmNodes]) {
+      if (map.has(ch.id)) { try { map.get(ch.id).disconnect() } catch (_) {} ; map.delete(ch.id) }
+    }
+    ch.activeModules = []
+    ch.instrumentType = ''
+    ch.sampleSpec = undefined
+    ch.sampleName = undefined
+    ch.wasmStatus = undefined
+    ch.wasmName   = undefined
+    ch.wasmError  = undefined
+
+    switch (spec.t) {
+      case 'synth': {
+        ch.type = 'melodic'; ch.sustains = true
+        ch.name = 'SYNTH'; ch.color = '#4ecdc4'
+        ch.params = { pitch: 60, decay: 0.4, attack: 0.01, wave: 'sawtooth' }
+        ch.knobs = [
+          { key: 'pitch',  label: 'NOTE',  min: 24,    max: 96,  decimals: 0 },
+          { key: 'decay',  label: 'DECAY', min: 0.05,  max: 2.0, decimals: 2 },
+          { key: 'attack', label: 'ATCK',  min: 0.001, max: 0.2, decimals: 3 },
+        ]
+        ch.fn = playMelodicNote
+        break
+      }
+      case 'fm': {
+        const preset = FM_PRESETS[spec.key]; if (!preset) return
+        ch.type = 'melodic'; ch.sustains = !!preset.sustains
+        ch.name = preset.name; ch.color = preset.color
+        ch.params = { ...preset.params }
+        ch.knobs  = preset.knobs.map(k => ({ ...k }))
+        ch.fn = preset.fn
+        break
+      }
+      case 'gm': {
+        const prog = Math.max(0, Math.min(127, spec.program ?? 0))
+        ch.type = 'gm'; ch.mode = ch.mode === 'steps' ? 'steps' : 'piano'
+        ch.sustains = gmSustains(prog)
+        ch.name = (GM_INSTRUMENTS[prog] ?? 'SYNTH').split(/[\s(]/)[0].toUpperCase().slice(0, 10)
+        ch.color = gmChannelColor(prog)
+        ch.fn = makeGMPlayFn(prog)
+        ch.params = makeGMParams(prog)
+        ch.knobs = gmKnobs()
+        if (audioCtx) preloadGMInstrument(audioCtx, prog)
+        break
+      }
+      case 'sample': {
+        const asset = spec.asset; if (!asset) return
+        const base = asset.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
+        ch.type = 'sample'; ch.sustains = false
+        ch.name = base.length > 14 ? base.slice(0, 14) : base
+        ch.color = asset.color || '#4ecdc4'
+        ch.instrumentType = 'sample'
+        ch.sampleSpec = { ...asset.spec }
+        ch.sampleName = asset.name
+        ch.params = { pitch: 60, velocity: 0.8 }
+        ch.knobs = [{ key: 'pitch', label: 'PITCH', min: 24, max: 96, decimals: 0 }]
+        ch.fn = makeSampleFn(asset.spec)
+        break
+      }
+      case 'custom': {
+        ch.type = 'custom'; ch.mode = 'piano'; ch.sustains = false
+        ch.name = 'CUSTOM'; ch.color = '#00d4ff'
+        ch.knobs = []; ch.params = {}; ch.fn = () => {}
+        initAudio()
+        createCustomSynthNode(audioCtx).then(node => {
+          customSynthNodes.set(ch.id, node)
+          const idx = channels.findIndex(c => c.id === ch.id)
+          if (trackGains[idx]) { try { node.disconnect() } catch (_) {} ; node.connect(trackGains[idx]) }
+          ch.fn = makeCustomSynthPlayFn(() => customSynthNodes.get(ch.id))
+        }).catch(err => console.error('[CustomSynth] Node init failed:', err))
+        break
+      }
+      case 'subterra': {
+        ch.type = 'subterra'; ch.mode = 'piano'; ch.sustains = false
+        ch.name = 'SUBTERRA'; ch.color = '#ff5a3c'
+        ch.knobs = []; ch.params = {}; ch.fn = () => {}
+        initAudio()
+        createSubterraNode(audioCtx).then(node => {
+          subterraNodes.set(ch.id, node)
+          const idx = channels.findIndex(c => c.id === ch.id)
+          if (trackGains[idx]) { try { node.disconnect() } catch (_) {} ; node.connect(trackGains[idx]) }
+          ch.fn = makeSubterraPlayFn(() => subterraNodes.get(ch.id))
+        }).catch(err => console.error('[Subterra] Node init failed:', err))
+        break
+      }
+      case 'wasm': {
+        ch.type = 'wasm'; ch.mode = 'piano'; ch.sustains = false
+        ch.name = 'PLUGIN'; ch.color = '#7b2fff'
+        ch.knobs = []; ch.params = {}; ch.fn = () => {}
+        ch.wasmStatus = 'idle'; ch.wasmName = ''; ch.wasmError = ''
+        break
+      }
+      default: return
+    }
+  }
+
+  function replaceChannelInstrument(channelId, spec) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch) return
+    initAudio()
+    configureChannelInstrument(ch, spec)
+    rebuildGains()
+    selectedChannelId.value = ch.id
+    mainView.value = 'sequencer'
+    markDirty()
+  }
+
+  // Add a brand-new channel from an instrument spec (drag from the +SYNTH picker
+  // onto an empty area of the rack). Reuses the existing per-type add helpers so
+  // naming/numbering stays consistent.
+  function addInstrumentChannel(spec) {
+    switch (spec.t) {
+      case 'synth':    addChannel(); break
+      case 'fm':       addFMChannel(spec.key); break
+      case 'gm':       addGMChannel(spec.program); break
+      case 'custom':   addCustomSynthChannel(); break
+      case 'subterra': addSubterraChannel(); break
+      case 'wasm':     addWasmChannel(); break
+      case 'sample':   if (spec.asset) addSampleChannel(spec.asset); break
+    }
+  }
+
+  // ── Shared instrument drag (custom pointer-drag with a visible ghost) ─────────
+  //   Used by both the +SYNTH picker and the browser sample list so dragging an
+  //   instrument works identically and reliably (native HTML5 DnD is fragile and
+  //   gives no visual feedback). A floating ghost (rendered by StudioApp) follows
+  //   the cursor; the channel row underneath is reported via `overChannelId` so the
+  //   rack can highlight it. Dropping over a row replaces that channel's instrument;
+  //   over empty rack space it adds a new channel. Below the 5px movement threshold
+  //   it is treated as a click and runs the caller-supplied `onClick` (if any).
+  const instrumentDrag = reactive({
+    active: false, spec: null, label: '', color: '#4ecdc4', x: 0, y: 0, overChannelId: null,
+  })
+  let _instPending = null
+
+  function _instRowAt(x, y) {
+    const el = (typeof document !== 'undefined') && document.elementFromPoint(x, y)
+    return el?.closest?.('.channel-row')?.dataset?.chid ?? null
+  }
+  function _instRackAt(x, y) {
+    const el = (typeof document !== 'undefined') && document.elementFromPoint(x, y)
+    return !!el?.closest?.('.channel-rack')
+  }
+
+  function _instMove(e) {
+    const p = _instPending; if (!p) return
+    if (!p.dragging) {
+      if (Math.hypot(e.clientX - p.startX, e.clientY - p.startY) < 5) return
+      p.dragging = true
+      instrumentDrag.active = true
+      instrumentDrag.spec   = p.spec
+      instrumentDrag.label  = p.label
+      instrumentDrag.color  = p.color
+      p.onDragStart?.()
+    }
+    instrumentDrag.x = e.clientX
+    instrumentDrag.y = e.clientY
+    instrumentDrag.overChannelId = _instRowAt(e.clientX, e.clientY)
+  }
+
+  function _instUp(e) {
+    window.removeEventListener('mousemove', _instMove)
+    window.removeEventListener('mouseup',   _instUp)
+    const p = _instPending; _instPending = null
+    instrumentDrag.active = false
+    instrumentDrag.overChannelId = null
+    if (!p) return
+    if (!p.dragging) { p.onClick?.(); return }
+    const chId = _instRowAt(e.clientX, e.clientY)
+    if (chId)                              replaceChannelInstrument(chId, p.spec)
+    else if (_instRackAt(e.clientX, e.clientY)) addInstrumentChannel(p.spec)
+  }
+
+  // ev: the originating mousedown event. opts: { onClick, onDragStart }.
+  function startInstrumentDrag(spec, label, color, ev, opts = {}) {
+    if (ev.button !== 0) return
+    ev.preventDefault()
+    _instPending = {
+      spec, label, color: color || '#4ecdc4',
+      startX: ev.clientX, startY: ev.clientY, dragging: false,
+      onClick: opts.onClick, onDragStart: opts.onDragStart,
+    }
+    window.addEventListener('mousemove', _instMove)
+    window.addEventListener('mouseup',   _instUp)
+  }
+
   function removeChannel(id) {
     const idx = channels.findIndex(c => c.id === id)
     if (idx < 0 || channels.length <= 1) return
@@ -2910,6 +3178,7 @@ export function useStudio() {
       mixerTrack: src.mixerTrack,
       params:  { ...src.params },
       knobs:   src.knobs.map(k => ({ ...k })),
+      effects: (src.effects ?? []).map(e => ({ ...e })),
       fn:      src.fn,
       groupId: src.groupId,
     })
@@ -3042,6 +3311,7 @@ export function useStudio() {
         knobs:          ch.knobs.map(k => ({ ...k })),
         fnKey:          FN_KEY_MAP.get(ch.fn) ?? 'melodic',
         activeModules:  [...(ch.activeModules ?? [])],
+        effects:        (ch.effects ?? []).map(e => ({ ...e })),
         instrumentType: ch.instrumentType ?? '',
         sampleSpec:     ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
         sampleName:     ch.sampleName,
@@ -3149,6 +3419,7 @@ export function useStudio() {
                           ? makeSampleFn(ch.sampleSpec)
                           : (FN_FROM_KEY[ch.fnKey] ?? playMelodicNote),
       activeModules:  [...(ch.activeModules ?? [])],
+      effects:        (ch.effects ?? []).map(e => ({ ...e })),
       instrumentType: ch.instrumentType ?? '',
       sampleSpec:     ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
       sampleName:     ch.sampleName,
@@ -3247,6 +3518,12 @@ export function useStudio() {
     addSubterraChannel, getSubterraNode,
     GM_CATEGORIES, GM_CAT_COLORS, GM_INSTRUMENTS,
     removeChannel, moveChannel,
+    // Instrument hot-swap (drag/drop replace) + spec-based add
+    replaceChannelInstrument, addInstrumentChannel,
+    // Shared instrument drag (visible pointer-drag for picker + browser samples)
+    instrumentDrag, startInstrumentDrag,
+    // Per-channel insert FX
+    addChannelEffect, removeChannelEffect, reorderChannelEffects, updateChannelEffect,
     // Patterns
     patterns, currentPatternId, pickerPatternId, patternData,
     getPatData, getSteps, getPianoNotes,

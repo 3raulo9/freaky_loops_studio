@@ -34,7 +34,7 @@
 
       <!-- ── Right: Properties panel (sequencer only) ────────────────── -->
       <Transition name="slideright">
-      <aside class="props-panel" v-if="mainView === 'sequencer' && !detachedWindows.rack" @click="showModulePicker = false">
+      <aside class="props-panel" v-if="mainView === 'sequencer' && !detachedWindows.rack" @click="showModulePicker = false; showFxPicker = false">
         <div class="props-header" :style="{ borderColor: selectedChannel.color }">
           <span class="props-name" :style="{ color: selectedChannel.color }">{{ selectedChannel.name }}</span>
           <span class="props-type">{{ selectedChannel.type }}</span>
@@ -156,6 +156,30 @@
           </div>
         </div>
 
+        <!-- ── Insert FX rack ────────────────────────────────────────── -->
+        <div class="fx-section" @click.stop>
+          <div class="fx-section-head">
+            <span class="fx-section-title">EFFECTS</span>
+            <div class="fx-add-wrap">
+              <button class="fx-add-btn" :style="{ color: selectedChannel.color }"
+                @click="showFxPicker = !showFxPicker" title="Add effect">+</button>
+              <div v-if="showFxPicker" class="fx-picker">
+                <div class="fx-picker-header">ADD EFFECT</div>
+                <div v-for="(def, type) in EFFECT_DEFS" :key="type"
+                  class="fx-picker-item" @click="onAddFx(type)">{{ def.label }}</div>
+              </div>
+            </div>
+          </div>
+          <FXRack
+            v-if="selectedChannel.effects && selectedChannel.effects.length"
+            :effects="selectedChannel.effects"
+            :color="selectedChannel.color"
+            :style="{ '--accent': selectedChannel.color }"
+            @update="onFxUpdate" @reorder="onFxReorder" @remove="onFxRemove"
+          />
+          <div v-else class="fx-empty">No effects — click + to add one</div>
+        </div>
+
         <!-- Keyboard hint -->
         <div class="props-kb-hint">
           <div class="kb-row">⌨ Z–M&nbsp;&nbsp;Q–U</div>
@@ -255,6 +279,15 @@
       <ExtendedHud v-if="extendedHudOpen" />
     </Transition>
 
+    <!-- ── Instrument drag ghost (follows the cursor) ────────────────── -->
+    <Teleport to="body">
+      <div v-if="instrumentDrag.active" class="drag-ghost"
+        :style="{ left: instrumentDrag.x + 'px', top: instrumentDrag.y + 'px', '--gc': instrumentDrag.color }">
+        <span class="drag-ghost-dot" :style="{ background: instrumentDrag.color }" />
+        <span class="drag-ghost-label">{{ instrumentDrag.label }}</span>
+      </div>
+    </Teleport>
+
   </div>
 </template>
 
@@ -262,6 +295,7 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../store/studio.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
+import { EFFECT_DEFS } from '../audio/effects.js'
 import TopBar      from './TopBar.vue'
 import ChannelRack from './ChannelRack.vue'
 import Playlist    from './Playlist.vue'
@@ -277,6 +311,7 @@ import Subterra    from './Subterra.vue'
 import FloatWindow from './FloatWindow.vue'
 import BrowserPanel from './BrowserPanel.vue'
 import ExtendedHud from './ExtendedHud.vue'
+import FXRack      from './FXRack.vue'
 
 const {
   mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen, themeModalOpen, midiRouterOpen,
@@ -284,6 +319,8 @@ const {
   addDrumModule, removeDrumModule,
   browserOpen, detachedWindows, redockWindow, extendedHudOpen, browserWidth,
   loadWasmForChannel,
+  addChannelEffect, removeChannelEffect, reorderChannelEffects, updateChannelEffect,
+  instrumentDrag,
 } = useStudio()
 
 // ── Detached main-view placeholder ────────────────────────────────────────────
@@ -321,10 +358,21 @@ function onRemoveModule(moduleId) {
   if (activeModuleTab.value === moduleId) activeModuleTab.value = null
 }
 
-// Reset module panel when switching to a different channel
+// ── Per-channel insert FX ───────────────────────────────────────────────────────
+const showFxPicker = ref(false)
+function onAddFx(type) {
+  addChannelEffect(selectedChannel.value.id, type)
+  showFxPicker.value = false
+}
+function onFxUpdate(idx, key, value) { updateChannelEffect(selectedChannel.value.id, idx, key, value) }
+function onFxReorder(from, to)       { reorderChannelEffects(selectedChannel.value.id, from, to) }
+function onFxRemove(idx)             { removeChannelEffect(selectedChannel.value.id, idx) }
+
+// Reset module + FX panels when switching to a different channel
 watch(() => selectedChannel.value?.id, () => {
   activeModuleTab.value  = null
   showModulePicker.value = false
+  showFxPicker.value     = false
 })
 
 // ── WASM / JS plugin ──────────────────────────────────────────────────────────
@@ -488,8 +536,8 @@ function stopResize() {
 
 /* ── Properties panel ────────────────────────────────────────────── */
 .props-panel {
-  width: 160px;
-  min-width: 160px;
+  width: 184px;
+  min-width: 184px;
   background: var(--bg-header);
   border-left: 1px solid var(--border-subtle);
   display: flex;
@@ -705,6 +753,68 @@ function stopResize() {
   letter-spacing: 0.15em; align-self: flex-start; padding-left: 4px;
   margin-bottom: -4px;
 }
+
+/* ── Insert FX section ───────────────────────────────────────────── */
+.fx-section {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 4px;
+  padding: 8px 8px 4px;
+}
+.fx-section-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 6px;
+}
+.fx-section-title {
+  font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.18em; color: #40405a; text-transform: uppercase;
+}
+.fx-add-wrap { position: relative; }
+.fx-add-btn {
+  width: 20px; height: 20px;
+  background: var(--bg-deeper); border: 1px solid var(--border); border-radius: 4px;
+  font-size: 15px; line-height: 1; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: border-color 0.12s;
+}
+.fx-add-btn:hover { border-color: currentColor; }
+.fx-picker {
+  position: absolute; top: 24px; right: 0; z-index: 200;
+  background: var(--bg-control); border: 1px solid var(--border); border-radius: 6px;
+  min-width: 124px; overflow: hidden;
+  box-shadow: 0 6px 20px #000000aa;
+}
+.fx-picker-header {
+  padding: 5px 10px 4px;
+  font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
+  letter-spacing: 0.15em; color: var(--text-muted); border-bottom: 1px solid var(--border-subtle);
+}
+.fx-picker-item {
+  padding: 6px 10px;
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 600;
+  letter-spacing: 0.06em; color: #8080a0; cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+.fx-picker-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.fx-empty {
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 500;
+  letter-spacing: 0.04em; color: #3a3a52; text-align: center; padding: 8px 4px;
+}
+
+/* ── Instrument drag ghost (teleported to <body>, follows the cursor) ── */
+.drag-ghost {
+  position: fixed; z-index: 99999; pointer-events: none;
+  transform: translate(14px, 10px);
+  display: flex; align-items: center; gap: 7px;
+  padding: 6px 12px 6px 10px;
+  background: var(--bg-panel, #181826);
+  border: 1px solid var(--gc, #4ecdc4);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.6), 0 0 14px color-mix(in srgb, var(--gc, #4ecdc4) 45%, transparent);
+  font-family: 'Rajdhani', sans-serif; font-size: 12px; font-weight: 700;
+  letter-spacing: 0.08em; color: #fff; white-space: nowrap;
+}
+.drag-ghost-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.drag-ghost-label { text-shadow: 0 1px 3px rgba(0,0,0,0.7); }
 
 /* ── Piano Roll bottom panel ─────────────────────────────────────── */
 .piano-roll-panel, .custom-synth-panel {
