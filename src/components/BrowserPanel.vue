@@ -29,9 +29,8 @@
             class="browser-row"
             :class="{ on: row.active, folder: row.kind === 'folder', draggable: row.kind === 'asset' }"
             :style="{ height: ROW_H + 'px', paddingLeft: (7 + row.depth * 13) + 'px' }"
-            :draggable="row.kind === 'asset'"
             @click="onRowClick(row)"
-            @dragstart="row.kind === 'asset' && onAssetDragStart(row.asset, $event)"
+            @mousedown="row.kind === 'asset' && startAssetDrag(row.asset, $event)"
           >
             <template v-if="row.kind === 'folder'">
               <span class="browser-caret">{{ expanded.has(row.id) ? '▾' : '▸' }}</span>
@@ -65,7 +64,7 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../store/studio.js'
 import { browserFolders, assetAt, getAsset, searchAssets, browserAssetCount } from '../browserLibrary.js'
 
-const { patterns, currentPatternId, channels, selectedChannelId, mainView, previewingId, previewAsset, browserOpen } = useStudio()
+const { patterns, currentPatternId, channels, selectedChannelId, mainView, previewingId, previewAsset, browserOpen, startInstrumentDrag } = useStudio()
 
 const ROW_H = 22
 const query = ref('')
@@ -138,11 +137,11 @@ function onRowClick(row) {
   }
 }
 
-// Drag an asset out toward the Channel Rack to create a sampler channel.
-function onAssetDragStart(asset, e) {
-  e.dataTransfer.effectAllowed = 'copy'
-  e.dataTransfer.setData('application/x-fls-asset', asset.id)
-  e.dataTransfer.setData('text/plain', asset.name)
+// Drag an asset toward the Channel Rack: a visible ghost follows the cursor and
+// dropping on a channel replaces it (or adds a new sampler channel over empty
+// rack space). A plain click without dragging still previews the sample.
+function startAssetDrag(asset, e) {
+  startInstrumentDrag({ t: 'sample', asset }, asset.name, asset.color || '#4ecdc4', e)
 }
 
 function wavePath(wave) {

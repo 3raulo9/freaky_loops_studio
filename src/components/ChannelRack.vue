@@ -13,7 +13,7 @@
     <div v-if="midiDropActive" class="rack-drop-hint rack-drop-hint--midi">
       ♩ Drop MIDI file — imports as editable tracks
     </div>
-    <div v-else-if="dropActive" class="rack-drop-hint">＋ Drop sample to add a channel</div>
+    <div v-else-if="dropActive" class="rack-drop-hint">＋ Drop to add a channel · drop on a channel to replace it</div>
 
     <!-- ── Pattern navigator ─────────────────────────────────────────── -->
     <div class="pattern-nav">
@@ -186,13 +186,15 @@
             + SYNTH ▾
           </button>
           <div v-if="showSynthPicker" class="synth-picker">
+            <div class="synth-pick-hint synth-pick-hint--drag">↳ click to add · drag onto a channel to replace it</div>
             <div class="synth-pick-section">BASIC</div>
-            <div class="synth-pick-item" @click="addChannel(); showSynthPicker = false">
+            <div class="synth-pick-item"
+              @mousedown="startPickDrag({ t: 'synth' }, 'SYNTH (SAW)', '#4ecdc4', $event)">
               <span class="synth-pick-dot" style="background:#4ecdc4"/>SYNTH (SAW)
             </div>
             <div class="synth-pick-section">FM SYNTHS</div>
             <div v-for="(preset, key) in FM_PRESETS" :key="key" class="synth-pick-item"
-              @click="addFMChannel(key); showSynthPicker = false">
+              @mousedown="startPickDrag({ t: 'fm', key }, preset.name, preset.color, $event)">
               <span class="synth-pick-dot" :style="{ background: preset.color }"/>{{ preset.name }}
             </div>
             <div class="synth-pick-section">GM INSTRUMENTS</div>
@@ -206,19 +208,22 @@
               <div v-if="expandedGMCat === cat.name" class="synth-pick-gm-items">
                 <div v-for="prog in getProgsForCat(cat)" :key="prog"
                   class="synth-pick-item synth-pick-item--gm"
-                  @click="addGMChannel(prog); showSynthPicker = false; expandedGMCat = null">
+                  @mousedown="startPickDrag({ t: 'gm', program: prog }, GM_INSTRUMENTS[prog], GM_CAT_COLORS[ci], $event)">
                   {{ GM_INSTRUMENTS[prog] }}
                 </div>
               </div>
             </div>
             <div class="synth-pick-section">PLUGINS</div>
-            <div class="synth-pick-item" @click="addCustomSynthChannel(); showSynthPicker = false">
+            <div class="synth-pick-item"
+              @mousedown="startPickDrag({ t: 'custom' }, 'Custom Synth', '#00d4ff', $event)">
               <span class="synth-pick-dot" style="background:#00d4ff"/>◈ Custom Synth
             </div>
-            <div class="synth-pick-item" @click="addSubterraChannel(); showSynthPicker = false">
+            <div class="synth-pick-item"
+              @mousedown="startPickDrag({ t: 'subterra' }, 'SUBTERRA Bass', '#ff5a3c', $event)">
               <span class="synth-pick-dot" style="background:#ff5a3c"/>▼ SUBTERRA Bass
             </div>
-            <div class="synth-pick-item" @click="addWasmChannel(); showSynthPicker = false">
+            <div class="synth-pick-item"
+              @mousedown="startPickDrag({ t: 'wasm' }, 'WASM Plugin', '#7b2fff', $event)">
               <span class="synth-pick-dot" style="background:#7b2fff"/>⬡ WASM Plugin
             </div>
             <div class="synth-pick-section synth-pick-section--midi">MIDI IMPORT</div>
@@ -255,6 +260,7 @@
       <div
         v-for="ch in visibleChannels"
         :key="ch.id"
+        :data-chid="ch.id"
         class="channel-row"
         :class="{
           selected:       ch.id === selectedChannelId,
@@ -262,11 +268,15 @@
           muted:          ch.muted,
           soloed:         ch._soloed,
           zipped:         ch.zipped,
+          'drop-replace': dragOverChannelId === ch.id || instrumentDrag.overChannelId === ch.id,
           'ge-expanded':  graphEditorOpen && ch.id === selectedChannelId && !ch.zipped && ch.mode === 'steps',
         }"
         :style="{ '--accent': ch.color }"
         @click.exact="selectChannel(ch)"
         @click.ctrl.exact.stop="toggleMultiSelect(ch)"
+        @dragover="onRowDragOver($event, ch)"
+        @dragleave="onRowDragLeave($event, ch)"
+        @drop="onRowDrop($event, ch)"
       >
         <!-- ── Mute LED ──────────────────────────────────────────── -->
         <div class="led" :class="{ active: !ch.muted, solo: ch._soloed, firing: isChannelFiring(ch) }"
@@ -581,10 +591,12 @@ const {
   getStepVelocities, setStepVelocity, getStepPans, setStepPan, getStepPitches, setStepPitch,
   fillSteps, cloneChannel, sortChannelsBy, colorChannelsRandom, colorChannelsGradient,
   assignChannelToMixerTrack, mixerTracks,
-  setCutSelf, splitByChannel, addSampleChannel,
+  setCutSelf, splitByChannel,
   rotateSteps, invertSteps,
   getPatternLengthTicks,
   importMidiFile,
+  replaceChannelInstrument, addInstrumentChannel,
+  instrumentDrag, startInstrumentDrag,
 } = useStudio()
 
 // Local MIDI-tick constant (matches store's TICKS_PER_STEP = 120)
@@ -626,24 +638,55 @@ async function onMidiFileInput(e) {
   await _importMidiFileObj(file)
 }
 
-// ── Unified drag-and-drop: Browser samples + desktop MIDI files ───────────────
-const dropActive     = ref(false)  // browser sample asset drag
-const midiDropActive = ref(false)  // desktop MIDI file drag
+// ── Unified drag-and-drop: +SYNTH instruments + Browser samples + MIDI files ──
+//   Drag sources carry one of:
+//     application/x-fls-instrument  → JSON spec from the +SYNTH picker
+//     application/x-fls-asset       → browser sample asset id
+//     Files                         → desktop .mid/.midi import
+//   Dropping on empty rack area adds a new channel; dropping on a channel row
+//   hot-swaps that channel's instrument (keeping its steps/notes/routing).
+const dropActive         = ref(false)  // instrument / sample drag over the rack
+const midiDropActive     = ref(false)  // desktop MIDI file drag
+const dragOverChannelId  = ref(null)   // channel row currently targeted for replace
 let _dragDepth = 0
 
-function _hasAsset(e) { return [...(e.dataTransfer?.types ?? [])].includes('application/x-fls-asset') }
-function _hasFiles(e) { return [...(e.dataTransfer?.types ?? [])].includes('Files') }
+function _hasInstrument(e) { return [...(e.dataTransfer?.types ?? [])].includes('application/x-fls-instrument') }
+function _hasAsset(e)      { return [...(e.dataTransfer?.types ?? [])].includes('application/x-fls-asset') }
+function _hasFiles(e)      { return [...(e.dataTransfer?.types ?? [])].includes('Files') }
+function _hasDropPayload(e) { return _hasInstrument(e) || _hasAsset(e) }
 
+// Resolve the dropped drag payload into an instrument spec (available on drop).
+function _readInstrumentSpec(e) {
+  const json = e.dataTransfer.getData('application/x-fls-instrument')
+  if (json) { try { return JSON.parse(json) } catch (_) { return null } }
+  const id    = e.dataTransfer.getData('application/x-fls-asset')
+  const asset = id && getAsset(id)
+  if (asset) return { t: 'sample', asset }
+  return null
+}
+
+// ── +SYNTH picker drag source ─────────────────────────────────────────────────
+// Delegates to the shared store drag controller (visible ghost + drop-to-replace).
+// On a plain click (no movement) it adds a new channel; on drag it replaces the
+// channel under the cursor, or adds one over empty rack space.
+function startPickDrag(spec, label, color, e) {
+  startInstrumentDrag(spec, label, color, e, {
+    onDragStart: () => { showSynthPicker.value = false },
+    onClick:     () => { addInstrumentChannel(spec); showSynthPicker.value = false },
+  })
+}
+
+// ── Rack-level (empty area → add new channel) ─────────────────────────────────
 function onRackDragEnter(e) {
-  const asset = _hasAsset(e)
+  const drag  = _hasDropPayload(e)
   const files = _hasFiles(e)
-  if (!asset && !files) return
+  if (!drag && !files) return
   _dragDepth++
-  if (asset) dropActive.value = true
-  else       midiDropActive.value = true
+  if (drag) dropActive.value = true
+  else      midiDropActive.value = true
 }
 function onRackDragOver(e) {
-  if (_hasAsset(e) || _hasFiles(e)) e.dataTransfer.dropEffect = 'copy'
+  if (_hasDropPayload(e) || _hasFiles(e)) e.dataTransfer.dropEffect = 'copy'
 }
 function onRackDragLeave() {
   if (--_dragDepth <= 0) {
@@ -656,6 +699,7 @@ async function onRackDrop(e) {
   _dragDepth = 0
   dropActive.value     = false
   midiDropActive.value = false
+  dragOverChannelId.value = null
 
   // Desktop MIDI file takes priority
   const files    = [...(e.dataTransfer?.files ?? [])]
@@ -665,10 +709,31 @@ async function onRackDrop(e) {
     return
   }
 
-  // Browser sample asset
-  const id    = e.dataTransfer.getData('application/x-fls-asset')
-  const asset = id && getAsset(id)
-  if (asset) addSampleChannel(asset)
+  // Instrument from the +SYNTH picker, or a browser sample → add a new channel.
+  const spec = _readInstrumentSpec(e)
+  if (spec) addInstrumentChannel(spec)
+}
+
+// ── Channel-row drop target (replace this channel's instrument) ───────────────
+function onRowDragOver(e, ch) {
+  if (!_hasDropPayload(e)) return            // let MIDI files bubble up to the rack
+  e.preventDefault()
+  e.stopPropagation()
+  e.dataTransfer.dropEffect = 'copy'
+  dragOverChannelId.value = ch.id
+}
+function onRowDragLeave(e, ch) {
+  if (dragOverChannelId.value === ch.id) dragOverChannelId.value = null
+}
+function onRowDrop(e, ch) {
+  if (!_hasDropPayload(e)) return            // not an instrument/sample → let it bubble
+  e.preventDefault()
+  e.stopPropagation()
+  dragOverChannelId.value = null
+  dropActive.value = false
+  _dragDepth = 0
+  const spec = _readInstrumentSpec(e)
+  if (spec) replaceChannelInstrument(ch.id, spec)
 }
 
 // ── Graph editor tabs ─────────────────────────────────────────────────────────
@@ -1430,7 +1495,13 @@ function commitRename() {
   transition: background 0.08s, color 0.08s;
 }
 .synth-pick-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.synth-pick-item { cursor: grab; user-select: none; }
+.synth-pick-item:active { cursor: grabbing; }
+.synth-pick-cat, .synth-pick-item--midi { cursor: pointer; }
 .synth-pick-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.synth-pick-hint--drag {
+  color: #4ecdc4aa; border-bottom: 1px solid #4ecdc422; margin-bottom: 2px; padding-top: 6px;
+}
 
 /* ── Column headers ──────────────────────────────────────────────── */
 .col-headers {
@@ -1475,6 +1546,19 @@ function commitRename() {
 .channel-row.multi-sel:not(.selected)::before {
   content: ''; position: absolute; left: 0; top: 0; bottom: 0;
   width: 2px; background: color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+/* Drag-to-replace target highlight */
+.channel-row.drop-replace {
+  box-shadow: inset 0 0 0 2px #f1c40f;
+  background: #1a1604;
+}
+.channel-row.drop-replace::after {
+  content: '↺ REPLACE';
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  z-index: 20; pointer-events: none;
+  font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.14em; color: #f1c40f; text-shadow: 0 0 10px #f1c40f88;
 }
 
 /* ── Zipped row ──────────────────────────────────────────────────── */
