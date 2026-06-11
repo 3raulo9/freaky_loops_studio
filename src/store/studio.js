@@ -1207,13 +1207,15 @@ export function useStudio() {
 
   // ── Mixer tracks (0 = master, 1-8 = inserts) ─────────────────────────────
   const mixerTracks = reactive([
-    { id: 'mx0', name: 'MASTER', color: '#e74c3c', volume: 1.0, pan: 0, muted: false, _soloed: false, eq: { low: 0, mid: 0, high: 0 } },
+    { id: 'mx0', name: 'MASTER', color: '#e74c3c', volume: 1.0, pan: 0, muted: false, _soloed: false, eq: { low: 0, mid: 0, high: 0 }, fxSlots: [], phaseInvert: false },
     ...Array.from({ length: NUM_MX_INSERTS }, (_, i) => ({
       id: 'mx' + (i + 1),
       name: 'MIX ' + (i + 1),
       color: COLORS[i % COLORS.length],
       volume: 1.0, pan: 0, muted: false, _soloed: false,
       eq: { low: 0, mid: 0, high: 0 },
+      fxSlots: [],
+      phaseInvert: false,
     }))
   ])
 
@@ -1642,22 +1644,49 @@ export function useStudio() {
   function buildMixerInserts() {
     mixerInsertNodes = []
     mixerTracks.slice(1).forEach(mt => {
-      const eqLow    = audioCtx.createBiquadFilter()
-      const eqMid    = audioCtx.createBiquadFilter()
-      const eqHigh   = audioCtx.createBiquadFilter()
-      const gain     = audioCtx.createGain()
-      const panner   = audioCtx.createStereoPanner()
-      const analyser = audioCtx.createAnalyser()
+      const eqLow     = audioCtx.createBiquadFilter()
+      const eqMid     = audioCtx.createBiquadFilter()
+      const eqHigh    = audioCtx.createBiquadFilter()
+      const phaseGain = audioCtx.createGain()
+      const gain      = audioCtx.createGain()
+      const panner    = audioCtx.createStereoPanner()
+      const analyser  = audioCtx.createAnalyser()
       analyser.fftSize = 256
       eqLow.type  = 'lowshelf';   eqLow.frequency.value  = 80;   eqLow.gain.value  = mt.eq.low
       eqMid.type  = 'peaking';    eqMid.frequency.value  = 1000; eqMid.Q.value = 1; eqMid.gain.value = mt.eq.mid
       eqHigh.type = 'highshelf';  eqHigh.frequency.value = 8000; eqHigh.gain.value = mt.eq.high
-      gain.gain.value   = mt.muted ? 0 : mt.volume
-      panner.pan.value  = mt.pan
-      eqLow.connect(eqMid); eqMid.connect(eqHigh); eqHigh.connect(gain)
-      gain.connect(panner); panner.connect(analyser); analyser.connect(masterGain)
-      mixerInsertNodes.push({ eqLow, eqMid, eqHigh, gain, panner, analyser })
+      phaseGain.gain.value = mt.phaseInvert ? -1 : 1
+      gain.gain.value  = mt.muted ? 0 : mt.volume
+      panner.pan.value = mt.pan
+      eqLow.connect(eqMid); eqMid.connect(eqHigh)
+      phaseGain.connect(gain); gain.connect(panner); panner.connect(analyser); analyser.connect(masterGain)
+      const node = { eqLow, eqMid, eqHigh, phaseGain, gain, panner, analyser, fxHandles: [] }
+      mixerInsertNodes.push(node)
+      // Wire FX chain: eqHigh → [enabled fx slots] → phaseGain
+      _wireMixerFxChain(node, mt)
     })
+  }
+
+  function _wireMixerFxChain(node, mt) {
+    try { node.eqHigh.disconnect() } catch (_) {}
+    node.fxHandles.forEach(h => h?.dispose?.())
+    node.fxHandles = (mt.fxSlots ?? []).map(fx => {
+      if (!fx || !fx.enabled) return null
+      try { return createEffect(audioCtx, fx) } catch (_) { return null }
+    })
+    let tail = node.eqHigh
+    for (const h of node.fxHandles) {
+      if (!h) continue
+      tail.connect(h.input); tail = h.output
+    }
+    tail.connect(node.phaseGain)
+  }
+
+  function rebuildMixerInsert(trackIdx) {
+    const node = mixerInsertNodes[trackIdx - 1]
+    const mt   = mixerTracks[trackIdx]
+    if (!node || !mt || !audioCtx) return
+    _wireMixerFxChain(node, mt)
   }
 
   // Build the live insert-FX handles for a channel, aligned 1:1 with ch.effects
@@ -1776,6 +1805,65 @@ export function useStudio() {
     if (mt && name.trim()) mt.name = name.trim()
   }
 
+  function setMixerTrackColor(trackIdx, color) {
+    const mt = mixerTracks[trackIdx]
+    if (mt) { mt.color = color; markDirty() }
+  }
+
+  function toggleMixerPhaseInvert(trackIdx) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt || trackIdx === 0) return
+    mt.phaseInvert = !mt.phaseInvert
+    const node = mixerInsertNodes[trackIdx - 1]
+    if (node?.phaseGain) node.phaseGain.gain.value = mt.phaseInvert ? -1 : 1
+    markDirty()
+  }
+
+  function addMixerTrackFx(trackIdx, type) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt) return
+    const fx = makeEffect(type)
+    if (!fx) return
+    if (!mt.fxSlots) mt.fxSlots = []
+    mt.fxSlots.push(fx)
+    if (trackIdx > 0) rebuildMixerInsert(trackIdx)
+    markDirty()
+  }
+
+  function removeMixerTrackFx(trackIdx, slotIdx) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt?.fxSlots || slotIdx < 0 || slotIdx >= mt.fxSlots.length) return
+    mt.fxSlots.splice(slotIdx, 1)
+    if (trackIdx > 0) rebuildMixerInsert(trackIdx)
+    markDirty()
+  }
+
+  function updateMixerTrackFxParam(trackIdx, slotIdx, key, val) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt?.fxSlots?.[slotIdx]) return
+    mt.fxSlots[slotIdx][key] = val
+    if (trackIdx > 0) mixerInsertNodes[trackIdx - 1]?.fxHandles?.[slotIdx]?.update(key, val)
+    markDirty()
+  }
+
+  function toggleMixerTrackFxEnabled(trackIdx, slotIdx) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt?.fxSlots?.[slotIdx]) return
+    mt.fxSlots[slotIdx].enabled = !mt.fxSlots[slotIdx].enabled
+    if (trackIdx > 0) rebuildMixerInsert(trackIdx)
+    markDirty()
+  }
+
+  function moveMixerTrackFxSlot(trackIdx, slotIdx, dir) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt?.fxSlots) return
+    const b = slotIdx + dir
+    if (b < 0 || b >= mt.fxSlots.length) return
+    const tmp = mt.fxSlots[slotIdx]; mt.fxSlots[slotIdx] = mt.fxSlots[b]; mt.fxSlots[b] = tmp
+    if (trackIdx > 0) rebuildMixerInsert(trackIdx)
+    markDirty()
+  }
+
   function _syncAllMixerGains() {
     mixerTracks.forEach((mt, i) => {
       const g = i === 0 ? masterGain : mixerInsertNodes[i - 1]?.gain
@@ -1810,11 +1898,13 @@ export function useStudio() {
     ;[a, b].forEach(i => {
       const mt = mixerTracks[i], n = mixerInsertNodes[i - 1]
       if (!n) return
-      n.gain.value   = mt.muted ? 0 : mt.volume
-      n.panner.pan.value = mt.pan
+      n.gain.gain.value   = mt.muted ? 0 : mt.volume
+      n.panner.pan.value  = mt.pan
       n.eqLow.gain.value  = mt.eq.low
       n.eqMid.gain.value  = mt.eq.mid
       n.eqHigh.gain.value = mt.eq.high
+      if (n.phaseGain) n.phaseGain.gain.value = mt.phaseInvert ? -1 : 1
+      _wireMixerFxChain(n, mt)
     })
     if (audioCtx) rebuildGains()
     markDirty()
@@ -3420,13 +3510,15 @@ export function useStudio() {
       timeMarkers:      timeMarkers.map(m => ({ ...m })),
       automationClips:  automationClips.map(a => ({ ...a, nodes: a.nodes.map(n => ({ ...n })) })),
       mixerTracks: mixerTracks.map(mt => ({
-        id:     mt.id,
-        name:   mt.name,
-        color:  mt.color,
-        volume: mt.volume,
-        pan:    mt.pan,
-        muted:  mt.muted,
-        eq:     { ...mt.eq },
+        id:          mt.id,
+        name:        mt.name,
+        color:       mt.color,
+        volume:      mt.volume,
+        pan:         mt.pan,
+        muted:       mt.muted,
+        eq:          { ...mt.eq },
+        fxSlots:     (mt.fxSlots ?? []).map(fx => fx ? { ...fx } : null),
+        phaseInvert: mt.phaseInvert ?? false,
       })),
     }
 
@@ -3557,12 +3649,14 @@ export function useStudio() {
     // Mixer
     ;(p.mixerTracks ?? []).forEach((mt, i) => {
       if (!mixerTracks[i]) return
-      mixerTracks[i].name    = mt.name   ?? mixerTracks[i].name
-      mixerTracks[i].color   = mt.color  ?? mixerTracks[i].color
-      mixerTracks[i].volume  = mt.volume ?? 1.0
-      mixerTracks[i].pan     = mt.pan    ?? 0
-      mixerTracks[i].muted   = mt.muted  ?? false
-      mixerTracks[i]._soloed = false
+      mixerTracks[i].name        = mt.name        ?? mixerTracks[i].name
+      mixerTracks[i].color       = mt.color        ?? mixerTracks[i].color
+      mixerTracks[i].volume      = mt.volume       ?? 1.0
+      mixerTracks[i].pan         = mt.pan          ?? 0
+      mixerTracks[i].muted       = mt.muted        ?? false
+      mixerTracks[i]._soloed     = false
+      mixerTracks[i].phaseInvert = mt.phaseInvert  ?? false
+      mixerTracks[i].fxSlots     = (mt.fxSlots ?? []).map(fx => fx ? { ...fx } : null)
       if (mt.eq) Object.assign(mixerTracks[i].eq, mt.eq)
     })
 
@@ -3685,10 +3779,13 @@ export function useStudio() {
     // Keyboard
     playNote, stopNote, handleKeyDown, handleKeyUp, panicAll,
     // Mixer
-    mixerTracks,
+    mixerTracks, EFFECT_DEFS,
     setMixerTrackVolume, setMixerTrackPan, setMixerEq,
-    muteMixerTrack, soloMixerTrack, renameMixerTrack,
+    muteMixerTrack, soloMixerTrack, renameMixerTrack, setMixerTrackColor,
     getMixerAnalyser, assignChannelToMixerTrack, moveMixerTrack,
+    toggleMixerPhaseInvert,
+    addMixerTrackFx, removeMixerTrackFx, updateMixerTrackFxParam,
+    toggleMixerTrackFxEnabled, moveMixerTrackFxSlot,
     // Scale snap
     snapScale,
     // Pattern length (infinite canvas)
