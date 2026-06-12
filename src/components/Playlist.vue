@@ -141,12 +141,17 @@
         <div class="picker-tabs">
           <button class="ptab" :class="{ active: pickerTab === 'patterns' }" @click="pickerTab = 'patterns'">PATTERNS</button>
           <button class="ptab" :class="{ active: pickerTab === 'automation' }" @click="pickerTab = 'automation'">PARAMS</button>
+          <select v-if="pickerTab === 'patterns'" class="picker-sort-select" v-model="pickerSort" title="Sort patterns">
+            <option value="none">—</option>
+            <option value="name">A–Z</option>
+            <option value="color">Color</option>
+          </select>
         </div>
 
         <!-- Patterns tab -->
         <div v-if="pickerTab === 'patterns'" class="picker-list">
           <div
-            v-for="pat in patterns" :key="pat.id"
+            v-for="pat in sortedPatterns" :key="pat.id"
             class="picker-item"
             :class="{
               selected:  pickerPatternId === pat.id,
@@ -155,7 +160,8 @@
             }"
             @mousedown.prevent="onPickerItemDown($event, pat)"
             @dblclick="currentPatternId = pat.id"
-            :title="unusedPatternIds.has(pat.id) ? 'Not placed in Playlist' : 'Drag to place · Dbl-click to edit'"
+            @contextmenu.prevent="openPickerMenu($event, pat)"
+            :title="unusedPatternIds.has(pat.id) ? 'Not placed in Playlist' : 'Drag to place · Dbl-click to edit · Right-click for options · Shift+click to rename'"
           >
             <!-- Compressed MIDI thumbnail (Section 1.2) -->
             <canvas class="picker-mini-canvas"
@@ -213,7 +219,11 @@
               @contextmenu.prevent="onRulerRightClick($event, c - 1)"
             >
               <span class="ruler-num">{{ c }}</span>
-              <div v-if="markerAt(c - 1)" class="time-marker">{{ markerAt(c - 1).label }}</div>
+              <div v-if="markerAt(c - 1)" class="time-marker"
+                @mousedown.stop="onMarkerMouseDown($event, markerAt(c - 1))"
+                @contextmenu.prevent.stop="openMarkerMenu($event, markerAt(c - 1))">
+                {{ markerAt(c - 1).label }}
+              </div>
             </div>
             <!-- Loop region highlight band -->
             <div v-if="loopRegion" class="loop-region-band"
@@ -234,10 +244,18 @@
               grouped:  !!track.groupParentId,
               locked:   track.locked,
             }"
-            :style="{ '--track-color': track.color, height: trackHeight + 'px' }"
+            :style="{ '--track-color': track.color, height: getTrackH(track) + 'px' }"
           >
             <!-- Track header -->
-            <div class="pl-track-header" @contextmenu.prevent="openTrackMenu($event, track)">
+            <div class="pl-track-header"
+              :class="{ focused: focusedTrackId === track.id }"
+              @contextmenu.prevent="openTrackMenu($event, track)"
+              @mouseenter="hoverTrackId = track.id"
+              @mouseleave="hoverTrackId = null"
+              @wheel.stop.prevent="onTrackHeaderWheel($event, track)"
+              @click.stop="focusedTrackId = track.id"
+            >
+              <div class="track-resize-handle" @mousedown.stop="onTrackResizeStart($event, track)" />
               <!-- Group indent + collapse arrow -->
               <div v-if="track.groupParentId" class="track-indent" />
               <button
@@ -377,15 +395,15 @@
                   <span class="auto-label">{{ auto.targetParam }}</span>
                   <svg
                     class="auto-graph"
-                    :viewBox="`0 0 ${(auto.width || 1) * cellWidth} ${trackHeight - 18}`"
+                    :viewBox="`0 0 ${(auto.width || 1) * cellWidth} ${getTrackH(track) - 18}`"
                     preserveAspectRatio="none"
                     @click.stop="onAutoSvgClick($event, auto)"
                   >
-                    <polyline :points="autoPolyline(auto)" class="auto-line" />
+                    <polyline :points="autoPolyline(auto, track)" class="auto-line" />
                     <circle
                       v-for="(node, ni) in auto.nodes" :key="ni"
                       :cx="node.x * (auto.width || 1) * cellWidth"
-                      :cy="(1 - node.y) * (trackHeight - 18)"
+                      :cy="(1 - node.y) * (getTrackH(track) - 18)"
                       r="5"
                       class="auto-node"
                       @mousedown.stop="onNodeDragStart($event, auto, ni)"
@@ -444,12 +462,15 @@
     >
       <div class="ctx-item" @click="ctxRename">Rename…</div>
       <div class="ctx-item" @click="ctxAutoName">Auto name</div>
+      <div class="ctx-item" @click="ctxAutoNameClips">Auto name clips</div>
+      <div class="ctx-item" @click="ctxResetTrack">Reset name / color</div>
       <div class="ctx-sep" />
       <div class="ctx-item" @click="ctxPickTrackColor">
         Change color…
         <input ref="trackColorInput" type="color" class="hidden-color"
           @change="onTrackColorPicked($event)" />
       </div>
+      <div v-if="hasChildren(trackMenu.track)" class="ctx-item" @click="ctxAutoColorGroup">Auto color group</div>
       <div class="ctx-sep" />
       <div v-if="!trackMenu.track.groupParentId" class="ctx-item" @click="ctxGroupAbove">Group with above track</div>
       <div v-else class="ctx-item" @click="ctxUngroup">Remove from group</div>
@@ -460,12 +481,16 @@
         {{ trackMenu.track.locked ? 'Unlock track' : 'Lock to content' }}
       </div>
       <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxMuteAllClips(true)">Mute all clips</div>
+      <div class="ctx-item" @click="ctxMuteAllClips(false)">Unmute all clips</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxMergePatternClips">Merge pattern clips</div>
+      <div class="ctx-item" @click="ctxConsolidate">Consolidate track</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxInsertTrackAbove">Insert track above</div>
       <div class="ctx-item" @click="ctxCloneTrack">Clone track</div>
       <div class="ctx-item" @click="ctxMoveUp">Move up</div>
       <div class="ctx-item" @click="ctxMoveDown">Move down</div>
-      <div class="ctx-sep" />
-      <div class="ctx-item" @click="ctxConsolidate">Consolidate lane clips</div>
-      <div class="ctx-item" @click="ctxMergePatternClips">Merge pattern clips</div>
       <div class="ctx-sep" />
       <div class="ctx-item danger" @click="ctxRemoveTrack">Remove track</div>
     </div>
@@ -477,6 +502,22 @@
       :style="{ top: clipMenu.y + 'px', left: clipMenu.x + 'px' }"
       @click.stop
     >
+      <div class="ctx-item" @click="ctxEditPattern">Edit pattern</div>
+      <div class="ctx-item" @click="ctxPreviewClip">Preview</div>
+      <div class="ctx-sep" />
+      <!-- Select source pattern submenu trigger -->
+      <div class="ctx-item ctx-has-sub" @mouseenter="sourceSubOpen = true" @mouseleave="sourceSubOpen = false">
+        Select source pattern ▸
+        <div v-if="sourceSubOpen" class="ctx-submenu">
+          <div v-for="pat in patterns" :key="pat.id"
+            class="ctx-item"
+            :class="{ 'ctx-checked': clipMenu?.clip?.patternId === pat.id }"
+            @click.stop="ctxSetSourcePattern(pat.id)">
+            <span class="ctx-dot" :style="{ background: pat.color }" />{{ pat.name }}
+          </div>
+        </div>
+      </div>
+      <div class="ctx-sep" />
       <div class="ctx-item" @click="ctxRenameClip">Rename and color…</div>
       <div class="ctx-item" @click="ctxPickClipColor">
         Change color…
@@ -487,6 +528,11 @@
       <div class="ctx-item" @click="ctxDuplicateClip">Duplicate clip</div>
       <div class="ctx-item" @click="ctxMakeUnique">Make Unique</div>
       <div class="ctx-item" @click="ctxSelectSimilar">Select all similar clips</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxTransposeClip">Transpose…</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxClipMoveUp">Move up</div>
+      <div class="ctx-item" @click="ctxClipMoveDown">Move down</div>
       <div class="ctx-sep" />
       <div class="ctx-item" @click="ctxBeatSlice('bar')">Chop into Bars</div>
       <div class="ctx-item" @click="ctxBeatSlice('beat')">Chop into Beats</div>
@@ -563,6 +609,77 @@
       </div>
     </div>
 
+    <!-- ── Marker context menu ────────────────────────────────────────────────── -->
+    <div v-if="markerMenu" class="ctx-menu"
+      :style="{ top: markerMenu.y + 'px', left: markerMenu.x + 'px' }"
+      @click.stop>
+      <div class="ctx-item" @click="ctxRenameMarker">Rename…</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item danger" @click="ctxDeleteMarker">Delete marker</div>
+    </div>
+
+    <!-- ── Marker rename dialog ────────────────────────────────────────────────── -->
+    <div v-if="markerRenameDialog" class="rename-overlay" @click.self="markerRenameDialog = false">
+      <div class="rename-box">
+        <span class="rename-label">Rename marker</span>
+        <input ref="markerRenameInput" v-model="markerRenameName" class="rename-input"
+          @keydown.enter="commitMarkerRename" @keydown.esc="markerRenameDialog = false" maxlength="24" />
+        <div class="rename-btns">
+          <button class="rename-ok" @click="commitMarkerRename">OK</button>
+          <button class="rename-cancel" @click="markerRenameDialog = false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Picker (pattern) context menu ─────────────────────────────────────── -->
+    <div v-if="pickerMenu" class="ctx-menu"
+      :style="{ top: pickerMenu.y + 'px', left: pickerMenu.x + 'px' }"
+      @click.stop>
+      <div class="ctx-item" @click="ctxPickerRename">Rename…</div>
+      <div class="ctx-item" @click="ctxPickerColorPick">
+        Change color…
+        <input ref="pickerColorInput" type="color" class="hidden-color" @change="onPickerColorPicked" />
+      </div>
+      <div class="ctx-item" @click="ctxPickerTranspose">Transpose…</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item" @click="ctxPickerLocate">Locate in playlist</div>
+      <div class="ctx-sep" />
+      <div class="ctx-item danger" @click="ctxPickerDelete">Delete pattern</div>
+    </div>
+
+    <!-- ── Pattern rename dialog ─────────────────────────────────────────────── -->
+    <div v-if="pickerRenameDialog" class="rename-overlay" @click.self="pickerRenameDialog = false">
+      <div class="rename-box">
+        <span class="rename-label">Rename pattern</span>
+        <input ref="pickerRenameInput" v-model="pickerRenameName" class="rename-input"
+          @keydown.enter="commitPickerRename" @keydown.esc="pickerRenameDialog = false" maxlength="32" />
+        <div class="rename-btns">
+          <button class="rename-ok" @click="commitPickerRename">OK</button>
+          <button class="rename-cancel" @click="pickerRenameDialog = false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Transpose dialog ────────────────────────────────────────────────────── -->
+    <div v-if="transposeDialog" class="rename-overlay" @click.self="transposeDialog = false">
+      <div class="rename-box">
+        <span class="rename-label">Transpose pattern</span>
+        <div style="display:flex;align-items:center;gap:10px;margin-top:6px">
+          <button class="rename-cancel" style="width:32px;font-size:18px;padding:2px"
+            @click="transposeSemitones = Math.max(-24, transposeSemitones - 1)">−</button>
+          <input v-model.number="transposeSemitones" type="number" min="-24" max="24"
+            class="rename-input" style="width:80px;text-align:center;font-size:20px" />
+          <button class="rename-cancel" style="width:32px;font-size:18px;padding:2px"
+            @click="transposeSemitones = Math.min(24, transposeSemitones + 1)">+</button>
+          <span style="font-family:Rajdhani,sans-serif;font-size:11px;color:#606080">semitones</span>
+        </div>
+        <div class="rename-btns" style="margin-top:12px">
+          <button class="rename-ok" @click="commitTranspose">Apply</button>
+          <button class="rename-cancel" @click="transposeDialog = false">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Merge arrangement dialog ────────────────────────────────────────────── -->
     <div v-if="mergeDialog" class="rename-overlay" @click.self="mergeDialog = false">
       <div class="rename-box" style="min-width:340px">
@@ -612,6 +729,7 @@ const {
   playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, displayStep, playbackStartCell, isPlaying,
   bpm, totalSteps, getPlayheadTimeSeconds, gridSnap, ppq, snapBars,
   loopRegion, setLoopRegion, clearLoopRegion,
+  pianoRollOpen, mainView,
   addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
   placeClip, removeClip, moveClip, resizeClip, splitClip, setSlipOffset, makeUniqueClip, consolidateTrack,
   addTimeMarker, removeTimeMarker,
@@ -621,6 +739,9 @@ const {
   playlists, currentPlaylistId, switchPlaylist, clonePlaylist, addPlaylist, renamePlaylist, deletePlaylist, mergePlaylist,
   addAutomationClip, removeAutomationClip, addAutoNode, removeAutoNode, resizeAutomationClip,
   getUnusedPatternIds, getPatternLengthTicks,
+  transposePatternNotes, selectSourcePattern, muteAllClipsOnTrack,
+  addPattern, removePattern,
+  togglePlay, startPlay,
   PLAYLIST_CELLS,
 } = useStudio()
 
@@ -842,7 +963,8 @@ function drawClipCanvas(clipId, canvas) {
 
   const clipW = (clip.width || 1) * cellWidth.value - 4
   const TITLE_H = 18
-  const clipH   = Math.max(4, trackHeight.value - TITLE_H - 6)
+  const tH      = getTrackH(playlistTracks.find(t => t.id === clip.trackId))
+  const clipH   = Math.max(4, tH - TITLE_H - 6)
 
   const dpr = window.devicePixelRatio || 1
   canvas.width  = Math.round(clipW * dpr)
@@ -965,15 +1087,16 @@ function redrawAllClipCanvases() {
 }
 
 watch([cellWidth, trackHeight, currentPatternId, pickerPatternId], redrawAllClipCanvases)
+watch(() => playlistTracks.map(t => t.height), redrawAllClipCanvases)
 watch(patternData,    redrawAllClipCanvases,   { deep: true })
 watch(patternData,    redrawAllPickerCanvases,  { deep: true })
 // Redraw clip canvases when slipOffset, width, or any clip property changes (Step 12)
 watch(playlistClips,  redrawAllClipCanvases,   { deep: true })
 
 // ── Automation graph helpers ──────────────────────────────────────────────────
-function autoPolyline(auto) {
+function autoPolyline(auto, track) {
   const W = (auto.width || 1) * cellWidth.value
-  const H = trackHeight.value - 18
+  const H = getTrackH(track) - 18
   return auto.nodes.map(n => `${n.x * W},${(1 - n.y) * H}`).join(' ')
 }
 
@@ -1022,7 +1145,10 @@ const SNAP_OPTIONS = [
 ]
 const localSnap = ref('bar')
 
+const altDown = ref(false)
+
 function snapCellLocal(rawCell) {
+  if (altDown.value) return rawCell   // Alt key temporarily disables snap
   const opt = SNAP_OPTIONS.find(o => o.id === localSnap.value)
   if (!opt || opt.cells === 0) return rawCell
   return Math.round(rawCell / opt.cells) * opt.cells
@@ -1083,8 +1209,7 @@ function updateHoverFromPickerDrag(e) {
 
   const relY  = e.clientY - tlRect.top  + tl.scrollTop  - RULER_H
   const relX  = e.clientX - tlRect.left + tl.scrollLeft - HEADER_W
-  const tIdx  = Math.max(0, Math.min(visibleTracks.value.length - 1, Math.floor(relY / trackHeight.value)))
-  const track = visibleTracks.value[tIdx]
+  const track = trackAtRelY(relY)
   if (!track || track.locked) { hoverGhost.value = null; return }
 
   const patId = pickerDrag.value.patId
@@ -1095,6 +1220,7 @@ function updateHoverFromPickerDrag(e) {
 
 function onPickerItemDown(e, pat) {
   pickerPatternId.value = pat.id   // select on mousedown
+  if (e.button === 0 && e.shiftKey) { _pickerMenuTarget = pat; ctxPickerRename(); return }
   if (e.button !== 0) return
 
   let dragStarted = false
@@ -1138,9 +1264,8 @@ function onCellsMouseDown(e, track) {
 
   // Select tool: start drag box on empty area
   if (tool === 'select') {
-    selectedClipIds.value = new Set()
     selectStartX = e.clientX; selectStartY = e.clientY
-    selectBox.value = { left: e.clientX, top: e.clientY, width: 0, height: 0 }
+    selectBox.value = null   // box only appears once the drag threshold is crossed
     window.addEventListener('mousemove', onSelectMove)
     window.addEventListener('mouseup',   onSelectEnd, { once: true })
     return
@@ -1200,7 +1325,12 @@ function onCellsMouseDown(e, track) {
 }
 
 // ── Select box drag ───────────────────────────────────────────────────────────
+const SELECT_DRAG_THRESHOLD = 4  // px to move before the rubber band appears
+
 function onSelectMove(e) {
+  const dx = Math.abs(e.clientX - selectStartX)
+  const dy = Math.abs(e.clientY - selectStartY)
+  if (dx < SELECT_DRAG_THRESHOLD && dy < SELECT_DRAG_THRESHOLD) return  // ignore micro-jitter
   const x = Math.min(e.clientX, selectStartX)
   const y = Math.min(e.clientY, selectStartY)
   selectBox.value = {
@@ -1212,16 +1342,22 @@ function onSelectMove(e) {
 }
 
 function onSelectEnd(e) {
-  if (!selectBox.value || !timelineRef.value) { selectBox.value = null; return }
+  window.removeEventListener('mousemove', onSelectMove)
+  if (!selectBox.value || !timelineRef.value) {
+    // Plain click (no drag) — deselect all
+    selectedClipIds.value = new Set()
+    selectBox.value = null
+    return
+  }
   const box = selectBox.value
   const tl  = timelineRef.value
   const tlRect = tl.getBoundingClientRect()
   const ids = new Set()
-  visibleTracks.value.forEach((track, tIdx) => {
-    const trackTop    = tlRect.top + 28 + tIdx * trackHeight.value - tl.scrollTop
-    const trackBottom = trackTop + trackHeight.value
+  trackOffsets.value.forEach(({ id, top, height }) => {
+    const trackTop    = tlRect.top + RULER_H + top - tl.scrollTop
+    const trackBottom = trackTop + height
     if (trackBottom < box.top || trackTop > box.top + box.height) return
-    patternClipsForTrack(track.id).forEach(clip => {
+    patternClipsForTrack(id).forEach(clip => {
       const clipLeft  = tlRect.left + 140 + clip.cell * cellWidth.value - tl.scrollLeft
       const clipRight = clipLeft + (clip.width || 1) * cellWidth.value
       if (clipRight >= box.left && clipLeft <= box.left + box.width) ids.add(clip.id)
@@ -1345,8 +1481,7 @@ function onDragMove(e) {
   if (!tl) return
   const tlRect = tl.getBoundingClientRect()
   const relY   = e.clientY - tlRect.top + tl.scrollTop - 28
-  const tIdx   = Math.max(0, Math.min(visibleTracks.value.length - 1, Math.floor(relY / trackHeight.value)))
-  const track  = visibleTracks.value[tIdx]
+  const track  = trackAtRelY(relY)
   if (!track) return
   const relX = e.clientX - tlRect.left + tl.scrollLeft - 140
   const cell = Math.max(0, Math.min(PLAYLIST_CELLS - (draggingClip.value.width || 1), Math.floor(cellFromX(relX))))
@@ -1479,6 +1614,35 @@ function onAutoResizeMove(e) {
 }
 function onAutoResizeEnd() { resizingAuto = null; window.removeEventListener('mousemove', onAutoResizeMove) }
 
+// ── Track focus + header wheel ─────────────────────────────────────────────────
+const focusedTrackId = ref(null)
+const hoverTrackId   = ref(null)
+
+function onTrackHeaderWheel(e, track) {
+  if (!e.shiftKey) return
+  if (e.deltaY < 0) movePlaylistTrackUp(track.id)
+  else              movePlaylistTrackDown(track.id)
+}
+
+function onTrackResizeStart(e, track) {
+  if (e.button !== 0) return
+  e.preventDefault()
+  const startY  = e.clientY
+  const startH  = getTrackH(track)
+  document.body.style.cursor = 'ns-resize'
+
+  const onMove = (me) => {
+    track.height = Math.max(28, Math.min(200, startH + me.clientY - startY))
+  }
+  const onUp = () => {
+    document.body.style.cursor = ''
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup',   onUp)
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup',   onUp)
+}
+
 // ── Track context menu ────────────────────────────────────────────────────────
 const trackMenu = ref(null)
 function openTrackMenu(e, track) { closeMenus(); trackMenu.value = { x: e.clientX, y: e.clientY, track } }
@@ -1495,6 +1659,38 @@ function ctxMoveUp()              { movePlaylistTrackUp(trackMenu.value.track.id
 function ctxMoveDown()            { movePlaylistTrackDown(trackMenu.value.track.id); trackMenu.value = null }
 function ctxAutoName()            { autoNameTrack(trackMenu.value.track.id); trackMenu.value = null }
 
+function ctxAutoNameClips() {
+  const t = trackMenu.value.track
+  playlistClips.filter(c => c.trackId === t.id).forEach(c => { c._label = t.name; c._color = t.color })
+  trackMenu.value = null
+}
+function ctxResetTrack() {
+  const t = trackMenu.value.track
+  t.name  = 'Track ' + (playlistTracks.findIndex(x => x.id === t.id) + 1)
+  t.color = '#4ecdc4'
+  trackMenu.value = null
+}
+function ctxMuteAllClips(muted) {
+  muteAllClipsOnTrack(trackMenu.value.track.id, muted)
+  trackMenu.value = null
+}
+function ctxAutoColorGroup() {
+  const t = trackMenu.value.track
+  trackMenu.value = null
+  if (!hasChildren(t)) return
+  playlistTracks.filter(x => x.groupParentId === t.id).forEach(x => setTrackColor(x.id, t.color))
+}
+
+function ctxInsertTrackAbove() {
+  const idx = playlistTracks.findIndex(t => t.id === trackMenu.value.track.id)
+  const color = '#4ecdc4'
+  playlistTracks.splice(idx, 0, {
+    id: 'pt' + Date.now(), name: 'Track ' + (idx + 1), color,
+    muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null, height: trackHeight.value,
+  })
+  trackMenu.value = null
+}
+
 const trackColorInput = ref(null)
 let   _trackColorTarget = null
 function ctxPickTrackColor() {
@@ -1509,7 +1705,18 @@ function onTrackColorPicked(e) {
 
 // ── Clip context menu ─────────────────────────────────────────────────────────
 const clipMenu = ref(null)
-function openClipMenu(e, clip) { closeMenus(); clipMenu.value = { x: e.clientX, y: e.clientY, clip } }
+function openClipMenu(e, clip) {
+  if (e.ctrlKey && e.shiftKey) { zoomToClip(clip); return }
+  closeMenus(); clipMenu.value = { x: e.clientX, y: e.clientY, clip }
+}
+function zoomToClip(clip) {
+  const spanCells = clip.width || 1
+  const tl = timelineRef.value
+  if (!tl) return
+  const availW = tl.clientWidth - HEADER_W
+  cellWidth.value = Math.max(32, Math.min(200, Math.floor(availW / spanCells)))
+  nextTick(() => { tl.scrollLeft = clip.cell * cellWidth.value })
+}
 function ctxDuplicateClip() {
   const c = clipMenu.value.clip
   placeClip(c.trackId, c.cell + (c.width || 1), c.patternId, c.width || 1)
@@ -1525,6 +1732,61 @@ function ctxSelectSimilar() {
 function ctxBeatSlice(mode) {
   beatSliceClip(clipMenu.value.clip.id, mode)
   clipMenu.value = null
+}
+
+function ctxEditPattern() {
+  currentPatternId.value = clipMenu.value.clip.patternId
+  mainView.value = 'sequencer'
+  pianoRollOpen.value = true
+  clipMenu.value = null
+}
+
+function ctxPreviewClip() {
+  const clip = clipMenu.value.clip
+  displayCell.value      = clip.cell
+  playbackStartCell.value = clip.cell
+  clipMenu.value = null
+  if (!isPlaying.value) startPlay()
+}
+
+const sourceSubOpen = ref(false)
+function ctxSetSourcePattern(patId) {
+  selectSourcePattern(clipMenu.value.clip.id, patId)
+  sourceSubOpen.value = false
+  clipMenu.value = null
+}
+
+function ctxClipMoveUp() {
+  const clip = clipMenu.value.clip
+  const vis  = visibleTracks.value
+  const idx  = vis.findIndex(t => t.id === clip.trackId)
+  const newT = vis[idx - 1]
+  if (newT) moveClip(clip.id, newT.id, clip.cell)
+  clipMenu.value = null
+}
+function ctxClipMoveDown() {
+  const clip = clipMenu.value.clip
+  const vis  = visibleTracks.value
+  const idx  = vis.findIndex(t => t.id === clip.trackId)
+  const newT = vis[idx + 1]
+  if (newT) moveClip(clip.id, newT.id, clip.cell)
+  clipMenu.value = null
+}
+
+// ── Transpose dialog ──────────────────────────────────────────────────────────
+const transposeDialog   = ref(false)
+const transposeSemitones = ref(0)
+let   _transposePatId   = null
+function ctxTransposeClip() {
+  _transposePatId      = clipMenu.value.clip.patternId
+  transposeSemitones.value = 0
+  clipMenu.value       = null
+  transposeDialog.value = true
+}
+function commitTranspose() {
+  if (_transposePatId && transposeSemitones.value !== 0)
+    transposePatternNotes(_transposePatId, transposeSemitones.value)
+  transposeDialog.value = false
 }
 
 // ── Clip rename ───────────────────────────────────────────────────────────────
@@ -1562,7 +1824,7 @@ function onClipColorPicked(e) {
   _clipColorTarget = null
 }
 
-function closeMenus() { trackMenu.value = null; clipMenu.value = null; arrMenu.value = null }
+function closeMenus() { trackMenu.value = null; clipMenu.value = null; arrMenu.value = null; markerMenu.value = null; pickerMenu.value = null; sourceSubOpen.value = false }
 
 // ── Arrangements menu ─────────────────────────────────────────────────────────
 const arrMenu = ref(null)
@@ -1693,6 +1955,118 @@ function renderPlayheadLoop() {
   ctx.fill()
 }
 
+// ── Marker drag-to-reposition ─────────────────────────────────────────────────
+function onMarkerMouseDown(e, marker) {
+  if (e.button !== 0) return
+  e.preventDefault()
+  const startX   = e.clientX
+  const origCell = marker.cell
+  const onMove = (me) => {
+    if (!timelineRef.value) return
+    const dx       = me.clientX - startX
+    const newCell  = Math.max(0, Math.min(PLAYLIST_CELLS - 1, origCell + Math.round(dx / cellWidth.value)))
+    marker.cell    = newCell
+  }
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', () => window.removeEventListener('mousemove', onMove), { once: true })
+}
+
+// ── Marker context menu ────────────────────────────────────────────────────────
+const markerMenu = ref(null)
+function openMarkerMenu(e, marker) {
+  closeMenus()
+  markerMenu.value = { x: e.clientX, y: e.clientY, marker }
+}
+
+const markerRenameDialog = ref(false)
+const markerRenameName   = ref('')
+const markerRenameInput  = ref(null)
+let   _markerRenameTarget = null
+
+function ctxRenameMarker() {
+  _markerRenameTarget   = markerMenu.value.marker
+  markerRenameName.value = _markerRenameTarget.label
+  markerMenu.value       = null
+  markerRenameDialog.value = true
+  nextTick(() => markerRenameInput.value?.select())
+}
+function commitMarkerRename() {
+  if (_markerRenameTarget && markerRenameName.value.trim())
+    _markerRenameTarget.label = markerRenameName.value.trim()
+  markerRenameDialog.value = false
+}
+function ctxDeleteMarker() {
+  removeTimeMarker(markerMenu.value.marker.id)
+  markerMenu.value = null
+}
+
+// ── Picker (pattern) sort + context menu ──────────────────────────────────────
+const pickerSort = ref('none')
+const sortedPatterns = computed(() => {
+  if (pickerSort.value === 'name')  return [...patterns].sort((a, b) => a.name.localeCompare(b.name))
+  if (pickerSort.value === 'color') return [...patterns].sort((a, b) => a.color.localeCompare(b.color))
+  return patterns
+})
+
+const pickerMenu          = ref(null)
+const pickerRenameDialog  = ref(false)
+const pickerRenameName    = ref('')
+const pickerRenameInput   = ref(null)
+const pickerColorInput    = ref(null)
+let   _pickerMenuTarget   = null
+
+function openPickerMenu(e, pat) {
+  closeMenus()
+  pickerPatternId.value = pat.id
+  _pickerMenuTarget = pat
+  pickerMenu.value = { x: e.clientX, y: e.clientY, pat }
+}
+
+function ctxPickerRename() {
+  pickerRenameName.value = _pickerMenuTarget.name
+  pickerMenu.value = null
+  pickerRenameDialog.value = true
+  nextTick(() => pickerRenameInput.value?.select())
+}
+function commitPickerRename() {
+  const name = pickerRenameName.value.trim()
+  if (_pickerMenuTarget && name) _pickerMenuTarget.name = name
+  pickerRenameDialog.value = false
+}
+
+function ctxPickerColorPick() {
+  pickerMenu.value = null
+  nextTick(() => pickerColorInput.value?.click())
+}
+function onPickerColorPicked(e) {
+  if (_pickerMenuTarget) _pickerMenuTarget.color = e.target.value
+}
+
+function ctxPickerTranspose() {
+  _transposePatId = _pickerMenuTarget.id
+  transposeSemitones.value = 0
+  pickerMenu.value = null
+  transposeDialog.value = true
+}
+
+function ctxPickerLocate() {
+  pickerMenu.value = null
+  locatePatternInPlaylist(_pickerMenuTarget.id)
+}
+
+function ctxPickerDelete() {
+  pickerMenu.value = null
+  removePattern(_pickerMenuTarget.id)
+}
+
+function locatePatternInPlaylist(patId) {
+  if (!patId || !timelineRef.value) return
+  const clip = playlistClips.filter(c => c.patternId === patId).sort((a, b) => a.cell - b.cell)[0]
+  if (!clip) return
+  const tl = timelineRef.value
+  tl.scrollLeft = Math.max(0, clip.cell * cellWidth.value - (tl.clientWidth - HEADER_W) / 2)
+}
+
 // ── Ruler scrubbing ───────────────────────────────────────────────────────────
 let isScrubbing = false
 
@@ -1748,7 +2122,9 @@ function onWheel(e) {
   if (e.ctrlKey) {
     cellWidth.value = Math.max(32, Math.min(200, cellWidth.value + (e.deltaY > 0 ? -8 : 8)))
   } else if (e.altKey) {
-    trackHeight.value = Math.max(28, Math.min(120, trackHeight.value + (e.deltaY > 0 ? -4 : 4)))
+    const newH = Math.max(28, Math.min(120, trackHeight.value + (e.deltaY > 0 ? -4 : 4)))
+    trackHeight.value = newH
+    playlistTracks.forEach(t => { t.height = newH })
   } else if (timelineRef.value) {
     timelineRef.value.scrollLeft += e.deltaX || e.deltaY * 0.5
   }
@@ -1781,13 +2157,52 @@ function inViewX(c) { return (c.cell + (c.width || 1)) > visMinCell.value && c.c
 function visibleClipsForTrack(trackId) { return playlistClips.filter(c => c.trackId === trackId && inViewX(c)) }
 function visibleAutoForTrack(trackId)  { return automationClips.filter(a => a.trackId === trackId && inViewX(a)) }
 
+// Per-track height helper — uses the track's own height if set, else global default.
+function getTrackH(track) { return track?.height ?? trackHeight.value }
+
+// Cumulative Y offsets for visible tracks — enables variable-height virtual scroll.
+const trackOffsets = computed(() => {
+  let y = 0
+  return visibleTracks.value.map(t => {
+    const h = getTrackH(t)
+    const entry = { id: t.id, top: y, height: h }
+    y += h
+    return entry
+  })
+})
+
+// Map a relative Y pixel (within the clip area, below ruler) to the visible track there.
+function trackAtRelY(relY) {
+  const offs = trackOffsets.value
+  for (const o of offs) {
+    if (relY < o.top + o.height) return visibleTracks.value.find(t => t.id === o.id)
+  }
+  return visibleTracks.value[visibleTracks.value.length - 1] ?? null
+}
+
 // Vertical track culling with spacers to preserve scroll height & offsets.
+const CULL_PX = 200   // pixel buffer above/below viewport
 const trackWindow = computed(() => {
-  const all = visibleTracks.value
-  const th  = trackHeight.value || 1
-  const first = Math.max(0, Math.floor(scrollTop.value / th) - CULL_Y)
-  const last  = Math.min(all.length, first + Math.ceil(viewH.value / th) + CULL_Y * 2)
-  return { slice: all.slice(first, last), topPad: first * th, botPad: (all.length - last) * th }
+  const all  = visibleTracks.value
+  const offs = trackOffsets.value
+  if (!offs.length) return { slice: [], topPad: 0, botPad: 0 }
+  const scrollY  = scrollTop.value
+  const viewBot  = scrollY + viewH.value
+
+  let first = 0
+  for (let i = 0; i < offs.length; i++) {
+    if (offs[i].top + offs[i].height > scrollY - CULL_PX) { first = i; break }
+  }
+  let last = offs.length
+  for (let i = offs.length - 1; i >= 0; i--) {
+    if (offs[i].top < viewBot + CULL_PX) { last = i + 1; break }
+  }
+
+  const topPad = offs[first]?.top ?? 0
+  const afterLast = offs[last] ? offs[last].top : (offs.at(-1)?.top ?? 0) + (offs.at(-1)?.height ?? 0)
+  const botPad    = Math.max(0, afterLast - (offs[last - 1]?.top ?? 0) - (offs[last - 1]?.height ?? 0))
+
+  return { slice: all.slice(first, last), topPad, botPad }
 })
 
 // Culling telemetry (rendered / total).
@@ -1844,18 +2259,46 @@ function onMinimapClick(e) {
 }
 
 // ── Keyboard shortcuts ─────────────────────────────────────────────────────────
+function onKeyUp(e) {
+  if (e.key === 'Alt') altDown.value = false
+}
+
 function onKeyDown(e) {
   if (['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return
+  if (e.key === 'Alt') altDown.value = true
 
-  // Tool shortcuts
+  // Tool shortcuts (no modifiers)
   if (!e.ctrlKey && !e.shiftKey && !e.altKey) {
     if (e.key === 'd' || e.key === 'D') playlistTool.value = 'draw'
     if (e.key === 'p' || e.key === 'P') playlistTool.value = 'paint'
+    if (e.key === 'b' || e.key === 'B') playlistTool.value = 'paint'   // B = paint (same as P)
     if (e.key === 'x' || e.key === 'X') playlistTool.value = 'erase'
     if (e.key === 'e' || e.key === 'E') playlistTool.value = 'select'
     if (e.key === 'c' || e.key === 'C') playlistTool.value = 'slice'
     if (e.key === 't' || e.key === 'T') playlistTool.value = 'mute'
     if (e.key === 's' || e.key === 'S') playlistTool.value = 'slip'
+    // M — cycle clip focus modes
+    if (e.key === 'm' || e.key === 'M') {
+      clipFocusMode.value = clipFocusMode.value === 'pattern' ? 'automation' : 'pattern'
+      pickerTab.value     = clipFocusMode.value === 'pattern' ? 'patterns' : 'automation'
+    }
+    // Y — play selected (set playhead to first selected clip and play)
+    if (e.key === 'y' || e.key === 'Y') {
+      const ids = [...selectedClipIds.value]
+      if (ids.length) {
+        const clips = ids.map(id => playlistClips.find(c => c.id === id)).filter(Boolean)
+        const first = clips.reduce((a, b) => a.cell < b.cell ? a : b)
+        displayCell.value       = first.cell
+        playbackStartCell.value = first.cell
+        if (!isPlaying.value) startPlay()
+      }
+    }
+    // Home — reset playhead to bar 1
+    if (e.key === 'Home') {
+      displayCell.value       = 0
+      playbackStartCell.value = 0
+      e.preventDefault()
+    }
   }
 
   if (e.key === 'Escape') { closeMenus(); selectedClipIds.value = new Set() }
@@ -1874,26 +2317,74 @@ function onKeyDown(e) {
     e.preventDefault()
   }
 
+  // Ctrl+Insert — insert 4 bars at playhead position
+  if (e.ctrlKey && e.key === 'Insert') {
+    insertTime(displayCell.value, 4)
+    e.preventDefault()
+  }
+
+  // Ctrl+Delete — delete time at loop region or 1 bar at playhead
+  if (e.ctrlKey && e.key === 'Delete') {
+    if (loopRegion.value) {
+      const TICKS = totalSteps.value * 4
+      const from  = Math.round(loopRegion.value.startTick / TICKS)
+      const to    = Math.round(loopRegion.value.endTick   / TICKS)
+      deleteTime(from, to)
+      clearLoopRegion()
+    } else {
+      deleteTime(displayCell.value, displayCell.value + 1)
+    }
+    e.preventDefault()
+  }
+
+  // Alt+T — add time marker at playhead
+  if (e.altKey && (e.key === 't' || e.key === 'T')) {
+    addMarkerAt(displayCell.value)
+    e.preventDefault()
+  }
+
+  // Ctrl+Up/Down — navigate (select) tracks
+  if (e.ctrlKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+    const vis = visibleTracks.value
+    const cur = vis.findIndex(t => t.id === focusedTrackId.value)
+    const next = e.key === 'ArrowUp' ? cur - 1 : cur + 1
+    if (next >= 0 && next < vis.length) focusedTrackId.value = vis[next].id
+    else if (cur === -1 && vis.length) focusedTrackId.value = vis[0].id
+    e.preventDefault()
+  }
+
   // Shift+Up/Down — move selected clips to adjacent track
   if (e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown') && selectedClipIds.value.size > 0) {
     const dir = e.key === 'ArrowUp' ? -1 : 1
     selectedClipIds.value.forEach(id => {
       const clip = playlistClips.find(c => c.id === id)
       if (!clip) return
-      const vis   = visibleTracks.value
-      const idx   = vis.findIndex(t => t.id === clip.trackId)
-      const newT  = vis[idx + dir]
+      const vis  = visibleTracks.value
+      const idx  = vis.findIndex(t => t.id === clip.trackId)
+      const newT = vis[idx + dir]
       if (newT) moveClip(id, newT.id, clip.cell)
     })
     e.preventDefault()
   }
 
-  // Page Up / Down — vertical zoom
+  // Shift+Z — zoom to selection bounding box
+  if (e.shiftKey && (e.key === 'z' || e.key === 'Z') && selectedClipIds.value.size > 0) {
+    zoomToSelection()
+    e.preventDefault()
+  }
+
+  // Shift+C — locate selected picker pattern's first clip in playlist
+  if (e.shiftKey && !e.ctrlKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+    locatePatternInPlaylist(pickerPatternId.value)
+    e.preventDefault()
+  }
+
+  // Page Up / Down — horizontal zoom
   if (e.key === 'PageUp')   { cellWidth.value = Math.min(200, cellWidth.value + 16); e.preventDefault() }
   if (e.key === 'PageDown') { cellWidth.value = Math.max(32,  cellWidth.value - 16); e.preventDefault() }
 
   // Shift+1-5 — quick zoom presets
-  if (e.shiftKey) {
+  if (e.shiftKey && !e.ctrlKey && !e.altKey) {
     if (e.key === '1') { cellWidth.value = 32;  e.preventDefault() }
     if (e.key === '2') { cellWidth.value = 64;  e.preventDefault() }
     if (e.key === '3') { cellWidth.value = 96;  e.preventDefault() }
@@ -1901,9 +2392,23 @@ function onKeyDown(e) {
     if (e.key === '5') { cellWidth.value = 200; e.preventDefault() }
   }
 }
+
+// ── Zoom to selection ─────────────────────────────────────────────────────────
+function zoomToSelection() {
+  const clips = playlistClips.filter(c => selectedClipIds.value.has(c.id))
+  if (!clips.length || !timelineRef.value) return
+  const minCell = Math.min(...clips.map(c => c.cell))
+  const maxCell = Math.max(...clips.map(c => c.cell + (c.width || 1)))
+  const spanCells = maxCell - minCell || 1
+  const tl = timelineRef.value
+  const availW = tl.clientWidth - HEADER_W
+  cellWidth.value = Math.max(32, Math.min(200, Math.floor(availW / spanCells)))
+  nextTick(() => { tl.scrollLeft = minCell * cellWidth.value })
+}
 let _viewRO = null
 onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
+  window.addEventListener('keyup',   onKeyUp)
   rafId = requestAnimationFrame(renderPlayheadLoop)
   measureViewport()
   if (timelineRef.value) { _viewRO = new ResizeObserver(measureViewport); _viewRO.observe(timelineRef.value) }
@@ -1911,6 +2416,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown)
+  window.removeEventListener('keyup',   onKeyUp)
   if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
   _viewRO?.disconnect()
 })
@@ -2013,6 +2519,12 @@ onBeforeUnmount(() => {
 }
 .ptab:hover { color: #6060a0; }
 .ptab.active { color: #4ecdc4; border-bottom-color: #4ecdc4; }
+.picker-sort-select {
+  background: transparent; border: none; border-left: 1px solid var(--border-subtle);
+  color: #40405a; font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
+  cursor: pointer; padding: 0 4px; min-width: 0; outline: none;
+}
+.picker-sort-select:hover { color: #7070a0; }
 .picker-list { flex: 1; overflow-y: auto; }
 .picker-section { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #252535; padding: 6px 10px 3px; letter-spacing: 0.1em; }
 .picker-item {
@@ -2101,6 +2613,12 @@ onBeforeUnmount(() => {
 .pl-track-row.muted  { opacity: 0.35; }
 .pl-track-row.grouped .pl-track-header { background: var(--bg-header); }
 .pl-track-row.locked .pl-track-cells   { cursor: not-allowed; }
+.pl-track-header.focused { box-shadow: inset 2px 0 0 #4ecdc4; background: #0d1a1a; }
+.track-resize-handle {
+  position: absolute; bottom: 0; left: 0; right: 0; height: 5px;
+  cursor: ns-resize; z-index: 10;
+}
+.track-resize-handle:hover { background: rgba(78, 205, 196, 0.3); }
 
 /* ── Track header ────────────────────────────────────────────────────────────── */
 .pl-track-header {
@@ -2392,4 +2910,23 @@ onBeforeUnmount(() => {
 
 /* ── Disabled ctx item ───────────────────────────────────────────────────────── */
 .ctx-item.disabled { opacity: 0.35; pointer-events: none; }
+
+/* ── Context submenu ─────────────────────────────────────────────────────────── */
+.ctx-has-sub { position: relative; }
+.ctx-submenu {
+  position: absolute; left: 100%; top: -4px;
+  background: var(--bg-panel); border: 1px solid var(--border);
+  border-radius: 6px; box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+  min-width: 180px; padding: 4px 0; z-index: 3100; max-height: 300px; overflow-y: auto;
+}
+.ctx-checked { color: #4ecdc4 !important; }
+.ctx-dot {
+  display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; margin-right: 6px; flex-shrink: 0;
+  vertical-align: middle;
+}
+
+/* ── Draggable time marker ───────────────────────────────────────────────────── */
+.time-marker { cursor: grab; }
+.time-marker:active { cursor: grabbing; }
 </style>
