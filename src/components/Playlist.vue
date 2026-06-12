@@ -88,9 +88,8 @@
         <span>PLAYLIST</span>
       </label>
 
-      <label class="use-pl-toggle">
-        <input type="checkbox" v-model="autoScroll" />
-        <span>▶▶ SCROLL</span>
+      <label class="use-pl-toggle" :class="{ on: autoScroll }" @click="autoScroll = !autoScroll" title="Auto Scroll — follow playhead (also in toolbar)">
+        <span>⇥ SCROLL</span>
       </label>
 
       <div class="tb-right">
@@ -742,6 +741,7 @@ const {
   transposePatternNotes, selectSourcePattern, muteAllClipsOnTrack,
   addPattern, removePattern,
   togglePlay, startPlay,
+  autoScroll, seekTo,
   PLAYLIST_CELLS,
 } = useStudio()
 
@@ -756,7 +756,7 @@ const tools = [
   { id: 'slip',   icon: '↔',  tip: 'Slip — drag to shift pattern content inside clip boundary (S)' },
 ]
 // ── Auto-scroll & selection ───────────────────────────────────────────────────
-const autoScroll      = ref(true)
+// autoScroll is now global store state (also toggled from toolbar)
 const selectedClipIds = ref(new Set())
 const selectBox       = ref(null)   // { left, top, width, height } viewport coords
 let selectStartX = 0, selectStartY = 0
@@ -2096,8 +2096,12 @@ function onRulerMouseDown(e, cell) {
 
 function setPlayheadCell(cell) {
   const c = Math.max(0, Math.min(PLAYLIST_CELLS - 1, cell))
-  displayCell.value      = c
-  playbackStartCell.value = c
+  if (isPlaying.value) {
+    seekTo(c)   // live scrub: flushes scheduler and resumes from new position
+  } else {
+    displayCell.value      = c
+    playbackStartCell.value = c
+  }
 }
 
 function onRulerScrubMove(e) {

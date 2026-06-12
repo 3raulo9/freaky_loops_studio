@@ -6,6 +6,13 @@
       v-hint="'tools.kb'"
       @click="keyboardInputMode = !keyboardInputMode"
     >⌨</button>
+    <button
+      class="tb-tool"
+      :class="{ active: autoScroll }"
+      v-hint="'tools.autoscroll'"
+      title="Auto Scroll — follow playhead during playback (Scroll Lock)"
+      @click="autoScroll = !autoScroll"
+    >⇥</button>
     <div class="tb-tools-sep" />
     <button
       class="tb-tool"
@@ -53,7 +60,7 @@ import { ref } from 'vue'
 import { useStudio } from '../../store/studio.js'
 
 const {
-  keyboardInputMode,
+  keyboardInputMode, autoScroll,
   canUndo, canRedo, undoAction, redoAction,
   saveProject, loadProjectFile, dumpScoreLog,
 } = useStudio()

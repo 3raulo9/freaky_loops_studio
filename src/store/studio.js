@@ -816,6 +816,34 @@ export function useStudio() {
     currentPatternId.value = newId
   }
 
+  function movePatternUp(id) {
+    const idx = patterns.findIndex(p => p.id === id)
+    if (idx <= 0) return
+    const [pat] = patterns.splice(idx, 1)
+    patterns.splice(idx - 1, 0, pat)
+  }
+
+  function movePatternDown(id) {
+    const idx = patterns.findIndex(p => p.id === id)
+    if (idx < 0 || idx >= patterns.length - 1) return
+    const [pat] = patterns.splice(idx, 1)
+    patterns.splice(idx + 1, 0, pat)
+  }
+
+  function findNextEmptyPattern() {
+    const cur = patterns.findIndex(p => p.id === currentPatternId.value)
+    const start = cur >= 0 ? cur + 1 : 0
+    for (let i = start; i < patterns.length; i++) {
+      const pData = patternData[patterns[i].id] || {}
+      const isEmpty = !Object.values(pData).some(cd =>
+        (cd.steps || []).some(Boolean) || (cd.pianoNotes || []).length > 0
+      )
+      if (isEmpty) { currentPatternId.value = patterns[i].id; return patterns[i].id }
+    }
+    addPattern()
+    return currentPatternId.value
+  }
+
   // ── Playlist tracks & clips ────────────────────────────────────────────────────
   const playlistTracks = reactive([
     { id: 'pt1', name: 'Track 1', color: '#e74c3c', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null, height: 52 },
@@ -828,6 +856,7 @@ export function useStudio() {
   const timeMarkers = reactive([])   // { id, cell, label, color }
   let _markerId = 0
 
+  const autoScroll     = ref(true)   // follow playhead in Playlist and PianoRoll during playback
   const usePlaylist    = ref(false)
   const playlistTool   = ref('draw')    // 'draw' | 'paint' | 'erase' | 'select'
   const cellWidth      = ref(80)        // px per cell (zoom)
@@ -1470,6 +1499,25 @@ export function useStudio() {
   const displayStep      = ref(-1)
   const displayCell      = ref(0)
   const playbackStartCell = ref(0)
+  // Each mode preserves its own playhead so switching PAT ↔ SONG never clobbers
+  // the position you were at in the other mode.
+  const _savedPatCell  = ref(0)
+  const _savedSongCell = ref(0)
+  watch(usePlaylist, (nowSong) => {
+    // Snapshot the outgoing mode's position before stopPlay() can clear it
+    if (nowSong) _savedPatCell.value  = displayCell.value
+    else         _savedSongCell.value = displayCell.value
+    // Mode switch always stops playback
+    stopPlay()
+    // Restore the incoming mode's last-known playhead position
+    if (nowSong) {
+      displayCell.value       = _savedSongCell.value
+      playbackStartCell.value = _savedSongCell.value
+    } else {
+      displayCell.value       = _savedPatCell.value
+      playbackStartCell.value = _savedPatCell.value
+    }
+  })
 
   // ── Transport status (one-directional: UI dispatches intent, engine acks) ──────
   //   'stopped' | 'arming' | 'playing' | 'paused'. The Play button only
@@ -1500,6 +1548,18 @@ export function useStudio() {
   // capturing a continuous take; when ON it overdubs inside the fixed loop window.
   const loopRecord = ref(true)
 
+  // Count-in: N bars of metronome clicks before recording actually starts.
+  const recordCountIn     = ref(false)
+  const recordCountInBars = ref(2)    // 1 | 2 | 4
+  const countInBarsLeft   = ref(0)    // reactive countdown display (0 = not counting)
+
+  // Recording behaviour flags
+  const disarmOnStop         = ref(false)  // unarm record when Stop is pressed
+  const recordStartsPlayback = ref(true)   // arming record also starts playback
+  const rememberSeekTime     = ref(false)  // Stop keeps playhead at current position
+  const halfSpeed            = ref(false)  // play at half BPM for easier recording
+  const recordBlend          = ref(true)   // true = overdub; false = overwrite existing notes
+
   // Non-reactive map: keys currently held during a live recording session.
   // key-code → { pitch, audioStartTime }
   const liveRecordNotes = new Map()
@@ -1523,6 +1583,7 @@ export function useStudio() {
       return
     }
     recordArmed.value = true
+    if (recordStartsPlayback.value && !isPlaying.value) startPlay()
   }
 
   // ── Undo / Redo ───────────────────────────────────────────────────────────────
@@ -2218,6 +2279,7 @@ export function useStudio() {
   let schedStep      = 0
   let schedCell      = 0
   const noteQueue    = []
+  let countInStepsLeft = 0   // steps remaining in pre-record count-in (0 = no count-in)
   let playbackStartAudioTime   = 0
   let playbackStartCellSeconds = 0
   let _lastBeat = -1   // last beat index emitted to beatTick (metronome pulse)
@@ -2250,7 +2312,7 @@ export function useStudio() {
   function getPatternsForCell(cell) { return getClipsForCell(cell).map(c => c.patternId) }
 
   function scheduleStep(step, baseWhen, cell) {
-    noteQueue.push({ step, time: baseWhen, cell: cell % PLAYLIST_CELLS })
+    noteQueue.push({ step, time: baseWhen, cell: cell % PLAYLIST_CELLS, isSong: usePlaylist.value })
     syncVolumes()
     const secPerBeat = 60 / bpm.value
     const secPerStep = secPerBeat / 4                 // Δstep (a 16th note)
@@ -2355,7 +2417,7 @@ export function useStudio() {
   function tick() {
     if (!audioCtx) return
     const t0 = performance.now()
-    const secPerBeat = 60 / bpm.value
+    const secPerBeat = 60 / bpm.value * (halfSpeed.value ? 2 : 1)
     const secPerStep = secPerBeat / 4
     const steps = totalSteps.value
     // Loop Record OFF + armed → let the playhead run indefinitely so the user
@@ -2371,6 +2433,20 @@ export function useStudio() {
     // Buffer-deadline miss: if the next event is already in the past, the
     // scheduler fell behind its window → register a dropout (underrun).
     if (nextNoteTime < audioCtx.currentTime - 0.001) audioUnderruns.value++
+    // Count-in phase: fire metronome clicks, push beat events to noteQueue,
+    // but do NOT schedule notes or advance the pattern step counter.
+    while (countInStepsLeft > 0 && nextNoteTime < audioCtx.currentTime + LOOK_AHEAD) {
+      if (countInStepsLeft % 4 === 0) {
+        const isAccent = countInStepsLeft % steps === 0
+        scheduleMetroClick(nextNoteTime, isAccent)
+        const barsLeft = Math.ceil((countInStepsLeft - 1) / steps)
+        noteQueue.push({ countIn: true, time: nextNoteTime, barsLeft, accent: isAccent })
+      }
+      nextNoteTime += secPerStep
+      countInStepsLeft--
+    }
+    if (countInStepsLeft > 0) return   // still counting in — skip note scheduling
+
     while (nextNoteTime < audioCtx.currentTime + LOOK_AHEAD) {
       // Pass base grid time — per-channel swing applied inside scheduleStep
       scheduleStep(schedStep % effectiveSteps, nextNoteTime, schedCell)
@@ -2380,7 +2456,7 @@ export function useStudio() {
       }
       nextNoteTime += secPerStep
       schedStep++
-      if (schedStep % effectiveSteps === 0) schedCell++
+      if (schedStep % effectiveSteps === 0 && usePlaylist.value) schedCell++
     }
     // Audio processing load = compute time of this block / its time-window deadline.
     const elapsed = performance.now() - t0
@@ -2399,22 +2475,65 @@ export function useStudio() {
     return playbackStartCellSeconds + Math.max(0, audioCtx.currentTime - playbackStartAudioTime)
   }
 
+  // In PAT mode the timecode loops within the pattern so the timer resets to 0
+  // each time the pattern completes.  In SONG mode it returns the absolute
+  // song-position time.
+  function getTimecodeSeconds() {
+    if (!usePlaylist.value && isPlaying.value) {
+      const absTime = getPlayheadTimeSeconds()
+      const patTicks  = getPatternLengthTicks(currentPatternId.value)
+      const secPerStep = (60 / bpm.value * (halfSpeed.value ? 2 : 1)) / 4
+      const patLenSec  = (patTicks / TICKS_PER_STEP) * secPerStep
+      if (patLenSec > 0) return absTime % patLenSec
+      return absTime
+    }
+    return getPlayheadTimeSeconds()
+  }
+
+  // Live playlist scrub: instantly relocates the SONG-mode playhead during
+  // active playback.  Flushes the scheduler buffer and resumes from `cell`.
+  // No-op in PAT mode (the playlist playhead is frozen during pattern play).
+  function seekTo(targetCell) {
+    if (!usePlaylist.value) return
+    const cell = Math.max(0, Math.min(PLAYLIST_CELLS - 1, Math.floor(targetCell)))
+    displayCell.value      = cell
+    playbackStartCell.value = cell
+    if (!isPlaying.value || !audioCtx) return
+    clearInterval(schedulerTimer)
+    schedulerTimer  = null
+    noteQueue.length = 0
+    schedStep = 0
+    schedCell = cell
+    nextNoteTime              = audioCtx.currentTime + 0.02
+    playbackStartAudioTime    = audioCtx.currentTime
+    playbackStartCellSeconds  = cell * getSecPerCell()
+    _lastBeat = -1
+    schedulerTimer = setInterval(tick, TICK_MS)
+  }
+
   function drawLoop() {
     if (!isPlaying.value) return
     const now = audioCtx?.currentTime ?? 0
     while (noteQueue.length && noteQueue[0].time <= now + 0.01) {
-      displayStep.value = noteQueue[0].step
-      displayCell.value = noteQueue[0].cell
-      // Emit a beat pulse when the audio-locked playhead crosses a beat. This is
-      // read off the look-ahead queue (already latency-compensated) so the visual
-      // flash lands with the audible click, not after it.
-      const beat = Math.floor(noteQueue[0].step / 4)
-      if (beat !== _lastBeat) {
-        _lastBeat = beat
-        beatAccent.value = noteQueue[0].step === 0   // downbeat of the cell
+      const entry = noteQueue.shift()
+      if (entry.countIn) {
+        // Count-in beat: flash visual indicators but don't advance playhead.
+        countInBarsLeft.value = entry.barsLeft ?? 0
+        beatAccent.value = entry.accent ?? false
         beatTick.value++
+      } else {
+        displayStep.value = entry.step
+        if (entry.isSong) displayCell.value = entry.cell
+        // Emit a beat pulse when the audio-locked playhead crosses a beat. This is
+        // read off the look-ahead queue (already latency-compensated) so the visual
+        // flash lands with the audible click, not after it.
+        const beat = Math.floor(entry.step / 4)
+        if (beat !== _lastBeat) {
+          _lastBeat = beat
+          beatAccent.value = entry.step === 0   // downbeat of the cell
+          beatTick.value++
+        }
       }
-      noteQueue.shift()
     }
     requestAnimationFrame(drawLoop)
   }
@@ -2448,6 +2567,22 @@ export function useStudio() {
     playbackStartCellSeconds = startCell * getSecPerCell()
     noteQueue.length = 0; displayStep.value = -1; displayCell.value = startCell
     _lastBeat = -1
+    // Overwrite mode: clear existing piano notes before recording starts (blend = false).
+    if (recordArmed.value && !recordBlend.value && (recordFilters.value & RECORD_FLAGS.NOTES)) {
+      const ch = selectedChannel.value
+      if (ch?.mode === 'piano') {
+        const d = getPatData(ch.id)
+        d.pianoNotes.length = 0
+      }
+    }
+    // Count-in: when record is armed and count-in is enabled, tick N bars before recording.
+    if (recordArmed.value && recordCountIn.value) {
+      countInStepsLeft = recordCountInBars.value * totalSteps.value
+      countInBarsLeft.value = recordCountInBars.value
+    } else {
+      countInStepsLeft = 0
+      countInBarsLeft.value = 0
+    }
     compilePlayNotes()                  // snapshot notes as plain JS before entering hot loop
     isPlaying.value = true              // engine confirmed → transport state syncs
     transportState.value = 'playing'
@@ -2461,6 +2596,7 @@ export function useStudio() {
     transportState.value = 'paused'
     clearInterval(schedulerTimer); schedulerTimer = null
     noteQueue.length = 0; displayStep.value = -1
+    countInStepsLeft = 0; countInBarsLeft.value = 0
     _playNotes = null   // rebuilt on next play so edits are picked up
     // Playhead stays at current position (pause)
   }
@@ -2471,8 +2607,15 @@ export function useStudio() {
     transportState.value = 'stopped'
     clearInterval(schedulerTimer); schedulerTimer = null
     noteQueue.length = 0; displayStep.value = -1
-    displayCell.value = 0; playbackStartCell.value = 0
+    if (rememberSeekTime.value) {
+      // Keep playhead at the stopped position so next Play resumes from here.
+      playbackStartCell.value = displayCell.value
+    } else {
+      displayCell.value = 0; playbackStartCell.value = 0
+    }
     _lastBeat = -1
+    countInStepsLeft = 0; countInBarsLeft.value = 0
+    if (disarmOnStop.value) recordArmed.value = false
     _playNotes = null   // rebuilt on next play so edits are picked up
   }
 
@@ -3936,6 +4079,7 @@ export function useStudio() {
     patterns, currentPatternId, pickerPatternId, patternData,
     getPatData, getSteps, getPianoNotes,
     addPattern, removePattern, duplicatePattern, importMidiFile,
+    movePatternUp, movePatternDown, findNextEmptyPattern,
     // Pattern editing
     toggleStep, togglePianoNote, hasNote, clearChannel, clearAll,
     setChannelMode, syncStepsToPianoNotes,
@@ -3961,6 +4105,7 @@ export function useStudio() {
     // Global loop + batch flags
     globalLoopMode, colorfulLoopControls, alwaysShowAdvancedLoopControls, muteRemovedSteps,
     // Playlist
+    autoScroll,
     playlistTracks, playlistClips, timeMarkers, usePlaylist,
     playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, playbackStartCell,
     addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
@@ -3996,7 +4141,7 @@ export function useStudio() {
     // Sequencer
     bpm, totalSteps, swing, isPlaying, displayStep,
     togglePlay, startPlay, stopPlay, pausePlay,
-    getPlayheadTimeSeconds, audioLoad,
+    getPlayheadTimeSeconds, getTimecodeSeconds, seekTo, audioLoad,
     // System telemetry
     audioUnderruns, getVoiceCount,
     // Main volume & master pitch
@@ -4009,6 +4154,8 @@ export function useStudio() {
     transportState, beatTick, beatAccent,
     RECORD_FLAGS, recordFilters, recordArmed, recordWarning,
     toggleRecordFilter, toggleRecordArm, loopRecord, dumpScoreLog,
+    recordCountIn, recordCountInBars, countInBarsLeft,
+    disarmOnStop, recordStartsPlayback, rememberSeekTime, halfSpeed, recordBlend,
     // Metronome
     metronomeOn, metronomeSound, metroAccent,
     getAnalyser: () => analyserNode,

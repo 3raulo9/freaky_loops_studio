@@ -5,6 +5,7 @@
 //  This registry is the single source of truth for *what* panels exist; the
 //  container (TopBar.vue) owns *where* they sit and *whether* they're mounted.
 // ──────────────────────────────────────────────────────────────────────────
+import AddPanel       from './AddPanel.vue'
 import LogoPanel      from './LogoPanel.vue'
 import HintBarPanel   from './HintBarPanel.vue'
 import TransportPanel from './TransportPanel.vue'
@@ -28,6 +29,7 @@ export const SPACER_ID = 'spacer'
 
 export const PANELS = {
   logo:      { label: 'Logo',        component: LogoPanel      },
+  add:       { label: 'Add Channel', component: AddPanel       },
   hint:      { label: 'Hint Bar',    component: HintBarPanel, grow: true },
   transport: { label: 'Transport',   component: TransportPanel },
   timecode:  { label: 'Timecode',    component: TimecodePanel  },
@@ -52,6 +54,7 @@ export const PANELS = {
 export const DEFAULT_LAYOUT = [
   // ── Primary row ────────────────────────────────────────────────────────────
   { id: 'logo',      visible: true, row: 0 },
+  { id: 'add',       visible: true, row: 0 },
   { id: 'transport', visible: true, row: 0 },
   { id: 'timecode',  visible: true, row: 0 },
   { id: 'bpm',       visible: true, row: 0 },
