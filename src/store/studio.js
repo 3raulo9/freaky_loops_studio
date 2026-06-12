@@ -512,6 +512,16 @@ const wasmNodes         = new Map()  // channelId -> AudioWorkletNode (WASM plug
 const customSynthNodes  = new Map()  // channelId -> AudioWorkletNode (Custom Synth)
 const subterraNodes     = new Map()  // channelId -> AudioWorkletNode (SUBTERRA bass)
 const channelFxChains   = new Map()  // channelId -> (live FX handle | null)[] aligned to ch.effects
+const audioFileBufs     = new Map()  // channelId -> AudioBuffer (user audio files)
+const audioClipBufs     = new Map()  // clipId    -> AudioBuffer (playlist audio clips)
+const chopBufs          = new Map()  // channelId -> AudioBuffer (CHOP slicer)
+const forgeBufsA        = new Map()  // channelId -> AudioBuffer (FORGE deck A)
+const forgeBufsB        = new Map()  // channelId -> AudioBuffer (FORGE deck B)
+const forgeBufsA_rev    = new Map()  // channelId -> reversed AudioBuffer (FORGE deck A)
+const forgeBufsB_rev    = new Map()  // channelId -> reversed AudioBuffer (FORGE deck B)
+const reversedAudioFileBufs = new Map()  // channelId -> reversed AudioBuffer (sampler reverse mode)
+const pingpongAudioFileBufs = new Map()  // channelId -> doubled [fwd+rev] AudioBuffer (ping-pong loop)
+const xfadeLoopBufs         = new Map()  // channelId -> crossfaded copy for seamless FWD loop
 
 // ─── Channel factory ───────────────────────────────────────────────────────────
 let _cid = 0
@@ -611,6 +621,15 @@ export function useStudio() {
       fn: playClash,
     }),
   ])
+
+  // Reactive version counter keyed by channelId — increments when an audio buffer
+  // is loaded or cleared so that computed refs in SamplerChannel.vue re-evaluate.
+  const audioFileVersions = reactive({})
+  // Same pattern for playlist Audio Clips: keyed by clip ID.
+  const audioClipVersions = reactive({})
+  // CHOP and FORGE slicer version counters (same "silent dependency" pattern).
+  const chopVersions  = reactive({})
+  const forgeVersions = reactive({})   // keyed by channelId+'_A' or channelId+'_B'
 
   // ── Pattern system ─────────────────────────────────────────────────────────────
   // patterns[]: metadata (id, name, color)
@@ -874,7 +893,11 @@ export function useStudio() {
     if (idx < 0 || playlistTracks.length <= 1) return
     playlistTracks.splice(idx, 1)
     for (let i = playlistClips.length - 1; i >= 0; i--) {
-      if (playlistClips[i].trackId === id) playlistClips.splice(i, 1)
+      const c = playlistClips[i]
+      if (c.trackId === id) {
+        if (c.type === 'audio') { audioClipBufs.delete(c.id); delete audioClipVersions[c.id] }
+        playlistClips.splice(i, 1)
+      }
     }
   }
 
@@ -974,7 +997,12 @@ export function useStudio() {
 
   function removeClip(clipId) {
     const idx = playlistClips.findIndex(c => c.id === clipId)
-    if (idx >= 0) playlistClips.splice(idx, 1)
+    if (idx < 0) return
+    if (playlistClips[idx].type === 'audio') {
+      audioClipBufs.delete(clipId)
+      delete audioClipVersions[clipId]
+    }
+    playlistClips.splice(idx, 1)
   }
 
   // Track consolidation: collapse runs of adjacent/overlapping same-pattern clips
@@ -1130,6 +1158,10 @@ export function useStudio() {
     clips.forEach(c => {
       const newId = 'c' + (++_clipId)
       playlistClips.push({ ...c, id: newId, cell: c.cell + offset })
+      if (c.type === 'audio') {
+        const buf = audioClipBufs.get(c.id)
+        if (buf) { audioClipBufs.set(newId, buf); audioClipVersions[newId] = 1 }
+      }
       newIds.add(newId)
     })
     return newIds
@@ -1735,6 +1767,676 @@ export function useStudio() {
     }
   }
 
+  // Play function for an audio-file sampler channel — full professional signal chain.
+  function makeAudioFileFn(channelId) {
+    return (ctx, when, params, dest) => {
+      const fwdBuf = audioFileBufs.get(channelId)
+      if (!fwdBuf) return
+
+      const loopMode = params.loopMode ?? 'off'
+      const reverse  = params.reverse  ?? false
+
+      // ── Buffer selection ─────────────────────────────────────────────────
+      let buf
+      if (loopMode === 'pingpong') {
+        buf = pingpongAudioFileBufs.get(channelId) ?? fwdBuf
+      } else if (loopMode === 'fwd' && xfadeLoopBufs.has(channelId)) {
+        buf = xfadeLoopBufs.get(channelId)        // seamless crossfaded loop
+      } else if (reverse) {
+        buf = reversedAudioFileBufs.get(channelId) ?? fwdBuf
+      } else {
+        buf = fwdBuf
+      }
+
+      // ── Pitch / tuning ───────────────────────────────────────────────────
+      const rootNote  = params.rootNote ?? 60
+      const keyTrack  = params.keyTrack ?? 1
+      const fineTune  = params.fineTune ?? 0
+      const deltaSemi = (params.pitch - rootNote) * keyTrack + fineTune / 100
+
+      // ── Start / end offsets ──────────────────────────────────────────────
+      const fwdStart = Math.max(0, Math.min(1, params.startOffset ?? 0))
+      const fwdEnd   = Math.max(fwdStart + 0.001, Math.min(1, params.endOffset ?? 1))
+
+      let offset, playDur
+      if (loopMode === 'pingpong') {
+        offset  = (buf.duration / 2) * fwdStart
+        playDur = undefined
+      } else if (reverse) {
+        offset  = buf.duration * (1 - fwdEnd)
+        playDur = buf.duration * (fwdEnd - fwdStart)
+      } else {
+        offset  = buf.duration * fwdStart
+        playDur = buf.duration * (fwdEnd - fwdStart)
+      }
+
+      // ── Velocity sensitivity ─────────────────────────────────────────────
+      const velSens = params.velSens  ?? 1
+      const vel     = params.velocity ?? 0.8
+      const peak    = Math.max(0, 1 - velSens + velSens * vel)
+
+      // ── Volume ADSR with curve topology (Lesson 6) ───────────────────────
+      const delay  = Math.max(0, params.envDelay   ?? 0)
+      const atk    = Math.max(0.001, params.envAttack  ?? 0.005)
+      const dec    = Math.max(0.001, params.envDecay   ?? 0.1)
+      const sus    = Math.max(0,     params.envSustain ?? 0.8)
+      const rel    = Math.max(0.001, params.envRelease ?? 0.2)
+      const atkC   = params.envAttackCurve  ?? 0      // -1=exp  0=linear  +1=log
+      const decC   = params.envDecayCurve   ?? -0.5   // default: slightly exponential
+      const relC   = params.envReleaseCurve ?? -0.5
+      const isLooping = loopMode !== 'off'
+
+      const t0 = when + delay           // attack start
+      const t1 = t0 + atk              // decay start
+      const t2 = t1 + dec              // sustain start
+
+      const ampGain = ctx.createGain()
+      ampGain.gain.setValueAtTime(0, when)
+      _applyEnvPhase(ampGain.gain, 0,         peak,      t0, atk, atkC)
+      _applyEnvPhase(ampGain.gain, peak,       peak*sus,  t1, dec, decC)
+      if (!isLooping && playDur != null) {
+        const playEnd  = t0 + playDur
+        const relStart = Math.max(t2, playEnd - rel)
+        const relDur   = Math.max(0.002, playEnd - relStart)
+        _applyEnvPhase(ampGain.gain, peak*sus, 0, relStart, relDur, relC)
+      }
+
+      // ── Filter + filter envelope ─────────────────────────────────────────
+      const filterType = params.filterType ?? 'off'
+      let filterNode = null
+      if (filterType !== 'off') {
+        filterNode = ctx.createBiquadFilter()
+        filterNode.type = filterType
+        const cutNorm    = Math.max(0, Math.min(1, params.filterCutoff ?? 1.0))
+        const baseCutoff = 20 * Math.pow(2, Math.log2(20000 / 20) * cutNorm)
+        const nyq        = ctx.sampleRate / 2 - 1
+        filterNode.frequency.value = Math.min(baseCutoff, nyq)
+        filterNode.Q.value = Math.max(0.001, (params.filterReso ?? 0) * 20 + 0.001)
+
+        const fAmt = params.fEnvAmount ?? 0
+        if (Math.abs(fAmt) > 0.001) {
+          const fAtk = Math.max(0.001, params.fEnvAttack  ?? 0.01)
+          const fDec = Math.max(0.001, params.fEnvDecay   ?? 0.2)
+          const fSus = Math.max(0,     params.fEnvSustain ?? 0)
+          const octRange = fAmt * 4
+          const peakFreq = baseCutoff * Math.pow(2, octRange)
+          const susFreq  = baseCutoff * Math.pow(2, octRange * fSus)
+          const clampF   = f => Math.max(20, Math.min(nyq, f))
+          filterNode.frequency.setValueAtTime(baseCutoff, t0)
+          filterNode.frequency.linearRampToValueAtTime(clampF(peakFreq), t0 + fAtk)
+          filterNode.frequency.linearRampToValueAtTime(clampF(susFreq),  t0 + fAtk + fDec)
+        }
+      }
+
+      // ── Source node ──────────────────────────────────────────────────────
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      src.playbackRate.value = Math.pow(2, deltaSemi / 12)
+
+      if (loopMode === 'fwd') {
+        src.loop = true
+        const lsF = Math.max(0, Math.min(1, params.loopStart ?? fwdStart))
+        const leF = Math.max(0, Math.min(1, params.loopEnd   ?? fwdEnd))
+        src.loopStart = buf.duration * lsF
+        src.loopEnd   = buf.duration * Math.max(lsF + 0.001, leF)
+      } else if (loopMode === 'pingpong') {
+        src.loop = true
+        src.loopStart = 0
+        src.loopEnd   = buf.duration
+      }
+
+      // ── Connect: src → [filter →] ampGain → dest ─────────────────────────
+      if (filterNode) {
+        src.connect(filterNode); filterNode.connect(ampGain)
+      } else {
+        src.connect(ampGain)
+      }
+      ampGain.connect(dest)
+
+      isLooping ? src.start(when, offset) : src.start(when, offset, playDur)
+    }
+  }
+
+  // Create a new Channel Rack sampler channel from a real audio file (File object).
+  async function addAudioFileChannel(file) {
+    initAudio()
+    let buf
+    try {
+      const ab = await file.arrayBuffer()
+      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+    } catch (e) {
+      console.error('[Sampler] Failed to decode audio file:', e)
+      return null
+    }
+    const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
+    const ch = makeChannel({
+      name: base.length > 14 ? base.slice(0, 14) : base,
+      color: '#ff9f43',
+      type: 'audiofile', mode: 'steps', sustains: false,
+      instrumentType: 'audiofile',
+      sampleName: file.name,
+      audioFileMissing: false,
+      params: {
+        pitch: 60, rootNote: 60, fineTune: 0, keyTrack: 1,
+        startOffset: 0, endOffset: 1,
+        envDelay: 0, envAttack: 0.005, envDecay: 0.1, envSustain: 0.8, envRelease: 0.2,
+        envAttackCurve: 0, envDecayCurve: -0.5, envReleaseCurve: -0.5,
+        filterType: 'off', filterCutoff: 1.0, filterReso: 0,
+        fEnvAmount: 0, fEnvAttack: 0.01, fEnvDecay: 0.2, fEnvSustain: 0,
+        reverse: false, loopMode: 'off', loopStart: 0, loopEnd: 1, loopXfade: 0,
+        velSens: 1, velocity: 0.8,
+      },
+      knobs: [{ key: 'pitch', label: 'NOTE', min: 0, max: 127, decimals: 0 }],
+      fn: () => {},
+    })
+    audioFileBufs.set(ch.id, buf)
+    _buildSamplerDerivedBufs(ch.id, buf)
+    ch.fn = makeAudioFileFn(ch.id)
+    // Signal reactivity update
+    audioFileVersions[ch.id] = 1
+    channels.push(ch)
+    rebuildGains()
+    selectedChannelId.value = ch.id
+    mainView.value = 'sequencer'
+    markDirty()
+    return ch
+  }
+
+  // Reload / replace the audio buffer for an existing sampler channel.
+  async function loadAudioFileForChannel(channelId, file) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch) return
+    initAudio()
+    let buf
+    try {
+      const ab = await file.arrayBuffer()
+      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+    } catch (e) {
+      console.error('[Sampler] Failed to decode audio file:', e)
+      return
+    }
+    audioFileBufs.set(channelId, buf)
+    _buildSamplerDerivedBufs(channelId, buf)
+    const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
+    ch.name = base.length > 14 ? base.slice(0, 14) : base
+    ch.sampleName = file.name
+    ch.audioFileMissing = false
+    const wasAudioFile = ch.type === 'audiofile'
+    ch.type = 'audiofile'
+    ch.sustains = false
+    ch.instrumentType = 'audiofile'
+    // Only reset params / knobs when converting FROM another instrument type.
+    if (!wasAudioFile) {
+      ch.params = {
+        pitch: 60, rootNote: 60, fineTune: 0, keyTrack: 1,
+        startOffset: 0, endOffset: 1,
+        envDelay: 0, envAttack: 0.005, envDecay: 0.1, envSustain: 0.8, envRelease: 0.2,
+        envAttackCurve: 0, envDecayCurve: -0.5, envReleaseCurve: -0.5,
+        filterType: 'off', filterCutoff: 1.0, filterReso: 0,
+        fEnvAmount: 0, fEnvAttack: 0.01, fEnvDecay: 0.2, fEnvSustain: 0,
+        reverse: false, loopMode: 'off', loopStart: 0, loopEnd: 1, loopXfade: 0,
+        velSens: 1, velocity: 0.8,
+      }
+      ch.knobs  = [{ key: 'pitch', label: 'NOTE', min: 0, max: 127, decimals: 0 }]
+    }
+    ch.fn = makeAudioFileFn(channelId)
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+    markDirty()
+  }
+
+  function getAudioFileBuf(channelId) {
+    return audioFileBufs.get(channelId) ?? null
+  }
+
+  // Normalize audio file to peak 0 dBFS — modifies in place and rebuilds derived bufs.
+  function normalizeAudioFile(channelId) {
+    const buf = audioFileBufs.get(channelId)
+    if (!buf) return
+    let maxAbs = 0
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c)
+      for (let i = 0; i < d.length; i++) {
+        const v = Math.abs(d[i])
+        if (v > maxAbs) maxAbs = v
+      }
+    }
+    if (maxAbs < 0.0001) return
+    const gain = 1 / maxAbs
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c)
+      for (let i = 0; i < d.length; i++) d[i] *= gain
+    }
+    _buildSamplerDerivedBufs(channelId, buf)
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+  }
+
+  // Build (or clear) a crossfaded loop buffer for seamless looping (Lesson 7).
+  // Call after adjusting loopStart/loopEnd or loopXfade. loopXfade=0 clears it.
+  function buildLoopXfade(channelId) {
+    const src = audioFileBufs.get(channelId)
+    const ch  = channels.find(c => c.id === channelId)
+    if (!src || !ch) return
+
+    const xfadeFrac = ch.params.loopXfade ?? 0
+    if (xfadeFrac < 0.001) {
+      xfadeLoopBufs.delete(channelId)
+      audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+      return
+    }
+
+    const lsSample = Math.floor((ch.params.loopStart ?? 0) * src.length)
+    const leSample = Math.floor((ch.params.loopEnd   ?? 1) * src.length)
+    const loopLen  = leSample - lsSample
+    if (loopLen < 16) return
+
+    // Cross-fade length: fraction of loop, capped at 45% so fades never overlap
+    const xfLen = Math.min(Math.floor(xfadeFrac * loopLen), Math.floor(loopLen * 0.45))
+    if (xfLen < 4) return
+
+    // Copy full buffer then apply equal-power crossfade at loop boundary
+    const out = audioCtx.createBuffer(src.numberOfChannels, src.length, src.sampleRate)
+    for (let c = 0; c < src.numberOfChannels; c++) {
+      const s = src.getChannelData(c)
+      const d = out.getChannelData(c)
+      d.set(s)  // full copy
+      for (let i = 0; i < xfLen; i++) {
+        const endIdx   = leSample - xfLen + i  // near loop end
+        const startIdx = lsSample + i           // near loop start
+        const t        = i / xfLen
+        d[endIdx] = s[endIdx] * Math.cos(t * Math.PI * 0.5)   // fade out
+                  + s[startIdx] * Math.sin(t * Math.PI * 0.5)  // fade in
+      }
+    }
+    xfadeLoopBufs.set(channelId, out)
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+  }
+
+  // Snap a sampler playback marker (startOffset / endOffset / loopStart / loopEnd)
+  // to the nearest zero-crossing within 50ms of its current position.
+  function snapToZero(channelId, paramName) {
+    const buf = audioFileBufs.get(channelId)
+    const ch  = channels.find(c => c.id === channelId)
+    if (!buf || !ch) return
+    const data     = buf.getChannelData(0)
+    const N        = buf.length
+    const frac     = Math.max(0, Math.min(1, ch.params[paramName] ?? 0))
+    const center   = Math.round(frac * N)
+    const maxDist  = Math.min(N, Math.round(buf.sampleRate * 0.05))  // ±50 ms window
+    for (let d = 0; d < maxDist; d++) {
+      for (const dir of [1, -1]) {
+        const idx = center + dir * d
+        if (idx < 1 || idx >= N) continue
+        if (data[idx] === 0 || (data[idx - 1] >= 0 && data[idx] < 0) || (data[idx - 1] <= 0 && data[idx] > 0)) {
+          ch.params[paramName] = idx / N
+          markDirty()
+          return
+        }
+      }
+    }
+  }
+
+  // ── Playlist Audio Clips ───────────────────────────────────────────────────────
+
+  async function addAudioClip(trackId, cell, file) {
+    initAudio()
+    let buf
+    try {
+      const ab = await file.arrayBuffer()
+      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+    } catch (e) { console.error('[AudioClip] Failed to decode:', e); return }
+
+    const secPerCell = getSecPerCell()
+    const widthCells = Math.max(1, Math.ceil(buf.duration / secPerCell))
+    const id = 'c' + (++_clipId)
+    const track = playlistTracks.find(t => t.id === trackId)
+    const color = track?.color ?? '#4ecdc4'
+
+    playlistClips.push({
+      id, trackId, cell,
+      type:       'audio',
+      width:      widthCells,
+      sampleName: file.name,
+      color,
+      volume:     1,
+      startOffset: 0,
+      endOffset:   1,
+      muted:       false,
+      audioFileMissing: false,
+    })
+    audioClipBufs.set(id, buf)
+    audioClipVersions[id] = 1
+    markDirty()
+  }
+
+  async function loadAudioClipFile(clipId, file) {
+    const clip = playlistClips.find(c => c.id === clipId)
+    if (!clip) return
+    initAudio()
+    let buf
+    try {
+      const ab = await file.arrayBuffer()
+      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+    } catch (e) { console.error('[AudioClip] Failed to decode:', e); return }
+
+    audioClipBufs.set(clipId, buf)
+    clip.sampleName = file.name
+    clip.audioFileMissing = false
+    const secPerCell = getSecPerCell()
+    clip.width = Math.max(1, Math.ceil(buf.duration / secPerCell))
+    audioClipVersions[clipId] = (audioClipVersions[clipId] ?? 0) + 1
+    markDirty()
+  }
+
+  function getAudioClipBuf(clipId) {
+    return audioClipBufs.get(clipId) ?? null
+  }
+
+  // ── CHOP slicer ────────────────────────────────────────────────────────────────
+
+  function makeEqualSlices(n) {
+    return Array.from({ length: n }, (_, i) => ({ start: i / n, end: (i + 1) / n }))
+  }
+
+  function makeChopFn(channelId) {
+    return (ctx, when, params, dest) => {
+      const buf = chopBufs.get(channelId)
+      if (!buf) return
+      const slices = params.slices
+      if (!slices?.length) return
+      const rootNote = params.rootNote ?? 60
+      const idx      = ((Math.round(params.pitch ?? rootNote) - rootNote) % slices.length + slices.length) % slices.length
+      const sl       = slices[idx]
+      const speed    = params.speed     ?? 1.0
+      const pitchOff = params.pitchOffset ?? 0
+      const gate     = params.gate      ?? 1.0
+      const startSec = buf.duration * (sl.start ?? 0)
+      const sliceLen = buf.duration * ((sl.end ?? 1) - (sl.start ?? 0))
+      const playLen  = sliceLen * gate
+      if (playLen <= 0) return
+      const src = ctx.createBufferSource()
+      src.buffer = buf
+      src.playbackRate.value = speed * Math.pow(2, pitchOff / 12)
+      const g = ctx.createGain(); g.gain.value = params.velocity ?? 0.8
+      src.connect(g); g.connect(dest)
+      src.start(when, startSec, playLen / src.playbackRate.value)
+    }
+  }
+
+  async function addChopChannel(file) {
+    const sliceCount = 16
+    const ch = reactive({
+      id: String(++_cid),
+      name: 'CHOP', color: COLORS[channels.length % COLORS.length],
+      type: 'chop', mode: 'steps', sustains: false,
+      volume: 0.8, pan: 0, mixerTrack: 0,
+      muted: false, _soloed: false, selected: false,
+      zipped: false, loopEnabled: false, loopLength: sliceCount,
+      cutSelf: false, swingMix: 1.0, groupId: null,
+      params: { pitch: 60, rootNote: 60, sliceCount, slices: makeEqualSlices(sliceCount), speed: 1.0, pitchOffset: 0, gate: 1.0, velocity: 0.8 },
+      knobs: [],
+      fn: () => {},
+      activeModules: [], effects: [],
+      instrumentType: 'chop',
+      sampleName: '',
+      audioFileMissing: false,
+    })
+    if (file) {
+      initAudio()
+      try {
+        const ab  = await file.arrayBuffer()
+        const buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+        chopBufs.set(ch.id, buf)
+        const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
+        ch.name = base.length > 12 ? base.slice(0, 12) : base
+        ch.sampleName = file.name
+        ch.audioFileMissing = false
+        chopVersions[ch.id] = 1
+      } catch (e) { console.error('[CHOP] decode failed:', e) }
+    }
+    ch.fn = makeChopFn(ch.id)
+    channels.push(ch)
+    rebuildGains()
+    // Auto-init steps: step N → slice N (so each step fires a different chop)
+    const d = getPatData(ch.id)
+    d.steps = Array.from({ length: 32 }, (_, i) => i < sliceCount)
+    d.stepPitches = Array.from({ length: 32 }, (_, i) => i)
+    selectedChannelId.value = ch.id
+    markDirty()
+  }
+
+  async function loadChopFile(channelId, file) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch) return
+    initAudio()
+    try {
+      const ab  = await file.arrayBuffer()
+      const buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      chopBufs.set(channelId, buf)
+      const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
+      ch.name = base.length > 12 ? base.slice(0, 12) : base
+      ch.sampleName = file.name
+      ch.audioFileMissing = false
+      if (!ch.params.slices?.length) ch.params.slices = makeEqualSlices(ch.params.sliceCount ?? 16)
+      ch.fn = makeChopFn(channelId)
+      chopVersions[channelId] = (chopVersions[channelId] ?? 0) + 1
+      markDirty()
+    } catch (e) { console.error('[CHOP] decode failed:', e) }
+  }
+
+  function getChopBuf(channelId) { return chopBufs.get(channelId) ?? null }
+
+  function detectChopTransients(channelId, sensitivity = 1.5) {
+    const buf = chopBufs.get(channelId)
+    const ch  = channels.find(c => c.id === channelId)
+    if (!buf || !ch) return
+    const data   = buf.getChannelData(0)
+    const N      = data.length
+    const WINDOW = 512
+    const onsets = [0]
+    let prevEnergy = 0
+    for (let i = WINDOW; i < N; i += WINDOW) {
+      let sum = 0
+      const end = Math.min(i + WINDOW, N)
+      for (let j = i; j < end; j++) sum += data[j] * data[j]
+      const energy = sum / (end - i)
+      if (energy > prevEnergy * sensitivity && energy > 0.0005) onsets.push(i / N)
+      prevEnergy = prevEnergy * 0.7 + energy * 0.3
+    }
+    if (onsets[onsets.length - 1] < 0.99) onsets.push(1)
+    const slices = []
+    for (let i = 0; i < onsets.length - 1; i++) slices.push({ start: onsets[i], end: onsets[i + 1] })
+    ch.params.slices    = slices
+    ch.params.sliceCount = slices.length
+    const d = getPatData(ch.id)
+    d.stepPitches = Array.from({ length: 32 }, (_, i) => i % slices.length)
+    markDirty()
+  }
+
+  // ── FORGE dual-deck slicer ──────────────────────────────────────────────────────
+
+  function makeForgeF(channelId) {
+    return (ctx, when, params, dest) => {
+      const slices = params.slices
+      if (!slices?.length) return
+      const rootNote = params.rootNote ?? 60
+      const idx = ((Math.round(params.pitch ?? rootNote) - rootNote) % slices.length + slices.length) % slices.length
+      const sl  = slices[idx]
+      const blend    = Math.max(0, Math.min(1, params.deckBlend ?? 0))
+      const velocity = params.velocity ?? 0.8
+
+      const playDeck = (buf, revBuf, deckGain) => {
+        if (!buf || deckGain < 0.001) return
+        const dir     = sl.dir ?? 'fwd'
+        const useRev  = dir === 'rev' && revBuf
+        const abuf    = useRev ? revBuf : buf
+        // For reversed: slice [start,end] lives at [1-end, 1-start] in the reversed buffer
+        const sliceStart = useRev ? (1 - (sl.end ?? 1)) : (sl.start ?? 0)
+        const startSec   = abuf.duration * sliceStart
+        const sliceLen   = abuf.duration * ((sl.end ?? 1) - (sl.start ?? 0))
+        if (sliceLen <= 0) return
+        const src = ctx.createBufferSource()
+        src.buffer = abuf
+        src.playbackRate.value = Math.pow(2, (sl.pitch ?? 0) / 12)
+        const playDur = sliceLen / src.playbackRate.value
+        const g    = ctx.createGain()
+        const peak = (sl.vol ?? 1) * deckGain * velocity
+        const atk  = Math.max(0, sl.attack  ?? 0)
+        const rel  = Math.max(0, sl.release ?? 0)
+        if (atk > 0.001 || rel > 0.001) {
+          g.gain.setValueAtTime(0, when)
+          const atkEnd = when + Math.min(atk, playDur * 0.5)
+          g.gain.linearRampToValueAtTime(peak, atkEnd)
+          const relStart = Math.max(atkEnd, when + playDur - Math.min(rel, playDur * 0.5))
+          if (relStart > atkEnd) g.gain.setValueAtTime(peak, relStart)
+          g.gain.linearRampToValueAtTime(0, when + playDur)
+        } else {
+          g.gain.value = peak
+        }
+        if ((sl.pan ?? 0) !== 0) {
+          const panner = ctx.createStereoPanner()
+          panner.pan.value = Math.max(-1, Math.min(1, sl.pan))
+          src.connect(g); g.connect(panner); panner.connect(dest)
+        } else {
+          src.connect(g); g.connect(dest)
+        }
+        src.start(when, startSec, playDur)
+      }
+
+      playDeck(forgeBufsA.get(channelId), forgeBufsA_rev.get(channelId), 1 - blend)
+      playDeck(forgeBufsB.get(channelId), forgeBufsB_rev.get(channelId), blend)
+    }
+  }
+
+  function _makeForgeSlices(n) {
+    return makeEqualSlices(n).map(s => ({ ...s, vol: 1, pan: 0, pitch: 0, dir: 'fwd', attack: 0, release: 0 }))
+  }
+
+  function _makeReversedBuf(buf) {
+    const rev = audioCtx.createBuffer(buf.numberOfChannels, buf.length, buf.sampleRate)
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const src = buf.getChannelData(c)
+      const dst = rev.getChannelData(c)
+      for (let i = 0; i < buf.length; i++) dst[i] = src[buf.length - 1 - i]
+    }
+    return rev
+  }
+
+  // Pre-compute reversed + ping-pong [fwd+rev] AudioBuffers for sampler channel.
+  function _buildSamplerDerivedBufs(channelId, srcBuf) {
+    const nch = srcBuf.numberOfChannels
+    const len = srcBuf.length
+
+    const rev = audioCtx.createBuffer(nch, len, srcBuf.sampleRate)
+    for (let c = 0; c < nch; c++) {
+      const s = srcBuf.getChannelData(c)
+      const d = rev.getChannelData(c)
+      for (let i = 0; i < len; i++) d[i] = s[len - 1 - i]
+    }
+    reversedAudioFileBufs.set(channelId, rev)
+
+    const pp = audioCtx.createBuffer(nch, len * 2, srcBuf.sampleRate)
+    for (let c = 0; c < nch; c++) {
+      const s = srcBuf.getChannelData(c)
+      const d = pp.getChannelData(c)
+      for (let i = 0; i < len; i++) {
+        d[i]       = s[i]
+        d[len + i] = s[len - 1 - i]
+      }
+    }
+    pingpongAudioFileBufs.set(channelId, pp)
+  }
+
+  // Generate a curve array for ADSR stage shaping (tension: -1=exponential, 0=linear, +1=logarithmic)
+  function _envCurve(from, to, tension, N = 128) {
+    const arr = new Float32Array(N)
+    for (let i = 0; i < N; i++) {
+      const t = i / (N - 1)
+      const exp = tension < 0
+        ? 1 + Math.abs(tension) * 4   // concave: fast initial change, slow tail
+        : 1 / (1 + tension * 4)        // convex: slow initial change, fast end
+      arr[i] = from + (to - from) * Math.pow(Math.max(0, Math.min(1, t)), exp)
+    }
+    return arr
+  }
+
+  // Schedule one ADSR phase with optional curve shaping.
+  function _applyEnvPhase(param, from, to, startT, dur, tension) {
+    if (dur < 0.0002) return
+    param.setValueAtTime(from, startT)
+    if (Math.abs(tension) < 0.02) {
+      param.linearRampToValueAtTime(to, startT + dur)
+    } else {
+      // Tiny offset so setValueAtTime anchor doesn't conflict with curve start
+      param.setValueCurveAtTime(_envCurve(from, to, tension), startT + 0.0001, dur - 0.0001)
+    }
+  }
+
+  function addForgeChannel() {
+    const sliceCount = 16
+    const ch = reactive({
+      id: String(++_cid),
+      name: 'FORGE', color: COLORS[(channels.length + 3) % COLORS.length],
+      type: 'forge', mode: 'piano', sustains: false,
+      volume: 0.8, pan: 0, mixerTrack: 0,
+      muted: false, _soloed: false, selected: false,
+      zipped: false, loopEnabled: false, loopLength: 16,
+      cutSelf: false, swingMix: 1.0, groupId: null,
+      params: { pitch: 60, rootNote: 60, sliceCount, slices: _makeForgeSlices(sliceCount), deckBlend: 0, deckAName: '', deckBName: '', velocity: 0.8 },
+      knobs: [],
+      fn: () => {},
+      activeModules: [], effects: [],
+      instrumentType: 'forge',
+      deckAMissing: false, deckBMissing: false,
+    })
+    ch.fn = makeForgeF(ch.id)
+    channels.push(ch)
+    rebuildGains()
+    selectedChannelId.value = ch.id
+    markDirty()
+  }
+
+  async function loadForgeDeck(channelId, deck, file) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch) return
+    initAudio()
+    try {
+      const ab  = await file.arrayBuffer()
+      const buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      const rev = _makeReversedBuf(buf)
+      if (deck === 'A') {
+        forgeBufsA.set(channelId, buf); forgeBufsA_rev.set(channelId, rev)
+        ch.params.deckAName = file.name
+        ch.deckAMissing = false
+        forgeVersions[channelId + '_A'] = (forgeVersions[channelId + '_A'] ?? 0) + 1
+      } else {
+        forgeBufsB.set(channelId, buf); forgeBufsB_rev.set(channelId, rev)
+        ch.params.deckBName = file.name
+        ch.deckBMissing = false
+        forgeVersions[channelId + '_B'] = (forgeVersions[channelId + '_B'] ?? 0) + 1
+      }
+      if (!ch.params.slices?.length) ch.params.slices = _makeForgeSlices(ch.params.sliceCount ?? 16)
+      ch.fn = makeForgeF(channelId)
+      markDirty()
+    } catch (e) { console.error('[FORGE] decode failed:', e) }
+  }
+
+  function getForgeBuf(channelId, deck) {
+    return (deck === 'A' ? forgeBufsA : forgeBufsB).get(channelId) ?? null
+  }
+
+  function cloneAudioClip(clipId) {
+    const src = playlistClips.find(c => c.id === clipId)
+    if (!src || src.type !== 'audio') return
+    const buf = audioClipBufs.get(clipId)
+    const newId = 'c' + (++_clipId)
+    playlistClips.push({ ...src, id: newId, cell: src.cell + (src.width || 1) })
+    if (buf) {
+      audioClipBufs.set(newId, buf)
+      audioClipVersions[newId] = 1
+    }
+    markDirty()
+  }
+
   // Create a new Channel Rack channel from a dropped browser asset.
   function addSampleChannel(asset) {
     initAudio()
@@ -2276,6 +2978,9 @@ export function useStudio() {
   const TICK_MS    = 25
   let schedulerTimer = null
   let nextNoteTime   = 0
+  // Audio-clip scheduling: track which clips have been queued for the current play session.
+  const _scheduledAudioClipIds = new Set()
+  let   _activeAudioClipNodes  = []
   let schedStep      = 0
   let schedCell      = 0
   const noteQueue    = []
@@ -2334,7 +3039,8 @@ export function useStudio() {
             ? ch.loopLength : null
           const s = loopLen !== null ? step % loopLen : step
           if (d.steps[s]) {
-            const vel = d.stepVelocities?.[s] ?? 0.8
+            const vel      = d.stepVelocities?.[s] ?? 0.8
+            const pitchOff = d.stepPitches?.[s]    ?? 0
             // Cut-self: a 2 ms fade-out/in de-clicks the choke.
             if (cutGains[ci]) {
               const cg = cutGains[ci].gain
@@ -2343,7 +3049,7 @@ export function useStudio() {
               cg.linearRampToValueAtTime(0.0001, when + 0.002)
               cg.linearRampToValueAtTime(1.0,    when + 0.004)
             }
-            ch.fn(audioCtx, when, { ...ch.params, velocity: vel }, cutDest)
+            ch.fn(audioCtx, when, { ...ch.params, pitch: (ch.params.pitch ?? 60) + pitchOff, velocity: vel }, cutDest)
             registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
           }
         } else {
@@ -2458,12 +3164,66 @@ export function useStudio() {
       schedStep++
       if (schedStep % effectiveSteps === 0 && usePlaylist.value) schedCell++
     }
+    scheduleAudioClips()
     // Audio processing load = compute time of this block / its time-window deadline.
     const elapsed = performance.now() - t0
     const load = (elapsed / TICK_MS) * 100
     if (load >= 100) audioUnderruns.value++          // compute overran its slice
     _loadSmooth = _loadSmooth * 0.8 + load * 0.2
     audioLoad.value = Math.min(100, Math.round(_loadSmooth))
+  }
+
+  function _stopActiveAudioClipNodes() {
+    const now = audioCtx?.currentTime ?? 0
+    _activeAudioClipNodes.forEach(({ src }) => {
+      try { src.stop(now) } catch (_) {}
+      try { src.disconnect() } catch (_) {}
+    })
+    _activeAudioClipNodes = []
+    _scheduledAudioClipIds.clear()
+  }
+
+  function scheduleAudioClips() {
+    if (!usePlaylist.value || !audioCtx) return
+    const now        = audioCtx.currentTime
+    const horizon    = now + LOOK_AHEAD + 0.5   // wider window; clips scheduled once
+    const secPerCell = getSecPerCell()
+
+    for (const clip of playlistClips) {
+      if (clip.type !== 'audio' || clip.muted) continue
+      if (_scheduledAudioClipIds.has(clip.id)) continue
+
+      const buf = audioClipBufs.get(clip.id)
+      if (!buf) continue
+
+      const clipStart  = playbackStartAudioTime + (clip.cell - playbackStartCell.value) * secPerCell
+      const startFrac  = clip.startOffset ?? 0
+      const endFrac    = clip.endOffset   ?? 1
+      const sampLen    = buf.duration * (endFrac - startFrac)
+      const clipEnd    = clipStart + sampLen
+
+      if (clipEnd   < now     ) { _scheduledAudioClipIds.add(clip.id); continue }
+      if (clipStart > horizon  ) continue
+
+      _scheduledAudioClipIds.add(clip.id)
+
+      // When seeking into the middle of a clip, offset the sample playback.
+      const seekOffset   = Math.max(0, now - clipStart)
+      const sampleOffset = buf.duration * startFrac + seekOffset
+      const remaining    = sampLen - seekOffset
+      if (remaining <= 0) continue
+
+      const when = Math.max(now + 0.005, clipStart)
+
+      const src = audioCtx.createBufferSource()
+      src.buffer = buf
+      const g = audioCtx.createGain()
+      g.gain.value = clip.volume ?? 1
+      src.connect(g)
+      g.connect(masterGain)
+      src.start(when, sampleOffset, remaining)
+      _activeAudioClipNodes.push({ src, g })
+    }
   }
 
   function getSecPerCell() {
@@ -2508,6 +3268,7 @@ export function useStudio() {
     playbackStartAudioTime    = audioCtx.currentTime
     playbackStartCellSeconds  = cell * getSecPerCell()
     _lastBeat = -1
+    _stopActiveAudioClipNodes()
     schedulerTimer = setInterval(tick, TICK_MS)
   }
 
@@ -2565,6 +3326,7 @@ export function useStudio() {
     nextNoteTime = audioCtx.currentTime + 0.05
     playbackStartAudioTime   = audioCtx.currentTime
     playbackStartCellSeconds = startCell * getSecPerCell()
+    _scheduledAudioClipIds.clear(); _activeAudioClipNodes = []
     noteQueue.length = 0; displayStep.value = -1; displayCell.value = startCell
     _lastBeat = -1
     // Overwrite mode: clear existing piano notes before recording starts (blend = false).
@@ -2598,6 +3360,7 @@ export function useStudio() {
     noteQueue.length = 0; displayStep.value = -1
     countInStepsLeft = 0; countInBarsLeft.value = 0
     _playNotes = null   // rebuilt on next play so edits are picked up
+    _stopActiveAudioClipNodes()
     // Playhead stays at current position (pause)
   }
 
@@ -2607,6 +3370,7 @@ export function useStudio() {
     transportState.value = 'stopped'
     clearInterval(schedulerTimer); schedulerTimer = null
     noteQueue.length = 0; displayStep.value = -1
+    _stopActiveAudioClipNodes()
     if (rememberSeekTime.value) {
       // Keep playhead at the stopped position so next Play resumes from here.
       playbackStartCell.value = displayCell.value
@@ -3379,16 +4143,29 @@ export function useStudio() {
   //   keeping its id, pattern data, volume/pan/mixer routing, loop + FX settings.
   //   `spec` is the same payload used by addInstrumentChannel:
   //     { t:'synth' } | { t:'fm', key } | { t:'gm', program } | { t:'custom' }
-  //     | { t:'subterra' } | { t:'wasm' } | { t:'sample', asset }
+  //     | { t:'subterra' } | { t:'wasm' } | { t:'sample', asset } | { t:'audiofile', file }
   function configureChannelInstrument(ch, spec) {
     // Tear down any worklet node previously bound to this channel id.
     for (const map of [customSynthNodes, subterraNodes, wasmNodes]) {
       if (map.has(ch.id)) { try { map.get(ch.id).disconnect() } catch (_) {} ; map.delete(ch.id) }
     }
+    // Release any cached audio buffers from previous instrument types.
+    if (audioFileBufs.has(ch.id)) {
+      audioFileBufs.delete(ch.id)
+      reversedAudioFileBufs.delete(ch.id)
+      pingpongAudioFileBufs.delete(ch.id)
+      xfadeLoopBufs.delete(ch.id)
+      audioFileVersions[ch.id] = (audioFileVersions[ch.id] ?? 0) + 1
+    }
+    chopBufs.delete(ch.id);   delete chopVersions[ch.id]
+    forgeBufsA.delete(ch.id); forgeBufsB.delete(ch.id)
+    forgeBufsA_rev.delete(ch.id); forgeBufsB_rev.delete(ch.id)
+    delete forgeVersions[ch.id + '_A']; delete forgeVersions[ch.id + '_B']
     ch.activeModules = []
     ch.instrumentType = ''
     ch.sampleSpec = undefined
     ch.sampleName = undefined
+    ch.audioFileMissing = undefined
     ch.wasmStatus = undefined
     ch.wasmName   = undefined
     ch.wasmError  = undefined
@@ -3439,6 +4216,41 @@ export function useStudio() {
         ch.params = { pitch: 60, velocity: 0.8 }
         ch.knobs = [{ key: 'pitch', label: 'PITCH', min: 24, max: 96, decimals: 0 }]
         ch.fn = makeSampleFn(asset.spec)
+        break
+      }
+      case 'chop': {
+        ch.type = 'chop'; ch.mode = 'steps'; ch.sustains = false
+        ch.name = 'CHOP'; ch.instrumentType = 'chop'
+        const sc = 16
+        ch.params = { pitch: 60, rootNote: 60, sliceCount: sc, slices: makeEqualSlices(sc), speed: 1.0, pitchOffset: 0, gate: 1.0, velocity: 0.8 }
+        ch.knobs = []; ch.sampleName = ''; ch.audioFileMissing = false
+        ch.fn = makeChopFn(ch.id)
+        if (spec.file) loadChopFile(ch.id, spec.file)
+        break
+      }
+      case 'forge': {
+        ch.type = 'forge'; ch.mode = 'piano'; ch.sustains = false
+        ch.name = 'FORGE'; ch.instrumentType = 'forge'
+        const sc2 = 16
+        ch.params = { pitch: 60, rootNote: 60, sliceCount: sc2, slices: _makeForgeSlices(sc2), deckBlend: 0, deckAName: '', deckBName: '', velocity: 0.8 }
+        ch.knobs = []; ch.deckAMissing = false; ch.deckBMissing = false
+        ch.fn = makeForgeF(ch.id)
+        break
+      }
+      case 'audiofile': {
+        const file = spec.file; if (!file) return
+        const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
+        ch.type = 'audiofile'; ch.sustains = false
+        ch.name = base.length > 14 ? base.slice(0, 14) : base
+        ch.color = '#ff9f43'
+        ch.instrumentType = 'audiofile'
+        ch.sampleName = file.name
+        ch.audioFileMissing = false
+        ch.params = { pitch: 60, rootNote: 60, startOffset: 0, endOffset: 1, useLoop: false, loopStart: 0, loopEnd: 1, velocity: 0.8 }
+        ch.knobs = [{ key: 'pitch', label: 'NOTE', min: 0, max: 127, decimals: 0 }]
+        ch.fn = () => {}
+        // Async decode — fn is replaced once the buffer is ready.
+        loadAudioFileForChannel(ch.id, file)
         break
       }
       case 'custom': {
@@ -3494,13 +4306,16 @@ export function useStudio() {
   // naming/numbering stays consistent.
   function addInstrumentChannel(spec) {
     switch (spec.t) {
-      case 'synth':    addChannel(); break
-      case 'fm':       addFMChannel(spec.key); break
-      case 'gm':       addGMChannel(spec.program); break
-      case 'custom':   addCustomSynthChannel(); break
-      case 'subterra': addSubterraChannel(); break
-      case 'wasm':     addWasmChannel(); break
-      case 'sample':   if (spec.asset) addSampleChannel(spec.asset); break
+      case 'synth':     addChannel(); break
+      case 'fm':        addFMChannel(spec.key); break
+      case 'gm':        addGMChannel(spec.program); break
+      case 'custom':    addCustomSynthChannel(); break
+      case 'subterra':  addSubterraChannel(); break
+      case 'wasm':      addWasmChannel(); break
+      case 'sample':    if (spec.asset) addSampleChannel(spec.asset); break
+      case 'audiofile': if (spec.file)  addAudioFileChannel(spec.file); break
+      case 'chop':      addChopChannel(); break
+      case 'forge':     addForgeChannel(); break
     }
   }
 
@@ -3586,6 +4401,14 @@ export function useStudio() {
       try { wasmNodes.get(id).disconnect() } catch (_) {}
       wasmNodes.delete(id)
     }
+    // Release audio file / slicer buffers
+    audioFileBufs.delete(id); reversedAudioFileBufs.delete(id)
+    pingpongAudioFileBufs.delete(id); xfadeLoopBufs.delete(id)
+    delete audioFileVersions[id]
+    chopBufs.delete(id);      delete chopVersions[id]
+    forgeBufsA.delete(id);    forgeBufsB.delete(id)
+    forgeBufsA_rev.delete(id); forgeBufsB_rev.delete(id)
+    delete forgeVersions[id + '_A']; delete forgeVersions[id + '_B']
     channels.splice(idx, 1)
     if (audioCtx) rebuildGains()
     if (selectedChannelId.value === id) selectedChannelId.value = channels[0].id
@@ -3717,6 +4540,39 @@ export function useStudio() {
       fn:      src.fn,
       groupId: src.groupId,
     })
+    // For audiofile channels, share the AudioBuffer reference and wire a new play fn.
+    if (src.type === 'audiofile') {
+      ch.sampleName = src.sampleName
+      ch.audioFileMissing = src.audioFileMissing ?? false
+      const srcBuf = audioFileBufs.get(src.id)
+      if (srcBuf) {
+        audioFileBufs.set(ch.id, srcBuf)
+        audioFileVersions[ch.id] = 1
+        const revBuf = reversedAudioFileBufs.get(src.id)
+        const ppBuf  = pingpongAudioFileBufs.get(src.id)
+        const xfBuf  = xfadeLoopBufs.get(src.id)
+        if (revBuf) reversedAudioFileBufs.set(ch.id, revBuf)
+        if (ppBuf)  pingpongAudioFileBufs.set(ch.id, ppBuf)
+        if (xfBuf)  xfadeLoopBufs.set(ch.id, xfBuf)
+      }
+      ch.fn = makeAudioFileFn(ch.id)
+    }
+    if (src.type === 'chop') {
+      ch.sampleName = src.sampleName; ch.audioFileMissing = src.audioFileMissing ?? false
+      const b = chopBufs.get(src.id)
+      if (b) { chopBufs.set(ch.id, b); chopVersions[ch.id] = 1 }
+      ch.fn = makeChopFn(ch.id)
+    }
+    if (src.type === 'forge') {
+      ch.deckAMissing = src.deckAMissing ?? false; ch.deckBMissing = src.deckBMissing ?? false
+      const bA = forgeBufsA.get(src.id); const bB = forgeBufsB.get(src.id)
+      if (bA) { forgeBufsA.set(ch.id, bA); forgeVersions[ch.id + '_A'] = 1 }
+      if (bB) { forgeBufsB.set(ch.id, bB); forgeVersions[ch.id + '_B'] = 1 }
+      const revA = forgeBufsA_rev.get(src.id); const revB = forgeBufsB_rev.get(src.id)
+      if (revA) forgeBufsA_rev.set(ch.id, revA)
+      if (revB) forgeBufsB_rev.set(ch.id, revB)
+      ch.fn = makeForgeF(ch.id)
+    }
     const idx = channels.indexOf(src)
     channels.splice(idx + 1, 0, ch)
     if (audioCtx) rebuildGains()
@@ -3930,6 +4786,16 @@ export function useStudio() {
     swing.value      = p.swing      ?? 0
     if (p.snapScale) Object.assign(snapScale, p.snapScale)
 
+    // Release all audio file / clip / slicer buffers from the previous project.
+    audioFileBufs.clear(); reversedAudioFileBufs.clear()
+    pingpongAudioFileBufs.clear(); xfadeLoopBufs.clear()
+    Object.keys(audioFileVersions).forEach(k => delete audioFileVersions[k])
+    audioClipBufs.clear(); Object.keys(audioClipVersions).forEach(k => delete audioClipVersions[k])
+    chopBufs.clear();      Object.keys(chopVersions).forEach(k => delete chopVersions[k])
+    forgeBufsA.clear();    forgeBufsB.clear()
+    forgeBufsA_rev.clear(); forgeBufsB_rev.clear()
+    Object.keys(forgeVersions).forEach(k => delete forgeVersions[k])
+
     // Channels
     channels.splice(0, channels.length, ...(p.channels ?? []).map(ch => reactive({
       id:          ch.id,
@@ -3962,12 +4828,18 @@ export function useStudio() {
                         ? makeGMPlayFn(ch.params.gmProgram)
                         : ch.type === 'sample' && ch.sampleSpec
                           ? makeSampleFn(ch.sampleSpec)
-                          : (FN_FROM_KEY[ch.fnKey] ?? playMelodicNote),
-      activeModules:  [...(ch.activeModules ?? [])],
-      effects:        (ch.effects ?? []).map(e => ({ ...e })),
-      instrumentType: ch.instrumentType ?? '',
-      sampleSpec:     ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
-      sampleName:     ch.sampleName,
+                          : (ch.type === 'audiofile' || ch.type === 'chop' || ch.type === 'forge')
+                            ? () => {}  // buffers not serialized; user must reload
+                            : (FN_FROM_KEY[ch.fnKey] ?? playMelodicNote),
+      activeModules:    [...(ch.activeModules ?? [])],
+      effects:          (ch.effects ?? []).map(e => ({ ...e })),
+      instrumentType:   ch.instrumentType ?? '',
+      sampleSpec:       ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
+      sampleName:       ch.sampleName,
+      // Buffers are not serializable; mark missing so the UI can prompt reload.
+      audioFileMissing: (ch.type === 'audiofile' || ch.type === 'chop') ? true : undefined,
+      deckAMissing: ch.type === 'forge' && ch.params?.deckAName ? true : undefined,
+      deckBMissing: ch.type === 'forge' && ch.params?.deckBName ? true : undefined,
     })))
 
     // Channel groups
@@ -4015,7 +4887,11 @@ export function useStudio() {
 
     // Playlist
     playlistTracks.splice(0, playlistTracks.length, ...(p.playlistTracks ?? []).map(t => ({ ...t, _soloed: false })))
-    playlistClips.splice(0, playlistClips.length, ...(p.playlistClips ?? []).map(c => ({ ...c })))
+    playlistClips.splice(0, playlistClips.length, ...(p.playlistClips ?? []).map(c => ({
+      ...c,
+      // AudioBuffer is not serializable — mark audio clips missing so Playlist prompts reload.
+      audioFileMissing: c.type === 'audio' ? true : c.audioFileMissing,
+    })))
     timeMarkers.splice(0, timeMarkers.length, ...(p.timeMarkers ?? []).map(m => ({ ...m })))
     automationClips.splice(0, automationClips.length, ...(p.automationClips ?? []).map(a => ({
       ...a, nodes: (a.nodes ?? []).map(n => ({ ...n })),
@@ -4135,6 +5011,15 @@ export function useStudio() {
     projectName, projectDirty, extendedHudOpen,
     // Browser preview + docking + sample drop
     browserWidth, previewingId, previewAsset, stopPreview, addSampleChannel,
+    // Audio file sampler (Channel Rack)
+    addAudioFileChannel, loadAudioFileForChannel, getAudioFileBuf, audioFileVersions,
+    normalizeAudioFile, buildLoopXfade, snapToZero,
+    // Audio clips (Playlist timeline)
+    addAudioClip, loadAudioClipFile, getAudioClipBuf, cloneAudioClip, audioClipVersions,
+    // CHOP quick slicer
+    addChopChannel, loadChopFile, getChopBuf, chopVersions, detectChopTransients,
+    // FORGE deep slicer
+    addForgeChannel, loadForgeDeck, getForgeBuf, forgeVersions,
     // Window manager
     browserOpen, activeArrangement, detachedWindows,
     windowState, activateWindow, toggleDetach, redockWindow, focusWindow, applyArrangement,

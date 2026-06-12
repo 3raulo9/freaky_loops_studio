@@ -90,6 +90,20 @@
           </div>
         </div>
 
+        <!-- Sampler Channel → shown in full-width bottom panel, not here -->
+
+        <!-- CHOP slicer panel -->
+        <ChopChannel
+          v-if="selectedChannel.type === 'chop'"
+          :channel="selectedChannel"
+        />
+
+        <!-- FORGE deep slicer panel -->
+        <ForgeChannel
+          v-if="selectedChannel.type === 'forge'"
+          :channel="selectedChannel"
+        />
+
         <!-- Core knobs -->
         <div class="props-knobs">
           <Knob
@@ -232,6 +246,18 @@
     </div>
     </Transition>
 
+    <!-- ── Bottom: Sampler panel (audiofile type) ──────────────────────── -->
+    <Transition name="slideup">
+    <div
+      v-if="selectedChannel.type === 'audiofile' && mainView === 'sequencer' && !pianoRollOpen"
+      class="custom-synth-panel"
+      :style="{ height: customSynthHeight + 'px' }"
+    >
+      <div class="pr-resize-handle" @mousedown="startCustomSynthResize" title="Drag to resize" />
+      <SamplerChannel :channel="selectedChannel" />
+    </div>
+    </Transition>
+
     <!-- ── Bottom: Piano Roll panel ──────────────────────────────────── -->
     <Transition name="slideup">
     <div
@@ -306,12 +332,15 @@ import Knob        from './Knob.vue'
 import RenderModal    from './RenderModal.vue'
 import ThemeModal     from './ThemeModal.vue'
 import MidiPortRouter from './MidiPortRouter.vue'
-import CustomSynth from './CustomSynth.vue'
-import Subterra    from './Subterra.vue'
-import FloatWindow from './FloatWindow.vue'
-import BrowserPanel from './BrowserPanel.vue'
-import ExtendedHud from './ExtendedHud.vue'
-import FXRack      from './FXRack.vue'
+import CustomSynth     from './CustomSynth.vue'
+import Subterra        from './Subterra.vue'
+import FloatWindow     from './FloatWindow.vue'
+import BrowserPanel    from './BrowserPanel.vue'
+import ExtendedHud     from './ExtendedHud.vue'
+import FXRack          from './FXRack.vue'
+import SamplerChannel  from './SamplerChannel.vue'
+import ChopChannel    from './ChopChannel.vue'
+import ForgeChannel   from './ForgeChannel.vue'
 
 const {
   mainView, selectedChannel, kbOctave, pianoRollOpen, renderModalOpen, themeModalOpen, midiRouterOpen,
