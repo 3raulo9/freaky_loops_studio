@@ -4,6 +4,11 @@
   padding: 0;
 }
 
+html, body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 :root {
   /* ── Backgrounds (dark → light) ───────────────────────── */
   --bg-deeper:  #080810;   /* rulers, canvas, deepest pits  */
