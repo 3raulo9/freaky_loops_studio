@@ -11,7 +11,7 @@
   >
     <!-- Drop overlays -->
     <div v-if="midiDropActive" class="rack-drop-hint rack-drop-hint--midi">
-      ♩ Drop MIDI file — imports as editable tracks
+      ♩ Drop MIDI or audio file (.wav .mp3 .ogg .flac) — audio files create sampler channels
     </div>
     <div v-else-if="dropActive" class="rack-drop-hint">＋ Drop to add a channel · drop on a channel to replace it</div>
 
@@ -80,6 +80,12 @@
       </div>
       <div class="op-item" @click="addWasmChannel(); closeAllMenus()">
         <span class="op-dot" style="background:#7b2fff"/>⬡ WASM Plugin
+      </div>
+      <div class="op-item" @click="addChopChannel(); closeAllMenus()">
+        <span class="op-dot" style="background:#e67e22"/>⚡ CHOP Slicer
+      </div>
+      <div class="op-item" @click="addForgeChannel(); closeAllMenus()">
+        <span class="op-dot" style="background:#9b59b6"/>◭ FORGE Slicer
       </div>
 
       <div class="op-sep"/>
@@ -265,6 +271,15 @@
             <div class="synth-pick-item"
               @mousedown="startPickDrag({ t: 'wasm' }, 'WASM Plugin', '#7b2fff', $event)">
               <span class="synth-pick-dot" style="background:#7b2fff"/>⬡ WASM Plugin
+            </div>
+            <div class="synth-pick-section">SLICERS</div>
+            <div class="synth-pick-item"
+              @mousedown="startPickDrag({ t: 'chop' }, 'CHOP Slicer', '#e67e22', $event)">
+              <span class="synth-pick-dot" style="background:#e67e22"/>⚡ CHOP Slicer
+            </div>
+            <div class="synth-pick-item"
+              @mousedown="startPickDrag({ t: 'forge' }, 'FORGE Slicer', '#9b59b6', $event)">
+              <span class="synth-pick-dot" style="background:#9b59b6"/>◭ FORGE Slicer
             </div>
             <div class="synth-pick-section synth-pick-section--midi">MIDI IMPORT</div>
             <div class="synth-pick-item synth-pick-item--midi"
@@ -748,6 +763,8 @@ const {
   getPatternLengthTicks,
   importMidiFile,
   replaceChannelInstrument, addInstrumentChannel,
+  addAudioFileChannel, loadAudioFileForChannel,
+  addChopChannel, addForgeChannel,
   instrumentDrag, startInstrumentDrag,
   pushUndo,
 } = useStudio()
@@ -807,6 +824,10 @@ function _hasInstrument(e) { return [...(e.dataTransfer?.types ?? [])].includes(
 function _hasAsset(e)      { return [...(e.dataTransfer?.types ?? [])].includes('application/x-fls-asset') }
 function _hasFiles(e)      { return [...(e.dataTransfer?.types ?? [])].includes('Files') }
 function _hasDropPayload(e) { return _hasInstrument(e) || _hasAsset(e) }
+const AUDIO_EXT = /\.(wav|mp3|ogg|flac|aiff?)$/i
+function _audioFileFrom(e) {
+  return [...(e.dataTransfer?.files ?? [])].find(f => AUDIO_EXT.test(f.name)) ?? null
+}
 
 // Resolve the dropped drag payload into an instrument spec (available on drop).
 function _readInstrumentSpec(e) {
@@ -862,6 +883,13 @@ async function onRackDrop(e) {
     return
   }
 
+  // Audio file drop → create a new sampler channel
+  const audioFile = _audioFileFrom(e)
+  if (audioFile) {
+    await addAudioFileChannel(audioFile)
+    return
+  }
+
   // Instrument from the +SYNTH picker, or a browser sample → add a new channel.
   const spec = _readInstrumentSpec(e)
   if (spec) addInstrumentChannel(spec)
@@ -869,7 +897,7 @@ async function onRackDrop(e) {
 
 // ── Channel-row drop target (replace this channel's instrument) ───────────────
 function onRowDragOver(e, ch) {
-  if (!_hasDropPayload(e)) return            // let MIDI files bubble up to the rack
+  if (!_hasDropPayload(e) && !_hasFiles(e)) return   // let unrelated events bubble
   e.preventDefault()
   e.stopPropagation()
   e.dataTransfer.dropEffect = 'copy'
@@ -878,13 +906,23 @@ function onRowDragOver(e, ch) {
 function onRowDragLeave(e, ch) {
   if (dragOverChannelId.value === ch.id) dragOverChannelId.value = null
 }
-function onRowDrop(e, ch) {
-  if (!_hasDropPayload(e)) return            // not an instrument/sample → let it bubble
-  e.preventDefault()
-  e.stopPropagation()
+async function onRowDrop(e, ch) {
   dragOverChannelId.value = null
   dropActive.value = false
   _dragDepth = 0
+
+  // Audio file dropped onto a channel row → load into this channel as a sampler
+  const audioFile = _audioFileFrom(e)
+  if (audioFile) {
+    e.preventDefault()
+    e.stopPropagation()
+    await loadAudioFileForChannel(ch.id, audioFile)
+    return
+  }
+
+  if (!_hasDropPayload(e)) return            // not an instrument/sample → let it bubble
+  e.preventDefault()
+  e.stopPropagation()
   const spec = _readInstrumentSpec(e)
   if (spec) replaceChannelInstrument(ch.id, spec)
 }

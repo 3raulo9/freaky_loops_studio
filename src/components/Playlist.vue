@@ -280,6 +280,7 @@
             <!-- Clip cells area -->
             <div
               class="pl-track-cells"
+              :class="{ 'audio-drop-active': audioDragOverTrackId === track.id }"
               :data-tool="playlistTool"
               :style="{ width: PLAYLIST_CELLS * cellWidth + 'px' }"
               @mousedown.prevent="onCellsMouseDown($event, track)"
@@ -287,6 +288,9 @@
               @mouseup="onCellsMouseUp"
               @mouseleave="hoverGhost = null"
               @contextmenu.prevent="onCellsRightClick($event, track)"
+              @dragover.prevent="onTrackCellsDragOver($event, track)"
+              @dragleave="onTrackCellsDragLeave(track)"
+              @drop.prevent="onTrackCellsDrop($event, track)"
             >
               <!-- Grid lines -->
               <div class="grid-lines">
@@ -337,12 +341,14 @@
                       class="clip-titlebar-name"
                       :class="{ 'name-muted': clip.muted }"
                     >{{ clipLabel(clip) }}</span>
-                    <!-- Step 11: source-offset badge ("⊳N" shows which bar content starts from) -->
-                    <span v-if="(clip.slipOffset ?? 0) > 0"
+                    <!-- Step 11: source-offset badge (pattern clips only) -->
+                    <span v-if="!isAudioClip(clip) && (clip.slipOffset ?? 0) > 0"
                       class="clip-offset-badge"
                       :title="'Content starts at bar ' + (Math.floor((clip.slipOffset ?? 0) / totalSteps) + 1)">
                       ⊳{{ Math.floor((clip.slipOffset ?? 0) / totalSteps) + 1 }}
                     </span>
+                    <!-- Audio clip waveform type badge -->
+                    <span v-if="isAudioClip(clip)" class="clip-audio-badge">♪</span>
                     <!-- Step 6: progress fill sweeps across titlebar as playhead passes through -->
                     <div v-if="isPlaying && clipLocalHeadX(clip) >= 0"
                       class="clip-title-progress"
@@ -372,9 +378,9 @@
                     class="clip-resize-handle"
                     @mousedown.stop="onResizeStart($event, clip)" />
 
-                  <!-- Step 9: right-edge truncation indicator — dot pattern signals hidden content -->
+                  <!-- Step 9: right-edge truncation indicator (pattern clips only) -->
                   <div
-                    v-if="(clip.slipOffset ?? 0) + (clip.width || 1) * totalSteps < patternWidthCells(clip.patternId) * totalSteps"
+                    v-if="!isAudioClip(clip) && (clip.slipOffset ?? 0) + (clip.width || 1) * totalSteps < patternWidthCells(clip.patternId) * totalSteps"
                     class="clip-truncated-edge" />
                 </div>
               </template>
@@ -501,22 +507,33 @@
       :style="{ top: clipMenu.y + 'px', left: clipMenu.x + 'px' }"
       @click.stop
     >
-      <div class="ctx-item" @click="ctxEditPattern">Edit pattern</div>
-      <div class="ctx-item" @click="ctxPreviewClip">Preview</div>
-      <div class="ctx-sep" />
-      <!-- Select source pattern submenu trigger -->
-      <div class="ctx-item ctx-has-sub" @mouseenter="sourceSubOpen = true" @mouseleave="sourceSubOpen = false">
-        Select source pattern ▸
-        <div v-if="sourceSubOpen" class="ctx-submenu">
-          <div v-for="pat in patterns" :key="pat.id"
-            class="ctx-item"
-            :class="{ 'ctx-checked': clipMenu?.clip?.patternId === pat.id }"
-            @click.stop="ctxSetSourcePattern(pat.id)">
-            <span class="ctx-dot" :style="{ background: pat.color }" />{{ pat.name }}
+      <!-- Pattern-clip items -->
+      <template v-if="!isAudioClip(clipMenu.clip)">
+        <div class="ctx-item" @click="ctxEditPattern">Edit pattern</div>
+        <div class="ctx-item" @click="ctxPreviewClip">Preview</div>
+        <div class="ctx-sep" />
+        <div class="ctx-item ctx-has-sub" @mouseenter="sourceSubOpen = true" @mouseleave="sourceSubOpen = false">
+          Select source pattern ▸
+          <div v-if="sourceSubOpen" class="ctx-submenu">
+            <div v-for="pat in patterns" :key="pat.id"
+              class="ctx-item"
+              :class="{ 'ctx-checked': clipMenu?.clip?.patternId === pat.id }"
+              @click.stop="ctxSetSourcePattern(pat.id)">
+              <span class="ctx-dot" :style="{ background: pat.color }" />{{ pat.name }}
+            </div>
           </div>
         </div>
-      </div>
-      <div class="ctx-sep" />
+        <div class="ctx-sep" />
+      </template>
+      <!-- Audio-clip items -->
+      <template v-if="isAudioClip(clipMenu.clip)">
+        <div class="ctx-item" @click="ctxAudioClipReload">
+          ♪ Load audio file…
+          <input ref="audioClipFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
+            style="display:none" @change="onAudioClipFileInputChange" />
+        </div>
+        <div class="ctx-sep" />
+      </template>
       <div class="ctx-item" @click="ctxRenameClip">Rename and color…</div>
       <div class="ctx-item" @click="ctxPickClipColor">
         Change color…
@@ -525,16 +542,16 @@
       </div>
       <div class="ctx-sep" />
       <div class="ctx-item" @click="ctxDuplicateClip">Duplicate clip</div>
-      <div class="ctx-item" @click="ctxMakeUnique">Make Unique</div>
-      <div class="ctx-item" @click="ctxSelectSimilar">Select all similar clips</div>
-      <div class="ctx-sep" />
-      <div class="ctx-item" @click="ctxTransposeClip">Transpose…</div>
+      <div v-if="!isAudioClip(clipMenu.clip)" class="ctx-item" @click="ctxMakeUnique">Make Unique</div>
+      <div v-if="!isAudioClip(clipMenu.clip)" class="ctx-item" @click="ctxSelectSimilar">Select all similar clips</div>
+      <div v-if="!isAudioClip(clipMenu.clip)" class="ctx-sep" />
+      <div v-if="!isAudioClip(clipMenu.clip)" class="ctx-item" @click="ctxTransposeClip">Transpose…</div>
       <div class="ctx-sep" />
       <div class="ctx-item" @click="ctxClipMoveUp">Move up</div>
       <div class="ctx-item" @click="ctxClipMoveDown">Move down</div>
-      <div class="ctx-sep" />
-      <div class="ctx-item" @click="ctxBeatSlice('bar')">Chop into Bars</div>
-      <div class="ctx-item" @click="ctxBeatSlice('beat')">Chop into Beats</div>
+      <div v-if="!isAudioClip(clipMenu.clip)" class="ctx-sep" />
+      <div v-if="!isAudioClip(clipMenu.clip)" class="ctx-item" @click="ctxBeatSlice('bar')">Chop into Bars</div>
+      <div v-if="!isAudioClip(clipMenu.clip)" class="ctx-item" @click="ctxBeatSlice('beat')">Chop into Beats</div>
       <div class="ctx-sep" />
       <div class="ctx-item danger" @click="ctxRemoveClip">Remove clip</div>
     </div>
@@ -743,6 +760,7 @@ const {
   togglePlay, startPlay,
   autoScroll, seekTo,
   PLAYLIST_CELLS,
+  addAudioClip, loadAudioClipFile, getAudioClipBuf, cloneAudioClip, audioClipVersions,
 } = useStudio()
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
@@ -800,8 +818,40 @@ function patternClipsForTrack(trackId) { return playlistClips.filter(c => c.trac
 function autoClipsForTrack(trackId)    { return automationClips.filter(a => a.trackId === trackId) }
 function patternName(pid)    { return patterns.find(p => p.id === pid)?.name  ?? '?' }
 function patternColor(pid)   { return patterns.find(p => p.id === pid)?.color ?? '#4ecdc4' }
-function clipLabel(clip)     { return clip._label ?? patternName(clip.patternId) }
-function clipColor(clip)     { return clip._color  ?? patternColor(clip.patternId) }
+function isAudioClip(clip)   { return clip.type === 'audio' }
+function clipLabel(clip) {
+  if (isAudioClip(clip)) return clip._label ?? clip.sampleName?.replace(/\.[a-z0-9]+$/i, '') ?? 'AUDIO'
+  return clip._label ?? patternName(clip.patternId)
+}
+function clipColor(clip) {
+  if (isAudioClip(clip)) return clip._color ?? clip.color ?? '#4ecdc4'
+  return clip._color ?? patternColor(clip.patternId)
+}
+
+// AUDIO_EXT regex for file drop detection
+const AUDIO_EXT_PL = /\.(wav|mp3|ogg|flac|aiff?)$/i
+
+// ── Audio-clip drag-and-drop onto tracks ──────────────────────────────────────
+const audioDragOverTrackId = ref(null)
+
+function onTrackCellsDragOver(e, track) {
+  const items = [...(e.dataTransfer?.items ?? [])]
+  if (items.some(i => i.kind === 'file')) {
+    audioDragOverTrackId.value = track.id
+  }
+}
+function onTrackCellsDragLeave(track) {
+  if (audioDragOverTrackId.value === track.id) audioDragOverTrackId.value = null
+}
+async function onTrackCellsDrop(e, track) {
+  audioDragOverTrackId.value = null
+  const file = [...(e.dataTransfer?.files ?? [])].find(f => AUDIO_EXT_PL.test(f.name))
+  if (!file) return
+  e.stopPropagation()
+  const rect = e.currentTarget.getBoundingClientRect()
+  const cell = Math.max(0, Math.floor(cellFromX(e.clientX - rect.left)))
+  await addAudioClip(track.id, cell, file)
+}
 
 // In-clip playhead position (px from clip left edge), or -1 when out of range.
 // Used by Step 6 to draw the real-time bar:beat indicator inside the clip body.
@@ -957,9 +1007,59 @@ function onClipCanvasRef(clipId, el) {
   }
 }
 
+function drawAudioClipCanvas(clip, canvas) {
+  const clipW  = (clip.width || 1) * cellWidth.value - 4
+  const TITLE_H = 18
+  const tH     = getTrackH(playlistTracks.find(t => t.id === clip.trackId))
+  const clipH  = Math.max(4, tH - TITLE_H - 6)
+  const dpr    = window.devicePixelRatio || 1
+  canvas.width  = Math.round(clipW * dpr)
+  canvas.height = Math.round(clipH * dpr)
+  const ctx = canvas.getContext('2d')
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, clipW, clipH)
+
+  const buf = getAudioClipBuf(clip.id)
+  const color = clipColor(clip)
+
+  if (!buf) {
+    ctx.fillStyle = 'rgba(255,255,255,0.08)'
+    ctx.fillRect(0, 0, clipW, clipH)
+    if (clip.audioFileMissing) {
+      ctx.fillStyle = 'rgba(243,156,18,0.7)'
+      ctx.font = `${Math.min(10, clipH * 0.5)}px monospace`
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+      ctx.fillText('⚠ drop to reload', clipW / 2, clipH / 2)
+    }
+    return
+  }
+
+  const data  = buf.getChannelData(0)
+  const N     = data.length
+  const mid   = clipH / 2
+  ctx.strokeStyle = color
+  ctx.lineWidth = 1
+  ctx.globalAlpha = 0.75
+  ctx.beginPath()
+  for (let x = 0; x < clipW; x++) {
+    const s0 = Math.floor((x / clipW) * N)
+    const s1 = Math.max(s0 + 1, Math.floor(((x + 1) / clipW) * N))
+    let mn = 1, mx = -1
+    for (let s = s0; s < s1 && s < N; s++) {
+      if (data[s] < mn) mn = data[s]
+      if (data[s] > mx) mx = data[s]
+    }
+    ctx.moveTo(x + 0.5, mid + mn * mid * 0.88)
+    ctx.lineTo(x + 0.5, mid + mx * mid * 0.88)
+  }
+  ctx.stroke()
+  ctx.globalAlpha = 1
+}
+
 function drawClipCanvas(clipId, canvas) {
   const clip = playlistClips.find(c => c.id === clipId)
   if (!clip || !canvas) return
+  if (isAudioClip(clip)) return drawAudioClipCanvas(clip, canvas)
 
   const clipW = (clip.width || 1) * cellWidth.value - 4
   const TITLE_H = 18
@@ -1088,6 +1188,15 @@ function redrawAllClipCanvases() {
 
 watch([cellWidth, trackHeight, currentPatternId, pickerPatternId], redrawAllClipCanvases)
 watch(() => playlistTracks.map(t => t.height), redrawAllClipCanvases)
+// Redraw the specific audio clip whose buffer just loaded.
+watch(audioClipVersions, (versions) => {
+  nextTick(() => {
+    Object.keys(versions).forEach(id => {
+      const el = clipCanvases.get(id)
+      if (el) drawClipCanvas(id, el)
+    })
+  })
+})
 watch(patternData,    redrawAllClipCanvases,   { deep: true })
 watch(patternData,    redrawAllPickerCanvases,  { deep: true })
 // Redraw clip canvases when slipOffset, width, or any clip property changes (Step 12)
@@ -1450,9 +1559,11 @@ function onClipMouseDown(e, clip, track) {
   if (tool === 'erase') { removeClip(clip.id); return }
   if (tool === 'mute')  { clip.muted = !clip.muted; return }
   if (tool === 'slice') {
-    const rect = e.currentTarget.getBoundingClientRect()
-    const atCell = clip.cell + Math.floor((e.clientX - rect.left) / cellWidth.value)
-    if (atCell > clip.cell && atCell < clip.cell + (clip.width || 1)) splitClip(clip.id, atCell)
+    if (!isAudioClip(clip)) {
+      const rect = e.currentTarget.getBoundingClientRect()
+      const atCell = clip.cell + Math.floor((e.clientX - rect.left) / cellWidth.value)
+      if (atCell > clip.cell && atCell < clip.cell + (clip.width || 1)) splitClip(clip.id, atCell)
+    }
     return
   }
   if (tool === 'select') {
@@ -1465,8 +1576,8 @@ function onClipMouseDown(e, clip, track) {
     }
     return
   }
-  // Slip tool (Step 12): dedicated tool or Shift+draw shortcut
-  if (tool === 'slip' || (tool === 'draw' && e.shiftKey)) { startSlipDrag(e, clip); return }
+  // Slip tool (Step 12): dedicated tool or Shift+draw shortcut (pattern clips only)
+  if (!isAudioClip(clip) && (tool === 'slip' || (tool === 'draw' && e.shiftKey))) { startSlipDrag(e, clip); return }
   if (tool !== 'draw') return
   if (track.locked) return
   draggingClip.value = clip
@@ -1717,9 +1828,26 @@ function zoomToClip(clip) {
   cellWidth.value = Math.max(32, Math.min(200, Math.floor(availW / spanCells)))
   nextTick(() => { tl.scrollLeft = clip.cell * cellWidth.value })
 }
+const audioClipFileInput = ref(null)
+function ctxAudioClipReload() {
+  audioClipFileInput.value?.click()
+}
+async function onAudioClipFileInputChange(e) {
+  const file = e.target.files?.[0]
+  e.target.value = ''
+  if (file && clipMenu.value?.clip) {
+    await loadAudioClipFile(clipMenu.value.clip.id, file)
+  }
+  clipMenu.value = null
+}
+
 function ctxDuplicateClip() {
   const c = clipMenu.value.clip
-  placeClip(c.trackId, c.cell + (c.width || 1), c.patternId, c.width || 1)
+  if (isAudioClip(c)) {
+    cloneAudioClip(c.id)
+  } else {
+    placeClip(c.trackId, c.cell + (c.width || 1), c.patternId, c.width || 1)
+  }
   clipMenu.value = null
 }
 function ctxMakeUnique()   { makeUniqueClip(clipMenu.value.clip.id); clipMenu.value = null }
@@ -2771,6 +2899,19 @@ onBeforeUnmount(() => {
   );
   pointer-events: none; z-index: 2;
 }
+/* Audio clip badge (♪ icon in titlebar) */
+.clip-audio-badge {
+  font-size: 9px;
+  color: rgba(255,255,255,0.55);
+  margin-left: 2px;
+  flex-shrink: 0;
+}
+/* Drop-audio highlight on track cells row */
+.pl-track-cells.audio-drop-active {
+  box-shadow: inset 0 0 0 2px rgba(78,205,196,0.7);
+  background: rgba(78,205,196,0.06) !important;
+}
+
 .drag-ghost-clip  { pointer-events: none; z-index: 8; border-style: dashed; }
 /* Pre-placement hover ghost (Step 3) */
 .hover-ghost-clip {
