@@ -29,8 +29,14 @@
     <!-- ── Transform / macro dropdown ─────────────────────────────────────────-->
     <div v-if="menu.open" class="pat-menu" @click.stop>
       <div class="pat-menu-item" @click="run(onNew)">New pattern</div>
+      <div class="pat-menu-item" @click="run(onFindEmpty)">Find next empty… <span class="pat-menu-key">F4</span></div>
       <div class="pat-menu-item" @click="run(() => duplicatePattern(cur.id))">Duplicate</div>
-      <div class="pat-menu-item" @click="run(openDialog)">Rename / recolor…</div>
+      <div class="pat-menu-item" @click="run(openDialog)">Rename / recolor… <span class="pat-menu-key">F2</span></div>
+      <div class="pat-menu-sep" />
+      <div class="pat-menu-item" :class="{ disabled: index === 0 }"
+           @click="index > 0 && run(() => movePatternUp(cur.id))">Move up <span class="pat-menu-key">Shift+Ctrl+↑</span></div>
+      <div class="pat-menu-item" :class="{ disabled: index >= patterns.length - 1 }"
+           @click="index < patterns.length - 1 && run(() => movePatternDown(cur.id))">Move down <span class="pat-menu-key">Shift+Ctrl+↓</span></div>
       <div class="pat-menu-sep" />
       <div class="pat-menu-item" @click="run(() => splitByChannel(cur.id))">Split by channel</div>
       <div class="pat-menu-sep" />
@@ -75,6 +81,7 @@ import { useStudio } from '../../store/studio.js'
 const {
   patterns, currentPatternId,
   addPattern, removePattern, duplicatePattern, splitByChannel,
+  movePatternUp, movePatternDown, findNextEmptyPattern,
 } = useStudio()
 
 const index = computed(() => Math.max(0, patterns.findIndex(p => p.id === currentPatternId.value)))
@@ -87,6 +94,7 @@ function setIndex(i) {
 function step(d) { setIndex(index.value + d) }
 
 function onNew() { addPattern() }   // store appends + selects the new pattern
+function onFindEmpty() { findNextEmptyPattern() }
 
 // ── Vertical-drag encoder (raw dy → floored integer index) ────────────────────
 const dragging = ref(false)
@@ -149,13 +157,23 @@ function randomizeColor() {
 
 // ── Global key + outside-click handling ───────────────────────────────────────
 function onKey(e) {
-  if (e.key !== 'F2') return
   const t = e.target
-  // While the dialog input is focused, its own handler cycles the color.
-  if (dialog.value.open) return
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
-  e.preventDefault()
-  openDialog()
+  if (e.key === 'F2') {
+    if (dialog.value.open) return
+    e.preventDefault()
+    openDialog()
+    return
+  }
+  if (e.key === 'F4') {
+    e.preventDefault()
+    onFindEmpty()
+    return
+  }
+  if (e.shiftKey && e.ctrlKey) {
+    if (e.key === 'ArrowUp') { e.preventDefault(); movePatternUp(cur.value.id) }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); movePatternDown(cur.value.id) }
+  }
 }
 function onGlobalDown(e) {
   if (menu.value.open && !e.target.closest('.pat-menu') && !e.target.closest('.tb-pat-menu')) menu.value.open = false
@@ -214,6 +232,7 @@ onBeforeUnmount(() => {
   border-radius: 6px; padding: 4px; box-shadow: 0 6px 24px #000000a0;
 }
 .pat-menu-item {
+  display: flex; align-items: center;
   padding: 6px 10px;
   font-family: 'Rajdhani', sans-serif; font-size: 12px; font-weight: 600;
   letter-spacing: 0.03em; color: #8080a0; cursor: pointer; border-radius: 4px;
@@ -223,6 +242,10 @@ onBeforeUnmount(() => {
 .pat-menu-item.disabled { color: #34344a; cursor: not-allowed; }
 .pat-menu-item.disabled:hover { background: transparent; color: #34344a; }
 .pat-menu-sep { height: 1px; background: var(--border-subtle); margin: 4px 2px; }
+.pat-menu-key {
+  margin-left: auto; font-family: 'Share Tech Mono', monospace; font-size: 9px;
+  color: #3a3a5a; padding-left: 10px;
+}
 
 /* ── Name & color dialog ───────────────────────────────────────────────────── */
 .pat-dialog {

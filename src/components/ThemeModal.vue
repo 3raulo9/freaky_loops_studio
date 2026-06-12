@@ -16,9 +16,10 @@
             v-for="theme in THEMES"
             :key="theme.id"
             class="theme-card"
-            :class="{ active: currentTheme === theme.id }"
+            :class="{ active: currentTheme === theme.id, light: isLight(theme) }"
             @click="selectTheme(theme.id)"
           >
+            <div v-if="theme.id === 'white'" class="theme-badge">DEFAULT</div>
             <div class="theme-swatch" :style="{ background: swatchGradient(theme) }">
               <div class="swatch-bars">
                 <div class="swatch-bar" :style="{ background: theme.vars['--bg-panel'] }" />
@@ -53,6 +54,12 @@ defineEmits(['close'])
 
 const { currentTheme } = useStudio()
 
+const LIGHT_THEMES = new Set(['white', 'arctic'])
+
+function isLight(theme) {
+  return LIGHT_THEMES.has(theme.id)
+}
+
 function swatchGradient(theme) {
   return `linear-gradient(135deg, ${theme.vars['--bg-base']} 0%, ${theme.vars['--bg-track']} 100%)`
 }
@@ -75,9 +82,9 @@ watch(currentTheme, (id) => {
   backdrop-filter: blur(3px);
 }
 .modal {
-  width: 480px; max-width: 96vw; max-height: 90vh;
+  width: 560px; max-width: 96vw; max-height: 90vh;
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 10px;
-  box-shadow: 0 24px 80px rgba(0,0,0,0.85), 0 0 0 1px rgba(255,255,255,0.04);
+  box-shadow: 0 24px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(128,128,160,0.08);
   display: flex; flex-direction: column; overflow: hidden;
 }
 
@@ -99,7 +106,7 @@ watch(currentTheme, (id) => {
 }
 
 .theme-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;
 }
 
 .theme-card {
@@ -110,41 +117,58 @@ watch(currentTheme, (id) => {
   cursor: pointer; transition: all .15s; text-align: left;
   outline: none;
 }
-.theme-card:hover { border-color: #4a4a6a; }
+.theme-card:hover { border-color: var(--text-muted); }
 .theme-card.active {
-  border-color: #9b59b6; background: #160e20;
+  border-color: #9b59b6;
+  background: var(--bg-deeper);
   box-shadow: 0 0 12px #9b59b633;
+}
+.theme-card.light.active {
+  border-color: #7b3fb6;
+  box-shadow: 0 0 12px #9b59b622;
+}
+
+.theme-badge {
+  position: absolute; top: 7px; left: 7px;
+  font-family:'Rajdhani',sans-serif; font-size:7px; font-weight:700; letter-spacing:.15em;
+  background: #9b59b6; color: #fff; border-radius: 3px;
+  padding: 1px 5px; z-index: 1;
 }
 
 .theme-swatch {
-  height: 70px; border-radius: 5px; overflow: hidden;
+  height: 60px; border-radius: 5px; overflow: hidden;
   position: relative; display: flex; align-items: center; justify-content: center;
-  border: 1px solid rgba(255,255,255,0.05);
+  border: 1px solid rgba(128,128,128,0.15);
 }
 .swatch-bars {
   position: absolute; bottom: 0; left: 0; right: 0;
-  display: flex; height: 14px;
+  display: flex; height: 12px;
 }
 .swatch-bar { flex: 1; }
 .swatch-text {
-  font-family:'Rajdhani',sans-serif; font-size:22px; font-weight:700;
+  font-family:'Rajdhani',sans-serif; font-size:20px; font-weight:700;
   letter-spacing:.1em; opacity:.7; z-index:1;
 }
 
 .theme-info { display: flex; flex-direction: column; gap: 2px; }
 .theme-name {
-  font-family:'Rajdhani',sans-serif; font-size:13px; font-weight:700;
+  font-family:'Rajdhani',sans-serif; font-size:12px; font-weight:700;
   letter-spacing:.1em; color:var(--text-primary);
 }
 .theme-desc {
-  font-family:'Share Tech Mono',monospace; font-size:9px; color:var(--text-muted);
+  font-family:'Share Tech Mono',monospace; font-size:8px; color:var(--text-muted);
 }
-.theme-card.active .theme-name { color:#d0a8ff; }
+.theme-card.active .theme-name { color: #9b59b6; }
+.theme-card.light.active .theme-name { color: #6a2aa6; }
 
 .theme-check {
   position: absolute; top: 8px; right: 8px;
   font-size: 12px; color: #9b59b6;
   filter: drop-shadow(0 0 4px #9b59b6);
+}
+.theme-card.light .theme-check {
+  filter: none;
+  color: #7b3fb6;
 }
 
 .modal-footer {
@@ -156,7 +180,7 @@ watch(currentTheme, (id) => {
 .btn-close {
   font-family:'Rajdhani',sans-serif; font-size:13px; font-weight:700; letter-spacing:.1em;
   padding: 8px 22px; border: 1px solid #9b59b6; border-radius: 6px;
-  background: #160e20; color: #9b59b6; cursor: pointer; transition: all .12s;
+  background: transparent; color: #9b59b6; cursor: pointer; transition: all .12s;
 }
 .btn-close:hover { background: #9b59b6; color: #fff; box-shadow: 0 0 14px #9b59b655; }
 </style>

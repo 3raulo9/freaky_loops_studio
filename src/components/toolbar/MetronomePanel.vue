@@ -6,13 +6,19 @@
       :class="{ active: metronomeOn, flash: flashOn, accent: flashAccent }"
       @click="metronomeOn = !metronomeOn"
       @contextmenu.prevent.stop="openMenu"
-      title="Metronome — right-click for click sound"
+      title="Metronome — right-click for click sound / count-in"
     >
       <span class="tb-metro-glyph">△</span>
       <span class="tb-metro-pend" />
     </button>
 
-    <!-- Right-click cascade: swap the click asset / toggle accent -->
+    <!-- Count-in indicator pill (shows bars remaining during count-in) -->
+    <div v-if="countInBarsLeft > 0" class="metro-countin-pill">{{ countInBarsLeft }}</div>
+
+    <!-- Count-in armed badge (shows when count-in is on but not counting) -->
+    <div v-else-if="recordCountIn" class="metro-countin-badge">{{ recordCountInBars }}</div>
+
+    <!-- Right-click cascade: swap the click asset / toggle accent / count-in -->
     <div
       v-if="menu.open"
       class="metro-menu"
@@ -33,6 +39,23 @@
       <div class="metro-menu-item" @click="metroAccent = !metroAccent">
         <span class="metro-menu-dot">{{ metroAccent ? '☑' : '☐' }}</span>Accent downbeat
       </div>
+      <div class="metro-menu-sep" />
+      <div class="metro-menu-title">COUNT-IN (Ctrl+P)</div>
+      <div class="metro-menu-item" @click="recordCountIn = !recordCountIn">
+        <span class="metro-menu-dot">{{ recordCountIn ? '☑' : '☐' }}</span>Count-in before record
+      </div>
+      <div v-if="recordCountIn" class="metro-menu-sub">
+        <div class="metro-menu-title">BARS</div>
+        <div
+          v-for="n in [1, 2, 4]"
+          :key="n"
+          class="metro-menu-item"
+          :class="{ on: recordCountInBars === n }"
+          @click="recordCountInBars = n"
+        >
+          <span class="metro-menu-dot">{{ recordCountInBars === n ? '●' : '○' }}</span>{{ n }} bar{{ n > 1 ? 's' : '' }}
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -41,7 +64,8 @@
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../../store/studio.js'
 
-const { metronomeOn, metronomeSound, metroAccent, beatTick, beatAccent } = useStudio()
+const { metronomeOn, metronomeSound, metroAccent, beatTick, beatAccent,
+        recordCountIn, recordCountInBars, countInBarsLeft } = useStudio()
 
 const SOUNDS = [
   { id: 'beep',    label: 'Beep' },
@@ -70,9 +94,21 @@ function openMenu(e) { menu.value = { open: true, x: e.clientX, y: e.clientY } }
 function onGlobalDown(e) {
   if (menu.value.open && !e.target.closest('.metro-menu')) menu.value.open = false
 }
-onMounted(() => window.addEventListener('pointerdown', onGlobalDown, true))
+function onKey(e) {
+  if (e.ctrlKey && e.key === 'p') {
+    const t = e.target
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+    e.preventDefault()
+    recordCountIn.value = !recordCountIn.value
+  }
+}
+onMounted(() => {
+  window.addEventListener('pointerdown', onGlobalDown, true)
+  window.addEventListener('keydown', onKey)
+})
 onBeforeUnmount(() => {
   window.removeEventListener('pointerdown', onGlobalDown, true)
+  window.removeEventListener('keydown', onKey)
   clearTimeout(flashTimer)
 })
 </script>
@@ -122,6 +158,30 @@ onBeforeUnmount(() => {
   border-color: #2ecc71; color: #2ecc71; background: #06210f;
   box-shadow: 0 0 13px #2ecc71aa;
 }
+
+/* ── Count-in indicators ────────────────────────────────────────────────────── */
+.metro-countin-pill {
+  position: absolute; top: -3px; right: -4px;
+  min-width: 14px; height: 14px; border-radius: 7px;
+  background: #e74c3c; color: #fff;
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 3px; line-height: 1;
+  box-shadow: 0 0 6px #e74c3caa;
+  animation: countin-pulse 0.25s ease-out;
+}
+@keyframes countin-pulse {
+  from { transform: scale(1.4); } to { transform: scale(1); }
+}
+.metro-countin-badge {
+  position: absolute; top: -3px; right: -4px;
+  min-width: 14px; height: 14px; border-radius: 7px;
+  background: #2c2030; border: 1px solid #9b59b6;
+  color: #9b59b6; font-family: 'Share Tech Mono', monospace; font-size: 9px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 3px; line-height: 1;
+}
+.metro-menu-sub { padding-left: 8px; }
 
 /* ── Cascade menu ───────────────────────────────────────────────────────────── */
 .metro-menu {

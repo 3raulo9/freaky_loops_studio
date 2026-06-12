@@ -464,10 +464,11 @@ import {
 const props = defineProps({ ch: { type: Object, required: true } })
 
 const {
-  totalSteps, displayStep, channels, selectedChannelId, currentPatternId,
+  totalSteps, displayStep, isPlaying, channels, selectedChannelId, currentPatternId,
   getPatData, playNote, stopNote, snapScale, pushUndo,
   getPatternLengthTicks, setPatternLengthOverride, clearPatternLengthOverride,
   loopRegion, setLoopRegion, clearLoopRegion,
+  autoScroll,
 } = useStudio()
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -1670,6 +1671,18 @@ function clearPatternLength() {
   clearPatternLengthOverride(currentPatternId.value)
   rulerCtx.value = null
 }
+
+// ── Auto-scroll: page-flip when playhead nears right edge ─────────────────────
+watch(displayStep, () => {
+  if (!isPlaying.value || !autoScroll.value || !scrollRef.value) return
+  const el = scrollRef.value
+  const headX = playheadX.value
+  const viewW = el.clientWidth
+  if (headX >= el.scrollLeft + viewW * 0.9) {
+    el.scrollLeft = headX - viewW * 0.1
+    scrollLeftVal.value = el.scrollLeft
+  }
+})
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────────
 onMounted(() => {

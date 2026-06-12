@@ -10,20 +10,20 @@ html, body {
 }
 
 :root {
-  /* ── Backgrounds (dark → light) ───────────────────────── */
-  --bg-deeper:  #080810;   /* rulers, canvas, deepest pits  */
-  --bg-base:    #0e0e14;   /* main app background            */
-  --bg-header:  #0c0c14;   /* topbar, modal headers/footers  */
-  --bg-panel:   #16161f;   /* side panels, property strips   */
-  --bg-track:   #1c1c28;   /* track rows, list items         */
-  --bg-control: #0e0e1c;   /* inputs, selects, dark controls */
-  --bg-hover:   #141428;   /* hover / selected row tint      */
+  /* ── Backgrounds (white theme defaults) ──────────────── */
+  --bg-deeper:  #d4d4e4;
+  --bg-base:    #f0f0f8;
+  --bg-header:  #e4e4f2;
+  --bg-panel:   #eaeaf6;
+  --bg-track:   #dddde8;
+  --bg-control: #f6f6ff;
+  --bg-hover:   #ccccde;
   /* ── Borders ─────────────────────────────────────────── */
-  --border-subtle: #1a1a28; /* dividers, subtle separators   */
-  --border:        #252535; /* standard element borders       */
+  --border-subtle: #bcbcd0;
+  --border:        #9494b0;
   /* ── Text ────────────────────────────────────────────── */
-  --text-primary: #e0e0ee;
-  --text-muted:   #666680;
+  --text-primary: #18182a;
+  --text-muted:   #58587a;
   /* ── Typography ──────────────────────────────────────── */
   --font-mono: 'Share Tech Mono', monospace;
   --font-ui: 'Rajdhani', sans-serif;
