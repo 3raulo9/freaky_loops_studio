@@ -1290,7 +1290,7 @@ export function useStudio() {
   const renderModalOpen    = ref(false)
   const themeModalOpen     = ref(false)
   const midiRouterOpen     = ref(false)
-  const currentTheme       = ref(localStorage.getItem('fls-theme') ?? 'void')
+  const currentTheme       = ref(localStorage.getItem('fls-theme') ?? 'white')
   applyTheme(currentTheme.value)
   const kbOctave           = ref(4)
   const gridSnap           = ref('1/4')
