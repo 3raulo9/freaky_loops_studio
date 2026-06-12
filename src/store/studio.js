@@ -818,8 +818,8 @@ export function useStudio() {
 
   // ── Playlist tracks & clips ────────────────────────────────────────────────────
   const playlistTracks = reactive([
-    { id: 'pt1', name: 'Track 1', color: '#e74c3c', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null },
-    { id: 'pt2', name: 'Track 2', color: '#3498db', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null },
+    { id: 'pt1', name: 'Track 1', color: '#e74c3c', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null, height: 52 },
+    { id: 'pt2', name: 'Track 2', color: '#3498db', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null, height: 52 },
   ])
   let _clipId = 0
   const playlistClips = reactive([])
@@ -837,7 +837,7 @@ export function useStudio() {
   function addPlaylistTrack() {
     const idx   = playlistTracks.length + 1
     const color = COLORS[idx % COLORS.length]
-    playlistTracks.push({ id: 'pt' + idx + Date.now(), name: 'Track ' + idx, color, muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null })
+    playlistTracks.push({ id: 'pt' + idx + Date.now(), name: 'Track ' + idx, color, muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null, height: trackHeight.value })
   }
 
   function removePlaylistTrack(id) {
@@ -1164,8 +1164,8 @@ export function useStudio() {
     _saveCurrentPlaylistSnapshot()
     _playlistSnapshots[newId] = {
       tracks: [
-        { id: 'pt1', name: 'Track 1', color: '#e74c3c', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null },
-        { id: 'pt2', name: 'Track 2', color: '#3498db', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null },
+        { id: 'pt1', name: 'Track 1', color: '#e74c3c', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null, height: 52 },
+        { id: 'pt2', name: 'Track 2', color: '#3498db', muted: false, _soloed: false, locked: false, collapsed: false, groupParentId: null, height: 52 },
       ],
       clips: [], markers: [], autoClips: [],
     }
@@ -1256,6 +1256,30 @@ export function useStudio() {
   function getUnusedPatternIds() {
     const used = new Set(playlistClips.map(c => c.patternId))
     return patterns.filter(p => !used.has(p.id)).map(p => p.id)
+  }
+
+  // ── Transpose all notes in a pattern by semitones ─────────────────────────────
+  function transposePatternNotes(patId, semitones) {
+    const pd = patternData[patId]
+    if (!pd) return
+    Object.values(pd).forEach(d => {
+      if (!d?.pianoNotes) return
+      d.pianoNotes.forEach(n => { n.pitch = Math.max(0, Math.min(127, (n.pitch ?? 60) + semitones)) })
+    })
+  }
+
+  // ── Swap which pattern a playlist clip references ─────────────────────────────
+  function selectSourcePattern(clipId, patternId) {
+    const clip = playlistClips.find(c => c.id === clipId)
+    if (!clip) return
+    clip.patternId = patternId
+    delete clip._label
+    delete clip._color
+  }
+
+  // ── Mute / Unmute all clips on a playlist track ───────────────────────────────
+  function muteAllClipsOnTrack(trackId, muted) {
+    playlistClips.filter(c => c.trackId === trackId).forEach(c => { c.muted = muted })
   }
 
   // ── UI state ─────────────────────────────────────────────────────────────────
@@ -3956,7 +3980,7 @@ export function useStudio() {
     automationClips, addAutomationClip, removeAutomationClip,
     addAutoNode, removeAutoNode, resizeAutomationClip,
     // Utilities
-    getUnusedPatternIds,
+    getUnusedPatternIds, transposePatternNotes, selectSourcePattern, muteAllClipsOnTrack,
     // UI state
     mainView, pianoRollOpen, renderModalOpen, themeModalOpen, midiRouterOpen, currentTheme, kbOctave,
     gridSnap, keyboardInputMode,
