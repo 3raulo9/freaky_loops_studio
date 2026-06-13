@@ -90,19 +90,28 @@ export function fmtFreq(v) {                            // v∈[0,1] → exponen
 export function fmtDb(db) { return (db >= 0 ? '+' : '') + db.toFixed(1) + ' dB' }
 export function fmtPct(v) { return Math.round(v * 100) + '%' }
 
-// `v-hint="'transport.play'"` — the global hover delegation primitive.
+// `v-hint="'transport.play'"`  → looks the id up in HINTS (registered tooltips).
+// `v-hint="'Free-form text…'"` → any value containing whitespace is shown verbatim,
+//   so components can describe a control inline without registering a HINTS entry.
+//   (No HINTS id contains whitespace, so the two forms never collide.)
+function applyHint(v) {
+  if (v == null) return
+  if (typeof v === 'string' && /\s/.test(v)) setHintRaw(v)
+  else setHint(v)
+}
+
 export const vHint = {
   mounted(el, binding) {
-    el.__hintId = binding.value
-    el.__hintEnter = () => setHint(el.__hintId)
-    el.__hintLeave = () => clearHint(el.__hintId)
+    el.__hintVal = binding.value
+    el.__hintEnter = () => applyHint(el.__hintVal)
+    el.__hintLeave = () => clearHint(el.__hintVal)
     el.addEventListener('mouseenter', el.__hintEnter)
     el.addEventListener('mouseleave', el.__hintLeave)
   },
-  updated(el, binding) { el.__hintId = binding.value },
+  updated(el, binding) { el.__hintVal = binding.value },
   beforeUnmount(el) {
     el.removeEventListener('mouseenter', el.__hintEnter)
     el.removeEventListener('mouseleave', el.__hintLeave)
-    clearHint(el.__hintId)
+    clearHint(el.__hintVal)
   },
 }

@@ -1967,6 +1967,10 @@ export function useStudio() {
       if (lfo) src.onended = () => { try { lfo.stop() } catch (_) {} }
 
       isLooping ? src.start(when, offset) : src.start(when, offset, playDur)
+
+      // Expose the voice so callers (e.g. the Sampler audition keyboard) can
+      // release held / looping notes; the sequencer simply ignores the return.
+      return { src, ampGain }
     }
   }
 
@@ -4135,6 +4139,36 @@ export function useStudio() {
       return
     }
 
+    // Audio-file sampler: capture the returned voice so a held / looping note can
+    // be released on note-off (a looping sample would otherwise ring forever). This
+    // is what lets the live keyboard audition the sampler with its current settings.
+    if (ch.type === 'audiofile') {
+      const voice = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1 }, dest)
+      if (voice && voice.src) {
+        const entry = {
+          release(t) {
+            const tt   = Math.max(t ?? audioCtx.currentTime, audioCtx.currentTime)
+            const relT = Math.max(0.02, Math.min(1.5, ch.params.envRelease ?? 0.2))
+            try {
+              const g = voice.ampGain.gain
+              g.cancelScheduledValues(tt)
+              g.setValueAtTime(Math.max(g.value, 0.0001), tt)
+              g.exponentialRampToValueAtTime(0.0001, tt + relT)
+              voice.src.stop(tt + relT + 0.03)
+            } catch (_) {}
+          },
+        }
+        liveVoices.set(key, entry)
+        const prevEnded = voice.src.onended
+        voice.src.onended = (e) => {
+          if (typeof prevEnded === 'function') { try { prevEnded.call(voice.src, e) } catch (_) {} }
+          if (liveVoices.get(key) === entry) liveVoices.delete(key)
+        }
+      }
+      registerVoice(when, 0.5)
+      return
+    }
+
     // Plucked / percussive / one-shot voices: fire-and-forget, natural decay.
     ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1 }, dest)
     registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.35) + 0.15)
@@ -4157,6 +4191,19 @@ export function useStudio() {
       const node = subterraNodes.get(ch.id)
       if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
     }
+  }
+
+  // ── Sampler audition (the preview keyboard in the Sampler panel) ─────────────
+  //   Thin wrappers over playNote/stopNote so the on-screen keys behave EXACTLY
+  //   like the QWERTY keys — hold, release, retrigger and proper mixer routing all
+  //   handled by the unified voice path (audiofile voices now live in liveVoices).
+  function auditionNoteOn(channelId, pitch) {
+    const ch = channels.find(c => c.id === channelId)
+    if (ch) playNote(ch, pitch)
+  }
+  function auditionNoteOff(channelId, pitch) {
+    const ch = channels.find(c => c.id === channelId)
+    if (ch) stopNote(ch, pitch)
   }
 
   // Safety net: if the window loses focus mid-hold the keyup may never arrive, so
@@ -4218,7 +4265,13 @@ export function useStudio() {
       panicAll()
       return
     }
-    if (e.repeat || ['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return
+    if (e.repeat) return
+    // Keep the instrument playable while a slider is focused: let the musical keys
+    // through when the focused element is a range slider (it ignores letter keys
+    // anyway), so you can tweak a control and hear the change on the keyboard.
+    const _tag = e.target.tagName
+    const _slider = _tag === 'INPUT' && e.target.type === 'range'
+    if (!_slider && (_tag === 'INPUT' || _tag === 'SELECT' || _tag === 'TEXTAREA')) return
     // Octave shift moved off [ and ] (now note keys) to - and =
     if (e.code === 'Minus')  { kbOctave.value = Math.max(0, kbOctave.value - 1); return }
     if (e.code === 'Equal')  { kbOctave.value = Math.min(8, kbOctave.value + 1); return }
@@ -5600,6 +5653,8 @@ export function useStudio() {
     canUndo, canRedo, undoAction, redoAction,
     // Keyboard
     playNote, stopNote, handleKeyDown, handleKeyUp, panicAll,
+    // Sampler audition (preview keyboard)
+    auditionNoteOn, auditionNoteOff,
     // Mixer
     mixerTracks, EFFECT_DEFS,
     setMixerTrackVolume, setMixerTrackPan, setMixerEq,
