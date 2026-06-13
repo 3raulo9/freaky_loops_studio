@@ -22,6 +22,8 @@
           @click="setSliceCount(n)">{{ n }}</button>
       </div>
       <button class="chp-reset-btn" @click="equalizeSlices" title="Equalize all slices">⇌</button>
+      <button class="chp-reset-btn" @click="sliceToMidi(ch.id)"
+        title="Slice → MIDI: create a pattern that plays each slice in order">→SEQ</button>
     </div>
 
     <!-- Transient detection row (only when file is loaded) -->
@@ -99,7 +101,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useStudio } from '../store/studio.js'
 
 const props = defineProps({ channel: Object })
-const { loadChopFile, getChopBuf, chopVersions, detectChopTransients } = useStudio()
+const { loadChopFile, getChopBuf, chopVersions, detectChopTransients, sliceToMidi } = useStudio()
 
 const canvas   = ref(null)
 const waveWrap = ref(null)
