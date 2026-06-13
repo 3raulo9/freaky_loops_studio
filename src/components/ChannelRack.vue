@@ -228,10 +228,11 @@
           @change="onMidiFileInput" />
 
         <div class="add-synth-wrap" ref="synthPickerRef">
-          <button class="add-ch-btn" @click.stop="showSynthPicker = !showSynthPicker" title="Add synth channel">
+          <button class="add-ch-btn" @click.stop="toggleSynthPicker" title="Add synth channel">
             + SYNTH ▾
           </button>
-          <div v-if="showSynthPicker" class="synth-picker">
+          <Teleport to="body">
+          <div v-if="showSynthPicker" class="synth-picker" :style="synthPickerStyle">
             <div class="synth-pick-hint synth-pick-hint--drag">↳ click to add · drag onto a channel to replace it</div>
             <div class="synth-pick-section">BASIC</div>
             <div class="synth-pick-item"
@@ -289,6 +290,7 @@
             </div>
             <div class="synth-pick-hint">or drag a .mid file anywhere onto the rack</div>
           </div>
+          </Teleport>
         </div>
       </div>
     </div>
@@ -965,6 +967,20 @@ const showSynthPicker = ref(false)
 const synthPickerRef  = ref(null)
 const expandedGMCat   = ref(null)  // name of the currently-open GM category sub-list
 
+// Teleported to <body> so it escapes the rack's overflow:hidden; positioned fixed
+// from the button's rect, right-aligned to match the original layout.
+const synthPickerPos = ref({ top: 0, right: 0 })
+const synthPickerStyle = computed(() => ({
+  top: synthPickerPos.value.top + 'px',
+  right: synthPickerPos.value.right + 'px',
+}))
+function toggleSynthPicker() {
+  if (showSynthPicker.value) { showSynthPicker.value = false; return }
+  const r = synthPickerRef.value?.getBoundingClientRect()
+  if (r) synthPickerPos.value = { top: r.bottom + 5, right: window.innerWidth - r.right }
+  showSynthPicker.value = true
+}
+
 function getProgsForCat(cat) {
   const result = []
   for (let p = cat.range[0]; p <= cat.range[1]; p++) result.push(p)
@@ -980,7 +996,7 @@ function onDocClick(e) {
   // and this capture-phase handler would otherwise close the picker on the very
   // first click, making the entire GM section unreachable. Leaf items still
   // close it explicitly after adding a channel.
-  if (!e.target?.closest?.('.add-synth-wrap')) showSynthPicker.value = false
+  if (!e.target?.closest?.('.add-synth-wrap') && !e.target?.closest?.('.synth-picker')) showSynthPicker.value = false
   optionsOpen.value = false
   dfOpen.value = false
 }
@@ -1856,7 +1872,7 @@ function commitRename() {
   letter-spacing: 0.06em; color: #44445a; line-height: 1.4;
 }
 .synth-picker {
-  position: absolute; right: 0; top: calc(100% + 5px); z-index: 2000;
+  position: fixed; z-index: 100000;
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 7px;
   padding: 5px 0; min-width: 170px;
   box-shadow: 0 10px 36px rgba(0,0,0,0.75);

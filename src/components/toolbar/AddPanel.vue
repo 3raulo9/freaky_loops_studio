@@ -1,16 +1,18 @@
 <template>
   <div class="tb-add" v-hint="'add'">
     <button
+      ref="btnRef"
       class="tb-add-btn"
       :class="{ open: menu }"
       title="Add channel / instrument"
-      @click.stop="menu = !menu"
+      @click.stop="toggleMenu"
     >
       <span class="tb-add-plus">+</span>
       <span class="tb-add-lbl">ADD</span>
     </button>
 
-    <div v-if="menu" class="add-menu" @click.stop>
+    <Teleport to="body">
+    <div v-if="menu" class="add-menu" :style="menuStyle" @click.stop>
       <div class="add-menu-title">ADD CHANNEL</div>
 
       <div class="add-menu-item" @click="run(addChannel)">
@@ -69,11 +71,12 @@
         <span class="add-dot" style="background:#7b2fff" />⬡ WASM Plugin
       </div>
     </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../../store/studio.js'
 import { FM_PRESETS } from '../../store/studio.js'
 
@@ -83,14 +86,40 @@ const {
   GM_CATEGORIES, GM_CAT_COLORS,
 } = useStudio()
 
+const btnRef = ref(null)
 const menu  = ref(false)
 const fmOpen = ref(false)
 const gmOpen = ref(false)
 
+// The menu is teleported to <body> to escape the toolbar's overflow:hidden, so it
+// is positioned fixed from the button's rect. Flip upward when the toolbar is
+// docked near the bottom of the screen.
+const menuPos = ref({ left: 0, top: 0 })
+const menuStyle = computed(() => {
+  const p = menuPos.value
+  const s = { left: p.left + 'px' }
+  if (p.top != null)    s.top    = p.top + 'px'
+  if (p.bottom != null) s.bottom = p.bottom + 'px'
+  return s
+})
+
+function toggleMenu() {
+  if (menu.value) { menu.value = false; fmOpen.value = false; gmOpen.value = false; return }
+  const r = btnRef.value?.getBoundingClientRect()
+  if (r) {
+    menuPos.value = r.bottom > window.innerHeight / 2
+      ? { left: r.left, bottom: window.innerHeight - r.top + 4 }
+      : { left: r.left, top: r.bottom + 4 }
+  }
+  menu.value = true
+}
+
 function run(fn) { fn(); menu.value = false; fmOpen.value = false; gmOpen.value = false }
 
 function onGlobalDown(e) {
-  if (!e.target.closest('.tb-add')) { menu.value = false; fmOpen.value = false; gmOpen.value = false }
+  if (!e.target.closest('.tb-add') && !e.target.closest('.add-menu')) {
+    menu.value = false; fmOpen.value = false; gmOpen.value = false
+  }
 }
 onMounted(() => window.addEventListener('pointerdown', onGlobalDown, true))
 onBeforeUnmount(() => window.removeEventListener('pointerdown', onGlobalDown, true))
@@ -121,7 +150,7 @@ onBeforeUnmount(() => window.removeEventListener('pointerdown', onGlobalDown, tr
 
 /* ── Dropdown menu ─────────────────────────────────────────────────────────── */
 .add-menu {
-  position: absolute; top: calc(100% + 4px); left: 0; z-index: 9999;
+  position: fixed; z-index: 100000;
   min-width: 190px;
   background: var(--bg-control); border: 1px solid var(--border);
   border-radius: 6px; padding: 4px; box-shadow: 0 8px 28px #000000b0;
