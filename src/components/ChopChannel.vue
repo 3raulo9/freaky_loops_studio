@@ -36,6 +36,22 @@
         title="Auto-detect transients and set slice points">DETECT</button>
     </div>
 
+    <!-- Warp (tempo follow) row -->
+    <div v-if="buf" class="chp-transient-row">
+      <button class="chp-detect-btn" :class="{ 'chp-warp-on': ch.params.warpEnabled }"
+        @click="setSlicerWarp(ch.id, { warpEnabled: !ch.params.warpEnabled })"
+        title="Warp — time-stretch the loop to the project tempo">⟳ WARP</button>
+      <select class="chp-warp-sel" :value="ch.params.warpMode ?? 'complex'"
+        :disabled="!ch.params.warpEnabled"
+        @change="setSlicerWarp(ch.id, { warpMode: $event.target.value })">
+        <option v-for="m in WARP_MODES" :key="m" :value="m">{{ m }}</option>
+      </select>
+      <input type="number" class="chp-warp-bpm" min="20" max="300" step="0.1"
+        :value="ch.params.sampleBpm ?? ''" title="Source tempo (BPM)"
+        @change="setSlicerWarp(ch.id, { sampleBpm: +$event.target.value || null })" />
+      <button class="chp-reset-btn" @click="redetectSlicerBpm(ch.id)" title="Detect tempo">⌕</button>
+    </div>
+
     <!-- Waveform + slice markers -->
     <div
       ref="waveWrap"
@@ -101,7 +117,8 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useStudio } from '../store/studio.js'
 
 const props = defineProps({ channel: Object })
-const { loadChopFile, getChopBuf, chopVersions, detectChopTransients, sliceToMidi } = useStudio()
+const { loadChopFile, getChopBuf, chopVersions, detectChopTransients, sliceToMidi,
+        setSlicerWarp, redetectSlicerBpm, WARP_MODES } = useStudio()
 
 const canvas   = ref(null)
 const waveWrap = ref(null)
@@ -325,6 +342,16 @@ async function onFileInput(e) {
   cursor: pointer; padding: 2px 7px; transition: all 0.1s; flex-shrink: 0;
 }
 .chp-detect-btn:hover { background: rgba(230,126,34,0.3); border-color: #e67e22; }
+.chp-detect-btn.chp-warp-on { background: rgba(46,204,113,0.25); border-color: #2ecc71; color: #2ecc71; }
+.chp-warp-sel {
+  background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.15); border-radius: 3px;
+  color: rgba(255,255,255,0.75); font-size: 9px; padding: 1px 3px; text-transform: capitalize;
+}
+.chp-warp-sel:disabled { opacity: 0.4; }
+.chp-warp-bpm {
+  width: 46px; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px; color: rgba(255,255,255,0.8); font-size: 10px; text-align: center; padding: 1px 2px;
+}
 
 .chp-wave-wrap {
   position: relative; height: 72px; border-radius: 4px; overflow: hidden;

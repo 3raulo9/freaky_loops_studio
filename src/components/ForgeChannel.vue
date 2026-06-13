@@ -42,6 +42,22 @@
         title="Slice → MIDI: create a pattern that plays each slice in order">→SEQ</button>
     </div>
 
+    <!-- Warp (tempo follow) row -->
+    <div class="frg-slice-bar">
+      <button class="frg-sbtn" :class="{ active: ch.params.warpEnabled }"
+        @click="setSlicerWarp(ch.id, { warpEnabled: !ch.params.warpEnabled })"
+        title="Warp — time-stretch both decks to the project tempo">⟳ WARP</button>
+      <select class="frg-warp-sel" :value="ch.params.warpMode ?? 'complex'"
+        :disabled="!ch.params.warpEnabled"
+        @change="setSlicerWarp(ch.id, { warpMode: $event.target.value })">
+        <option v-for="m in WARP_MODES" :key="m" :value="m">{{ m }}</option>
+      </select>
+      <input type="number" class="frg-warp-bpm" min="20" max="300" step="0.1"
+        :value="ch.params.sampleBpm ?? ''" title="Source tempo (BPM)"
+        @change="setSlicerWarp(ch.id, { sampleBpm: +$event.target.value || null })" />
+      <button class="frg-reset-btn" @click="redetectSlicerBpm(ch.id)" title="Detect tempo">⌕</button>
+    </div>
+
     <!-- Waveform + slice markers -->
     <div
       ref="waveWrap"
@@ -140,7 +156,8 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useStudio } from '../store/studio.js'
 
 const props = defineProps({ channel: Object })
-const { loadForgeDeck, getForgeBuf, forgeVersions, sliceToMidi } = useStudio()
+const { loadForgeDeck, getForgeBuf, forgeVersions, sliceToMidi,
+        setSlicerWarp, redetectSlicerBpm, WARP_MODES } = useStudio()
 
 const canvas     = ref(null)
 const waveWrap   = ref(null)
@@ -414,6 +431,15 @@ async function onFileInput(e) {
   color: rgba(255,255,255,0.45); font-size: 11px; cursor: pointer; padding: 1px 5px;
 }
 .frg-reset-btn:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.8); }
+.frg-warp-sel {
+  background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.15); border-radius: 3px;
+  color: rgba(255,255,255,0.75); font-size: 9px; padding: 1px 3px; text-transform: capitalize;
+}
+.frg-warp-sel:disabled { opacity: 0.4; }
+.frg-warp-bpm {
+  width: 46px; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 3px; color: rgba(255,255,255,0.8); font-size: 10px; text-align: center; padding: 1px 2px;
+}
 
 .frg-wave-wrap {
   position: relative; height: 72px; border-radius: 4px; overflow: hidden;

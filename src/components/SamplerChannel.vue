@@ -78,11 +78,33 @@
       <span v-if="p.warpEnabled && p.sampleBpm" class="smp-xfade-badge">
         ✓ {{ p.sampleBpm }} → {{ Math.round(projectBpm) }}
       </span>
+
+      <template v-if="p.warpEnabled">
+        <span class="smp-warp-hint" v-hint="'Warp markers — double-click the waveform to pin a point to a beat; drag to move; double-click a marker to delete. With 2+ markers each region stretches independently.'">
+          dbl-click wave = marker
+        </span>
+        <button v-if="(p.warpMarkers ?? []).length" class="smp-icon-btn"
+          @click="clearSampleWarpMarkers(ch.id)" title="Clear all warp markers">CLR {{ (p.warpMarkers ?? []).length }}</button>
+      </template>
     </div>
 
     <!-- ── Waveform ─────────────────────────────────────────────────────────── -->
-    <div class="smp-wave-wrap" ref="waveWrap">
+    <div class="smp-wave-wrap" ref="waveWrap"
+      :class="{ 'smp-wave-warpedit': p.warpEnabled }"
+      @dblclick="onWaveDblClick">
       <canvas ref="canvas" class="smp-canvas" />
+
+      <!-- Warp markers (when warp is enabled): drag to pin a sample position to a beat -->
+      <template v-if="p.warpEnabled">
+        <div v-for="(wm, wi) in (p.warpMarkers ?? [])" :key="'wm' + wi"
+          class="smp-warp-marker"
+          :style="{ left: wm.pos * 100 + '%' }"
+          :title="'Beat ' + wm.beat + ' — drag to move, double-click to remove'"
+          @mousedown.stop.prevent="startMarkerDrag(wi, $event)"
+          @dblclick.stop.prevent="removeSampleWarpMarker(ch.id, wi)">
+          <span class="smp-warp-marker-lbl">{{ wm.beat }}</span>
+        </div>
+      </template>
 
       <!-- Start handle -->
       <div class="smp-handle smp-handle-start"
@@ -351,9 +373,35 @@
         </div>
       </div>
 
-      <!-- COL 4: Modulation (pitch env + LFO) ───────────────────────────── -->
+      <!-- COL 4: Modulation (engine + pitch env + LFOs) ─────────────────── -->
       <div class="smp-col">
-        <div class="smp-col-header">PITCH ENV</div>
+        <div class="smp-col-header">ENGINE</div>
+        <div class="smp-row"
+          v-hint="'Playback engine — Classic plays the sample normally; Granular plays a cloud of overlapping grains for pads/textures (pitch and time independent).'">
+          <span class="smp-lbl">MODE</span>
+          <select class="smp-sel" :value="p.playMode ?? 'classic'" @change="p.playMode = $event.target.value">
+            <option value="classic">Classic</option>
+            <option value="granular">Granular</option>
+          </select>
+        </div>
+        <template v-if="(p.playMode ?? 'classic') === 'granular'">
+          <div class="smp-row"
+            v-hint="'Grain size — length of each grain. Smaller = grainier/buzzier, larger = smoother.'">
+            <span class="smp-lbl">GRAIN</span>
+            <input type="range" class="smp-slider" min="0.01" max="0.5" step="0.005"
+              :value="p.grainSize ?? 0.08" @input="p.grainSize = +$event.target.value" />
+            <span class="smp-val">{{ msLabel(p.grainSize ?? 0.08) }}</span>
+          </div>
+          <div class="smp-row"
+            v-hint="'Scan — position in the sample the grain cloud is drawn from (0 = start, 100% = end).'">
+            <span class="smp-lbl">SCAN</span>
+            <input type="range" class="smp-slider" min="0" max="1" step="0.01"
+              :value="p.grainScan ?? 0.5" @input="p.grainScan = +$event.target.value" />
+            <span class="smp-val">{{ Math.round((p.grainScan ?? 0.5) * 100) }}%</span>
+          </div>
+        </template>
+
+        <div class="smp-col-header smp-col-header-sub">PITCH ENV</div>
         <div class="smp-row"
           v-hint="'Pitch envelope amount — initial pitch offset in semitones (±24) that sweeps back to the note pitch.'">
           <span class="smp-lbl">AMT</span>
@@ -406,6 +454,40 @@
           v-hint="'LFO shape — the modulation waveform: Sine, Triangle, Square or Saw.'">
           <span class="smp-lbl">SHAPE</span>
           <select class="smp-sel" :value="p.lfoShape ?? 'sine'" @change="p.lfoShape = $event.target.value">
+            <option value="sine">Sine</option>
+            <option value="triangle">Tri</option>
+            <option value="square">Square</option>
+            <option value="sawtooth">Saw</option>
+          </select>
+        </div>
+
+        <div class="smp-col-header smp-col-header-sub">LFO 2</div>
+        <div class="smp-row"
+          v-hint="'LFO 2 destination — a second independent modulator (Pitch, Filter, Volume or Pan).'">
+          <span class="smp-lbl">DEST</span>
+          <select class="smp-sel" :value="p.lfo2Dest ?? 'off'" @change="p.lfo2Dest = $event.target.value">
+            <option value="off">Off</option>
+            <option value="pitch">Pitch</option>
+            <option value="filter">Filter</option>
+            <option value="volume">Volume</option>
+            <option value="pan">Pan</option>
+          </select>
+        </div>
+        <div class="smp-row" v-hint="'LFO 2 rate in Hz.'">
+          <span class="smp-lbl">RATE</span>
+          <input type="range" class="smp-slider" min="0" max="1" step="0.01"
+            :value="p.lfo2Rate ?? 0.2" @input="p.lfo2Rate = +$event.target.value" />
+          <span class="smp-val">{{ (0.05 + (p.lfo2Rate ?? 0.2) * 14).toFixed(1) }}Hz</span>
+        </div>
+        <div class="smp-row" v-hint="'LFO 2 depth — 0% = no modulation.'">
+          <span class="smp-lbl">DEPTH</span>
+          <input type="range" class="smp-slider" min="0" max="1" step="0.01"
+            :value="p.lfo2Depth ?? 0" @input="p.lfo2Depth = +$event.target.value" />
+          <span class="smp-val">{{ Math.round((p.lfo2Depth ?? 0) * 100) }}%</span>
+        </div>
+        <div class="smp-row" v-hint="'LFO 2 shape.'">
+          <span class="smp-lbl">SHAPE</span>
+          <select class="smp-sel" :value="p.lfo2Shape ?? 'triangle'" @change="p.lfo2Shape = $event.target.value">
             <option value="sine">Sine</option>
             <option value="triangle">Tri</option>
             <option value="square">Square</option>
@@ -465,6 +547,7 @@ const props = defineProps({ channel: Object })
 
 const { loadAudioFileForChannel, getAudioFileBuf, audioFileVersions, normalizeAudioFile, buildLoopXfade, snapToZero,
         setSamplerWarp, redetectSampleBpm, WARP_MODES, bpm,
+        addSampleWarpMarker, updateSampleWarpMarker, removeSampleWarpMarker, clearSampleWarpMarkers,
         getSamplerZones, addSamplerZone, removeSamplerZone, updateSamplerZone,
         auditionNoteOn, auditionNoteOff } = useStudio()
 
@@ -775,6 +858,28 @@ function stopDrag() {
   _dragParam = null
   window.removeEventListener('mousemove', onDragMove)
   window.removeEventListener('mouseup', onDragUp)
+}
+
+// ── Warp marker dragging ─────────────────────────────────────────────────────
+let _markerIdx = null
+function startMarkerDrag(idx, e) {
+  _markerIdx = idx
+  window.addEventListener('mousemove', onMarkerMove)
+  window.addEventListener('mouseup', onMarkerUp)
+}
+function onMarkerMove(e) {
+  if (_markerIdx === null || !ch.value) return
+  updateSampleWarpMarker(ch.value.id, _markerIdx, { pos: fracFromEvent(e) })
+}
+function onMarkerUp() {
+  _markerIdx = null
+  window.removeEventListener('mousemove', onMarkerMove)
+  window.removeEventListener('mouseup', onMarkerUp)
+}
+// Double-click the waveform (warp mode) to drop a new marker.
+function onWaveDblClick(e) {
+  if (!ch.value || !p.value.warpEnabled) return
+  addSampleWarpMarker(ch.value.id, fracFromEvent(e))
 }
 
 // ── Root note clamp ────────────────────────────────────────────────────────────
@@ -1275,6 +1380,20 @@ function doSnap(paramName) {
 
 /* Warp bar */
 .smp-warp-bar { flex-wrap: wrap; }
+.smp-warp-hint { font-size: 9px; color: rgba(255,255,255,0.3); font-style: italic; }
+
+/* Warp markers on the waveform */
+.smp-wave-warpedit { cursor: copy; }
+.smp-warp-marker {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  background: #f1c40f; transform: translateX(-50%); z-index: 5; cursor: ew-resize;
+  box-shadow: 0 0 4px rgba(241,196,15,0.6);
+}
+.smp-warp-marker::after { content: ''; position: absolute; top: 0; bottom: 0; left: -4px; right: -4px; }
+.smp-warp-marker-lbl {
+  position: absolute; top: 0; left: 3px; font-size: 8px; font-weight: 700;
+  color: #f1c40f; background: rgba(0,0,0,0.55); padding: 0 2px; border-radius: 2px; pointer-events: none;
+}
 .smp-sel {
   background: var(--smp-input);
   border: 1px solid var(--smp-border);

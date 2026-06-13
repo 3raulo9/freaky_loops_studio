@@ -238,3 +238,85 @@ export function tempoRatio(clipBpm, projectBpm) {
   if (!clipBpm || !projectBpm) return 1
   return clipBpm / projectBpm
 }
+
+// Copy a fractional region [startFrac, endFrac] of a buffer into a new buffer.
+function sliceBuffer(ctx, buf, startFrac, endFrac) {
+  const s = Math.max(0, Math.floor(startFrac * buf.length))
+  const e = Math.min(buf.length, Math.floor(endFrac * buf.length))
+  const len = Math.max(1, e - s)
+  const out = ctx.createBuffer(buf.numberOfChannels, len, buf.sampleRate)
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    out.getChannelData(c).set(buf.getChannelData(c).subarray(s, e))
+  }
+  return out
+}
+
+// ─── Piecewise time-stretch from warp markers ────────────────────────────────
+//   `segments` = [{ srcStartFrac, srcEndFrac, outDurSec }], each a region of the
+//   source buffer stretched to its own target duration. Regions are stretched
+//   independently (so individual transients can be pinned to the grid) and
+//   concatenated with a short equal-power crossfade to hide the seams.
+export function timeStretchSegments(ctx, buf, segments, mode = 'complex') {
+  if (!buf || !segments?.length) return buf
+  const sr  = buf.sampleRate
+  const nCh = buf.numberOfChannels
+  const xf  = Math.min(256, Math.floor(sr * 0.005))   // ~5 ms seam crossfade
+
+  const parts = []
+  for (const seg of segments) {
+    const sub    = sliceBuffer(ctx, buf, seg.srcStartFrac, seg.srcEndFrac)
+    const subDur = sub.duration
+    const ratio  = seg.outDurSec / Math.max(1e-4, subDur)
+    parts.push(timeStretch(ctx, sub, ratio, mode))
+  }
+
+  // Total length with crossfade overlaps removed.
+  let total = 0
+  parts.forEach((p, i) => { total += p.length - (i > 0 ? xf : 0) })
+  total = Math.max(1, total)
+
+  const out = ctx.createBuffer(nCh, total, sr)
+  for (let c = 0; c < nCh; c++) {
+    const dst = out.getChannelData(c)
+    let pos = 0
+    parts.forEach((p, i) => {
+      const src = p.getChannelData(Math.min(c, p.numberOfChannels - 1))
+      const start = i > 0 ? pos - xf : pos
+      for (let j = 0; j < src.length; j++) {
+        const d = start + j
+        if (d < 0 || d >= total) continue
+        if (i > 0 && j < xf) {
+          const t = j / xf
+          dst[d] = dst[d] * Math.cos(t * Math.PI / 2) + src[j] * Math.sin(t * Math.PI / 2)
+        } else {
+          dst[d] = src[j]
+        }
+      }
+      pos = start + src.length
+    })
+  }
+  return out
+}
+
+// Build warp segments from markers ([{ pos, beat }], pos = 0..1 of the source).
+// Material before the first / after the last marker plays unstretched.
+export function buildWarpSegments(markers, projectBpm, bufDuration) {
+  if (!markers || markers.length < 1 || !projectBpm || !bufDuration) return null
+  const m = [...markers].filter(x => x && isFinite(x.pos) && isFinite(x.beat))
+                        .sort((a, b) => a.pos - b.pos)
+  if (m.length < 1) return null
+  const secPerBeat = 60 / projectBpm
+  const segs = []
+  // Leading unstretched region.
+  if (m[0].pos > 0.0001) segs.push({ srcStartFrac: 0, srcEndFrac: m[0].pos, outDurSec: m[0].pos * bufDuration })
+  // Stretched regions between consecutive markers.
+  for (let i = 0; i < m.length - 1; i++) {
+    const beats = m[i + 1].beat - m[i].beat
+    if (m[i + 1].pos <= m[i].pos || beats <= 0) continue
+    segs.push({ srcStartFrac: m[i].pos, srcEndFrac: m[i + 1].pos, outDurSec: beats * secPerBeat })
+  }
+  // Trailing unstretched region.
+  const last = m[m.length - 1]
+  if (last.pos < 0.9999) segs.push({ srcStartFrac: last.pos, srcEndFrac: 1, outDurSec: (1 - last.pos) * bufDuration })
+  return segs.length ? segs : null
+}
