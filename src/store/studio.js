@@ -4909,6 +4909,10 @@ export function useStudio() {
       panicAll()
       return
     }
+    // Ctrl/Cmd combos are editor shortcuts (copy/paste/select-all/undo…), not
+    // QWERTY musical keys — let them through to component handlers without
+    // sounding a note. (Panic above is the one Ctrl shortcut we handle here.)
+    if (e.ctrlKey || e.metaKey) return
     if (e.repeat) return
     // Keep the instrument playable while a slider is focused: let the musical keys
     // through when the focused element is a range slider (it ignores letter keys

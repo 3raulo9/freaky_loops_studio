@@ -47,7 +47,10 @@
         </div>
       </div>
 
-      <span class="pr-title-info">{{ currentNotes.length }} notes{{ selectedNotes.size > 0 ? ' · ' + selectedNotes.size + ' sel' : '' }}</span>
+      <span class="pr-title-info" :class="{ 'pr-flash': copyHint }">
+        <template v-if="copyHint">{{ copyHint }}</template>
+        <template v-else>{{ currentNotes.length }} notes{{ selectedNotes.size > 0 ? ' · ' + selectedNotes.size + ' sel' : '' }}</template>
+      </span>
     </div>
 
     <!-- ── Toolbar ─────────────────────────────────────────────────────── -->
@@ -465,7 +468,7 @@ const props = defineProps({ ch: { type: Object, required: true } })
 
 const {
   totalSteps, displayStep, isPlaying, channels, selectedChannelId, currentPatternId,
-  getPatData, playNote, stopNote, snapScale, pushUndo,
+  getPatData, playNote, stopNote, snapScale, pushUndo, undoAction, redoAction,
   getPatternLengthTicks, setPatternLengthOverride, clearPatternLengthOverride,
   loopRegion, setLoopRegion, clearLoopRegion,
   autoScroll,
@@ -532,7 +535,15 @@ const notePropsDialog = ref(null)      // { idx, orig, edit } or null
 const ctxMenu     = ref(null)          // { x, y, tick } or null
 const timeMarkers = ref([])            // [{ id, tick, label }]
 const clipboardNotes = ref([])
+const copyHint    = ref('')            // transient "Copied N notes" confirmation
 const sliceLine   = ref(null)          // { x } while slice drag active
+
+let copyHintTimer = null
+function flashCopyHint(msg) {
+  copyHint.value = msg
+  clearTimeout(copyHintTimer)
+  copyHintTimer = setTimeout(() => { copyHint.value = '' }, 1200)
+}
 
 // Target channel (can differ from props.ch when user switches via selector)
 const targetChId  = ref(props.ch.id)
@@ -656,6 +667,9 @@ function onStretchHandleDown(e) {
 }
 
 // ── Copy / paste ───────────────────────────────────────────────────────────────
+// Copy stores notes normalised to start at tick 0 (relative to the earliest
+// selected note) so paste can re-anchor them anywhere. With nothing selected,
+// the whole pattern is copied.
 function copySelected() {
   const notes = currentNotes.value
   const targets = selectedNotes.value.size > 0
@@ -664,18 +678,30 @@ function copySelected() {
   if (!targets.length) return
   const minTick = Math.min(...targets.map(n => n.startTick))
   clipboardNotes.value = targets.map(n => ({ ...n, startTick: n.startTick - minTick }))
+  flashCopyHint(`Copied ${targets.length} note${targets.length === 1 ? '' : 's'}`)
+}
+
+// Where pasted notes land: at the playhead while the transport is rolling,
+// otherwise the left edge of the current viewport — always somewhere visible,
+// snapped to the grid (displayStep is -1 when stopped, hence the fallback).
+function pasteAnchorTick() {
+  if (isPlaying.value && displayStep.value >= 0)
+    return snapTick(displayStep.value * TICKS_PER_STEP)
+  const ppt = pxPerTick.value
+  return ppt > 0 ? snapTick(scrollLeftVal.value / ppt) : 0
 }
 
 function pasteNotes() {
   if (!clipboardNotes.value.length) return
   pushUndo()
   const notes = getPatData(targetChId.value).pianoNotes
-  const insertAt = patLengthTicks.value
+  const insertAt = pasteAnchorTick()
   const newSel = new Set()
   clipboardNotes.value.forEach(n => {
     notes.push({ ...n, startTick: insertAt + n.startTick })
     newSel.add(notes.length - 1)
   })
+  // Pasted notes arrive pre-selected so they can be dragged straight away.
   selectedNotes.value = newSel
 }
 
@@ -1556,6 +1582,12 @@ function onKeyDown(e) {
     e.preventDefault()
     selectedNotes.value = new Set(currentNotes.value.map((_, i) => i)); return
   }
+  else if (e.ctrlKey && e.code === 'KeyZ') {
+    e.preventDefault()
+    selectedNotes.value = new Set()   // indices are about to change under us
+    e.shiftKey ? redoAction() : undoAction(); return
+  }
+  else if (e.ctrlKey && e.code === 'KeyY') { e.preventDefault(); selectedNotes.value = new Set(); redoAction(); return }
   else if (e.ctrlKey && e.code === 'KeyC') { e.preventDefault(); copySelected(); return }
   else if (e.ctrlKey && e.code === 'KeyV') { e.preventDefault(); pasteNotes(); return }
   else if (e.ctrlKey && e.code === 'KeyB') { e.preventDefault(); duplicateSelected(); return }
@@ -1705,6 +1737,7 @@ onUnmounted(() => {
   window.removeEventListener('mousemove', onWindowMouseMove)
   window.removeEventListener('mouseup',   onWindowMouseUp)
   window.removeEventListener('keydown',   onKeyDown)
+  clearTimeout(copyHintTimer)
 })
 </script>
 
@@ -1729,6 +1762,9 @@ onUnmounted(() => {
 }
 .pr-title-info {
   margin-left: auto; font-size: 8px; color: #25254a; letter-spacing: 0;
+}
+.pr-title-info.pr-flash {
+  color: var(--accent, #45c076); font-weight: bold;
 }
 
 /* Channel selector */
