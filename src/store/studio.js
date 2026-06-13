@@ -12,6 +12,7 @@ import { GM_INSTRUMENTS, GM_CATEGORIES } from '../midi/gmDictionary.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
 import { createEffect, makeEffect, EFFECT_DEFS } from '../audio/effects.js'
+import { detectBpm, timeStretch, tempoRatio, WARP_MODES } from '../audio/warp.js'
 import {
   playFMBell, playFMRhodes, playFMBass, playFMOrgan, playFMBrass,
   playFMMarimba, playFMClav, playFMPad, playFMPluck, playFMFlute, playFMMetal,
@@ -488,6 +489,7 @@ export const SCALE_DEFS = {
 }
 
 export const NUM_MX_INSERTS = 8
+export const NUM_MX_RETURNS = 2
 
 export function midiToLabel(m) { return NOTE_NAMES[m % 12] + (Math.floor(m / 12) - 1) }
 export function isBlackKey(m)  { return [1, 3, 6, 8, 10].includes(m % 12) }
@@ -522,6 +524,10 @@ const forgeBufsB_rev    = new Map()  // channelId -> reversed AudioBuffer (FORGE
 const reversedAudioFileBufs = new Map()  // channelId -> reversed AudioBuffer (sampler reverse mode)
 const pingpongAudioFileBufs = new Map()  // channelId -> doubled [fwd+rev] AudioBuffer (ping-pong loop)
 const xfadeLoopBufs         = new Map()  // channelId -> crossfaded copy for seamless FWD loop
+const warpedClipBufs        = new Map()  // clipId    -> { sig, buf } cached time-stretched playlist clip
+const warpedSampleBufs      = new Map()  // channelId -> { sig, buf } cached time-stretched sampler buffer
+const samplerZoneBufs       = new Map()  // channelId+':'+zoneId -> AudioBuffer (multisample zones)
+const _samplerRR            = new Map()  // channelId -> round-robin counter
 
 // ─── Channel factory ───────────────────────────────────────────────────────────
 let _cid = 0
@@ -1500,17 +1506,34 @@ export function useStudio() {
 
   // ── Mixer tracks (0 = master, 1-8 = inserts) ─────────────────────────────
   const mixerTracks = reactive([
-    { id: 'mx0', name: 'MASTER', color: '#e74c3c', volume: 1.0, pan: 0, muted: false, _soloed: false, eq: { low: 0, mid: 0, high: 0 }, fxSlots: [], phaseInvert: false },
+    { id: 'mx0', name: 'MASTER', kind: 'master', color: '#e74c3c', volume: 1.0, pan: 0, muted: false, _soloed: false, eq: { low: 0, mid: 0, high: 0 }, fxSlots: [], phaseInvert: false, sends: {}, sidechain: { source: null, amount: 0, attack: 0.01, release: 0.18 } },
     ...Array.from({ length: NUM_MX_INSERTS }, (_, i) => ({
       id: 'mx' + (i + 1),
       name: 'MIX ' + (i + 1),
+      kind: 'insert',
       color: COLORS[i % COLORS.length],
       volume: 1.0, pan: 0, muted: false, _soloed: false,
       eq: { low: 0, mid: 0, high: 0 },
       fxSlots: [],
       phaseInvert: false,
-    }))
+      sends: {},                       // returnTrackId → amount (0..1)
+      sidechain: { source: null, amount: 0, attack: 0.01, release: 0.18 },
+    })),
+    // ── Return buses (receive sends, output to master) ──
+    ...Array.from({ length: NUM_MX_RETURNS }, (_, i) => ({
+      id: 'rtn' + (i + 1),
+      name: 'RETURN ' + String.fromCharCode(65 + i),   // A, B, …
+      kind: 'return',
+      color: i === 0 ? '#1abc9c' : '#9b59b6',
+      volume: 1.0, pan: 0, muted: false, _soloed: false,
+      eq: { low: 0, mid: 0, high: 0 },
+      fxSlots: [ makeEffect('reverb') ],   // a default send-effect so returns are useful out of the box
+      phaseInvert: false,
+      sends: {},
+      sidechain: { source: null, amount: 0, attack: 0.01, release: 0.18 },
+    })),
   ])
+  const returnTrackIdxStart = 1 + NUM_MX_INSERTS   // first return's index in mixerTracks
 
   // ── Scale snap state ──────────────────────────────────────────────────────
   const snapScale = reactive({ enabled: false, tonic: 0, scale: 'major' })
@@ -1770,11 +1793,19 @@ export function useStudio() {
   // Play function for an audio-file sampler channel — full professional signal chain.
   function makeAudioFileFn(channelId) {
     return (ctx, when, params, dest) => {
-      const fwdBuf = audioFileBufs.get(channelId)
+      // ── Multisample zone selection ───────────────────────────────────────
+      //   When the channel has mapped zones, pick the zone(s) whose key + velocity
+      //   ranges contain this note, then round-robin between equal matches.
+      const zoneSel = _selectSamplerZone(channelId, params)
+
+      // Warp-aware forward buffer: when warp is on, this is a tempo-stretched
+      // copy (pitch from the note still applies on top via playbackRate).
+      const fwdBuf = zoneSel?.buf ?? getWarpedSampleBuf(channelId, params) ?? audioFileBufs.get(channelId)
       if (!fwdBuf) return
 
-      const loopMode = params.loopMode ?? 'off'
-      const reverse  = params.reverse  ?? false
+      // Zones always play one-shot forward (per-zone loop/reverse not modelled yet).
+      const loopMode = zoneSel ? 'off'  : (params.loopMode ?? 'off')
+      const reverse  = zoneSel ? false  : (params.reverse  ?? false)
 
       // ── Buffer selection ─────────────────────────────────────────────────
       let buf
@@ -1789,14 +1820,14 @@ export function useStudio() {
       }
 
       // ── Pitch / tuning ───────────────────────────────────────────────────
-      const rootNote  = params.rootNote ?? 60
+      const rootNote  = zoneSel ? (zoneSel.zone.rootNote ?? 60) : (params.rootNote ?? 60)
       const keyTrack  = params.keyTrack ?? 1
       const fineTune  = params.fineTune ?? 0
       const deltaSemi = (params.pitch - rootNote) * keyTrack + fineTune / 100
 
-      // ── Start / end offsets ──────────────────────────────────────────────
-      const fwdStart = Math.max(0, Math.min(1, params.startOffset ?? 0))
-      const fwdEnd   = Math.max(fwdStart + 0.001, Math.min(1, params.endOffset ?? 1))
+      // ── Start / end offsets (zones use the whole buffer) ─────────────────
+      const fwdStart = zoneSel ? 0 : Math.max(0, Math.min(1, params.startOffset ?? 0))
+      const fwdEnd   = zoneSel ? 1 : Math.max(fwdStart + 0.001, Math.min(1, params.endOffset ?? 1))
 
       let offset, playDur
       if (loopMode === 'pingpong') {
@@ -1885,16 +1916,79 @@ export function useStudio() {
         src.loopEnd   = buf.duration
       }
 
-      // ── Connect: src → [filter →] ampGain → dest ─────────────────────────
+      // ── Pitch envelope (detune in cents → 0) ─────────────────────────────
+      const pAmt = params.pEnvAmount ?? 0     // semitones at the peak
+      if (Math.abs(pAmt) > 0.001) {
+        const pAtk = Math.max(0.001, params.pEnvAttack ?? 0.002)
+        const pDec = Math.max(0.001, params.pEnvDecay  ?? 0.15)
+        const cents = pAmt * 100
+        src.detune.setValueAtTime(0, when)
+        src.detune.linearRampToValueAtTime(cents, t0 + pAtk)
+        src.detune.linearRampToValueAtTime(0,     t0 + pAtk + pDec)
+      }
+
+      // ── Assignable LFO (pitch | filter | volume | pan) ───────────────────
+      let lfo = null, lfoGain = null, panner = null
+      const lfoDest = params.lfoDest ?? 'off'
+      const lfoDepth = params.lfoDepth ?? 0
+      if (lfoDest !== 'off' && lfoDepth > 0.0001) {
+        lfo = ctx.createOscillator()
+        lfo.type = params.lfoShape ?? 'sine'
+        lfo.frequency.value = 0.05 + (params.lfoRate ?? 0.3) * 14   // ~0.05–14 Hz
+        lfoGain = ctx.createGain()
+        lfo.connect(lfoGain)
+        if (lfoDest === 'pitch') {
+          lfoGain.gain.value = lfoDepth * 1200          // up to ±1 octave
+          lfoGain.connect(src.detune)
+        } else if (lfoDest === 'filter' && filterNode) {
+          lfoGain.gain.value = lfoDepth * 4000           // ±Hz
+          lfoGain.connect(filterNode.frequency)
+        } else if (lfoDest === 'volume') {
+          lfoGain.gain.value = lfoDepth * 0.5
+          lfoGain.connect(ampGain.gain)                  // tremolo around the env
+        } else if (lfoDest === 'pan') {
+          panner = ctx.createStereoPanner()
+          lfoGain.gain.value = Math.min(1, lfoDepth)
+          lfoGain.connect(panner.pan)
+        }
+        lfo.start(when)
+      }
+
+      // ── Connect: src → [filter →] ampGain → [panner →] dest ──────────────
       if (filterNode) {
         src.connect(filterNode); filterNode.connect(ampGain)
       } else {
         src.connect(ampGain)
       }
-      ampGain.connect(dest)
+      if (panner) { ampGain.connect(panner); panner.connect(dest) }
+      else        { ampGain.connect(dest) }
+
+      // Stop the LFO when a one-shot voice ends so it can be GC'd.
+      if (lfo) src.onended = () => { try { lfo.stop() } catch (_) {} }
 
       isLooping ? src.start(when, offset) : src.start(when, offset, playDur)
     }
+  }
+
+  // Pick a multisample zone for a note, with round-robin between equal matches.
+  // Returns { zone, buf } or null when the channel has no mapped zones / no match.
+  function _selectSamplerZone(channelId, params) {
+    const ch = channels.find(c => c.id === channelId)
+    const zones = ch?.params?.zones
+    if (!zones || !zones.length) return null
+    const note   = Math.round(params.pitch ?? 60)
+    const vel127 = Math.round((params.velocity ?? 0.8) * 127)
+    const matches = zones.filter(z =>
+      note   >= (z.loKey ?? 0)   && note   <= (z.hiKey ?? 127) &&
+      vel127 >= (z.loVel ?? 0)   && vel127 <= (z.hiVel ?? 127))
+    if (!matches.length) return null
+    // Round-robin across the matching zones (so layered samples alternate).
+    const rr  = _samplerRR.get(channelId) ?? 0
+    const sel = matches[rr % matches.length]
+    _samplerRR.set(channelId, rr + 1)
+    const buf = samplerZoneBufs.get(channelId + ':' + sel.id)
+    if (!buf) return null
+    return { zone: sel, buf }
   }
 
   // Create a new Channel Rack sampler channel from a real audio file (File object).
@@ -1925,11 +2019,16 @@ export function useStudio() {
         fEnvAmount: 0, fEnvAttack: 0.01, fEnvDecay: 0.2, fEnvSustain: 0,
         reverse: false, loopMode: 'off', loopStart: 0, loopEnd: 1, loopXfade: 0,
         velSens: 1, velocity: 0.8,
+        warpEnabled: false, sampleBpm: (() => { try { return detectBpm(buf) } catch (_) { return null } })(), warpMode: 'complex',
+        pEnvAmount: 0, pEnvAttack: 0.002, pEnvDecay: 0.15,
+        lfoDest: 'off', lfoRate: 0.3, lfoDepth: 0, lfoShape: 'sine',
+        zones: [],
       },
       knobs: [{ key: 'pitch', label: 'NOTE', min: 0, max: 127, decimals: 0 }],
       fn: () => {},
     })
     audioFileBufs.set(ch.id, buf)
+    warpedSampleBufs.delete(ch.id)
     _buildSamplerDerivedBufs(ch.id, buf)
     ch.fn = makeAudioFileFn(ch.id)
     // Signal reactivity update
@@ -1956,6 +2055,7 @@ export function useStudio() {
       return
     }
     audioFileBufs.set(channelId, buf)
+    warpedSampleBufs.delete(channelId)
     _buildSamplerDerivedBufs(channelId, buf)
     const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
     ch.name = base.length > 14 ? base.slice(0, 14) : base
@@ -1976,9 +2076,16 @@ export function useStudio() {
         fEnvAmount: 0, fEnvAttack: 0.01, fEnvDecay: 0.2, fEnvSustain: 0,
         reverse: false, loopMode: 'off', loopStart: 0, loopEnd: 1, loopXfade: 0,
         velSens: 1, velocity: 0.8,
+        warpEnabled: false, sampleBpm: null, warpMode: 'complex',
+        pEnvAmount: 0, pEnvAttack: 0.002, pEnvDecay: 0.15,
+        lfoDest: 'off', lfoRate: 0.3, lfoDepth: 0, lfoShape: 'sine',
+        zones: [],
       }
       ch.knobs  = [{ key: 'pitch', label: 'NOTE', min: 0, max: 127, decimals: 0 }]
     }
+    // Always (re)detect tempo for the freshly loaded buffer.
+    try { ch.params.sampleBpm = detectBpm(buf) } catch (_) {}
+    if (ch.params.warpMode == null) ch.params.warpMode = 'complex'
     ch.fn = makeAudioFileFn(channelId)
     audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
     markDirty()
@@ -1986,6 +2093,58 @@ export function useStudio() {
 
   function getAudioFileBuf(channelId) {
     return audioFileBufs.get(channelId) ?? null
+  }
+
+  // ── Multisample zones (velocity layers / key zones / round-robin) ────────────
+  let _zid = 0
+  function getSamplerZones(channelId) {
+    return channels.find(c => c.id === channelId)?.params?.zones ?? []
+  }
+
+  // Add a zone from an audio file. Defaults span the whole keyboard so a single
+  // dropped file is immediately playable; the user narrows ranges afterward.
+  async function addSamplerZone(channelId, file, opts = {}) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch?.params) return null
+    initAudio()
+    let buf
+    try {
+      const ab = await file.arrayBuffer()
+      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+    } catch (e) { console.error('[Sampler] zone decode failed:', e); return null }
+    const id = 'z' + (++_zid) + Date.now().toString(36)
+    samplerZoneBufs.set(channelId + ':' + id, buf)
+    if (!ch.params.zones) ch.params.zones = []
+    ch.params.zones.push({
+      id,
+      name:    file.name.replace(/\.[a-z0-9]+$/i, ''),
+      loKey:   opts.loKey   ?? 0,
+      hiKey:   opts.hiKey   ?? 127,
+      loVel:   opts.loVel   ?? 0,
+      hiVel:   opts.hiVel   ?? 127,
+      rootNote: opts.rootNote ?? 60,
+    })
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+    markDirty()
+    return id
+  }
+
+  function removeSamplerZone(channelId, zoneId) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch?.params?.zones) return
+    const i = ch.params.zones.findIndex(z => z.id === zoneId)
+    if (i < 0) return
+    ch.params.zones.splice(i, 1)
+    samplerZoneBufs.delete(channelId + ':' + zoneId)
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+    markDirty()
+  }
+
+  function updateSamplerZone(channelId, zoneId, patch) {
+    const z = channels.find(c => c.id === channelId)?.params?.zones?.find(z => z.id === zoneId)
+    if (!z) return
+    Object.assign(z, patch)
+    markDirty()
   }
 
   // Normalize audio file to peak 0 dBFS — modifies in place and rebuilds derived bufs.
@@ -2086,6 +2245,7 @@ export function useStudio() {
     } catch (e) { console.error('[AudioClip] Failed to decode:', e); return }
 
     const secPerCell = getSecPerCell()
+    const detectedBpm = (() => { try { return detectBpm(buf) } catch (_) { return null } })()
     const widthCells = Math.max(1, Math.ceil(buf.duration / secPerCell))
     const id = 'c' + (++_clipId)
     const track = playlistTracks.find(t => t.id === trackId)
@@ -2102,6 +2262,11 @@ export function useStudio() {
       endOffset:   1,
       muted:       false,
       audioFileMissing: false,
+      // ── Warp (Ableton-style tempo follow) ──
+      warpEnabled: false,
+      clipBpm:     detectedBpm,    // null when undetectable
+      warpMode:    'complex',
+      mixerTrack:  0,              // 0 = master; route audio through a mixer insert
     })
     audioClipBufs.set(id, buf)
     audioClipVersions[id] = 1
@@ -2119,8 +2284,11 @@ export function useStudio() {
     } catch (e) { console.error('[AudioClip] Failed to decode:', e); return }
 
     audioClipBufs.set(clipId, buf)
+    warpedClipBufs.delete(clipId)
     clip.sampleName = file.name
     clip.audioFileMissing = false
+    if (clip.clipBpm == null) { try { clip.clipBpm = detectBpm(buf) } catch (_) {} }
+    if (clip.warpMode == null) clip.warpMode = 'complex'
     const secPerCell = getSecPerCell()
     clip.width = Math.max(1, Math.ceil(buf.duration / secPerCell))
     audioClipVersions[clipId] = (audioClipVersions[clipId] ?? 0) + 1
@@ -2129,6 +2297,231 @@ export function useStudio() {
 
   function getAudioClipBuf(clipId) {
     return audioClipBufs.get(clipId) ?? null
+  }
+
+  // Create a playlist audio clip directly from an in-memory AudioBuffer (used by
+  // the audio recorder and by resample/consolidate features).
+  function addAudioClipFromBuffer(trackId, cell, buf, name = 'RECORDING') {
+    if (!buf) return null
+    const secPerCell = getSecPerCell()
+    const widthCells = Math.max(1, Math.ceil(buf.duration / secPerCell))
+    const id = 'c' + (++_clipId)
+    const track = playlistTracks.find(t => t.id === trackId)
+    const color = track?.color ?? '#e74c3c'
+    playlistClips.push({
+      id, trackId, cell, type: 'audio', width: widthCells,
+      sampleName: name, color, volume: 1, startOffset: 0, endOffset: 1,
+      muted: false, audioFileMissing: false,
+      warpEnabled: false, clipBpm: bpm.value, warpMode: 'complex', mixerTrack: 0,
+    })
+    audioClipBufs.set(id, buf)
+    audioClipVersions[id] = 1
+    markDirty()
+    return id
+  }
+
+  // Resolve the buffer a clip should actually play: the raw buffer, or a cached
+  // time-stretched copy when warp is enabled and a clip BPM is known. Re-renders
+  // only when the stretch signature (clip BPM, project BPM, mode) changes.
+  function getWarpedClipBuf(clip) {
+    const raw = audioClipBufs.get(clip.id)
+    if (!raw) return null
+    if (!clip.warpEnabled || !clip.clipBpm) return raw
+    const mode  = clip.warpMode ?? 'complex'
+    const ratio = tempoRatio(clip.clipBpm, bpm.value)
+    if (mode === 'repitch' || Math.abs(ratio - 1) < 0.002) return raw
+    const sig = clip.clipBpm + ':' + bpm.value + ':' + mode
+    const cached = warpedClipBufs.get(clip.id)
+    if (cached && cached.sig === sig) return cached.buf
+    let buf
+    try { buf = timeStretch(audioCtx, raw, ratio, mode) } catch (_) { buf = raw }
+    warpedClipBufs.set(clip.id, { sig, buf })
+    return buf
+  }
+
+  // Playback rate for a warped clip: 1.0 for true time-stretch modes, or the
+  // tempo ratio for repitch (where pitch is allowed to follow tempo).
+  function warpClipRate(clip) {
+    if (!clip.warpEnabled || !clip.clipBpm) return 1
+    if ((clip.warpMode ?? 'complex') === 'repitch') return bpm.value / clip.clipBpm
+    return 1
+  }
+
+  // Toggle / set warp on a clip and invalidate its cached render.
+  function setClipWarp(clipId, patch) {
+    const clip = playlistClips.find(c => c.id === clipId)
+    if (!clip) return
+    Object.assign(clip, patch)
+    warpedClipBufs.delete(clipId)
+    markDirty()
+  }
+
+  // Re-detect a clip's tempo from its audio (e.g. after manual reset).
+  function redetectClipBpm(clipId) {
+    const clip = playlistClips.find(c => c.id === clipId)
+    const raw  = clip && audioClipBufs.get(clipId)
+    if (!raw) return
+    try { clip.clipBpm = detectBpm(raw) } catch (_) {}
+    warpedClipBufs.delete(clipId)
+    markDirty()
+  }
+
+  // Warp-aware forward buffer for a sampler channel. Returns a cached
+  // time-stretched copy when warp is enabled and a sample BPM is known; null
+  // otherwise (caller falls back to the raw buffer). 'repitch' is a no-op here
+  // since note pitch already drives playbackRate.
+  function getWarpedSampleBuf(channelId, params) {
+    if (!params?.warpEnabled || !params.sampleBpm || !audioCtx) return null
+    const raw = audioFileBufs.get(channelId)
+    if (!raw) return null
+    const mode  = params.warpMode ?? 'complex'
+    if (mode === 'repitch') return null
+    const ratio = tempoRatio(params.sampleBpm, bpm.value)
+    if (Math.abs(ratio - 1) < 0.002) return null
+    const sig = params.sampleBpm + ':' + bpm.value + ':' + mode
+    const cached = warpedSampleBufs.get(channelId)
+    if (cached && cached.sig === sig) return cached.buf
+    let buf
+    try { buf = timeStretch(audioCtx, raw, ratio, mode) } catch (_) { return null }
+    warpedSampleBufs.set(channelId, { sig, buf })
+    return buf
+  }
+
+  // Toggle/set sampler warp params and invalidate the cached stretch.
+  function setSamplerWarp(channelId, patch) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch?.params) return
+    Object.assign(ch.params, patch)
+    warpedSampleBufs.delete(channelId)
+    markDirty()
+  }
+
+  // Re-detect a sampler's source tempo from its loaded audio.
+  function redetectSampleBpm(channelId) {
+    const raw = audioFileBufs.get(channelId)
+    const ch  = channels.find(c => c.id === channelId)
+    if (!raw || !ch?.params) return
+    try { ch.params.sampleBpm = detectBpm(raw) } catch (_) {}
+    warpedSampleBufs.delete(channelId)
+    markDirty()
+  }
+
+  // ── Audio input recording (getUserMedia → playlist clip / sampler) ───────────
+  const audioInputReady   = ref(false)   // mic permission granted + graph built
+  const inputMonitor      = ref(false)   // pass mic to the speakers (off by default)
+  const isRecordingAudio  = ref(false)
+  const inputLevel        = ref(0)        // 0..1 live input meter
+  let _micStream = null, _micSource = null, _monitorGain = null, _inputAnalyser = null
+  let _mediaRecorder = null, _recChunks = [], _recTarget = null, _recLevelRAF = null
+
+  async function enableAudioInput() {
+    if (audioInputReady.value) return true
+    if (!navigator.mediaDevices?.getUserMedia) { console.warn('[Rec] getUserMedia unavailable'); return false }
+    initAudio()
+    try {
+      _micStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      })
+    } catch (e) { console.error('[Rec] mic access denied:', e); return false }
+    _micSource   = audioCtx.createMediaStreamSource(_micStream)
+    _monitorGain = audioCtx.createGain()
+    _monitorGain.gain.value = inputMonitor.value ? 1 : 0
+    _inputAnalyser = audioCtx.createAnalyser(); _inputAnalyser.fftSize = 512
+    _micSource.connect(_inputAnalyser)
+    _micSource.connect(_monitorGain)
+    _monitorGain.connect(audioCtx.destination)
+    audioInputReady.value = true
+    _pollInputLevel()
+    return true
+  }
+
+  function _pollInputLevel() {
+    if (!_inputAnalyser) return
+    const buf = new Uint8Array(_inputAnalyser.fftSize)
+    const tick = () => {
+      _inputAnalyser.getByteTimeDomainData(buf)
+      let peak = 0
+      for (let i = 0; i < buf.length; i++) { const v = Math.abs(buf[i] - 128) / 128; if (v > peak) peak = v }
+      inputLevel.value = peak
+      _recLevelRAF = requestAnimationFrame(tick)
+    }
+    tick()
+  }
+
+  function setInputMonitor(on) {
+    inputMonitor.value = !!on
+    if (_monitorGain) _monitorGain.gain.value = on ? 1 : 0
+  }
+
+  // Begin recording. `target` = { trackId, cell } for a playlist clip, or
+  // { channelId } to load the result into an existing sampler channel.
+  async function startAudioRecording(target = {}) {
+    if (isRecordingAudio.value) return false
+    const ok = await enableAudioInput()
+    if (!ok) return false
+    _recChunks = []
+    _recTarget = target
+    let mime = ''
+    for (const m of ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']) {
+      if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m)) { mime = m; break }
+    }
+    try {
+      _mediaRecorder = mime ? new MediaRecorder(_micStream, { mimeType: mime }) : new MediaRecorder(_micStream)
+    } catch (e) { console.error('[Rec] MediaRecorder init failed:', e); return false }
+    _mediaRecorder.ondataavailable = e => { if (e.data?.size) _recChunks.push(e.data) }
+    _mediaRecorder.onstop = _finalizeRecording
+    _mediaRecorder.start()
+    isRecordingAudio.value = true
+    return true
+  }
+
+  function stopAudioRecording() {
+    if (!isRecordingAudio.value || !_mediaRecorder) return
+    try { _mediaRecorder.stop() } catch (_) {}
+    isRecordingAudio.value = false
+  }
+
+  async function _finalizeRecording() {
+    const chunks = _recChunks; _recChunks = []
+    const target = _recTarget || {}
+    _mediaRecorder = null
+    if (!chunks.length) return
+    const blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' })
+    let buf
+    try {
+      const ab = await blob.arrayBuffer()
+      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+    } catch (e) { console.error('[Rec] decode failed:', e); return }
+
+    if (target.channelId) {
+      // Load straight into an existing sampler channel.
+      audioFileBufs.set(target.channelId, buf)
+      warpedSampleBufs.delete(target.channelId)
+      _buildSamplerDerivedBufs(target.channelId, buf)
+      const ch = channels.find(c => c.id === target.channelId)
+      if (ch) {
+        ch.sampleName = 'RECORDING'; ch.audioFileMissing = false
+        if (ch.params) { try { ch.params.sampleBpm = detectBpm(buf) } catch (_) {} }
+        ch.fn = makeAudioFileFn(target.channelId)
+      }
+      audioFileVersions[target.channelId] = (audioFileVersions[target.channelId] ?? 0) + 1
+    } else {
+      const trackId = target.trackId ?? playlistTracks[0]?.id
+      const cell    = target.cell ?? 0
+      if (trackId != null) addAudioClipFromBuffer(trackId, cell, buf, 'RECORDING')
+    }
+    markDirty()
+  }
+
+  function disableAudioInput() {
+    stopAudioRecording()
+    if (_recLevelRAF) { cancelAnimationFrame(_recLevelRAF); _recLevelRAF = null }
+    if (_micStream) { _micStream.getTracks().forEach(t => t.stop()); _micStream = null }
+    try { _micSource?.disconnect() } catch (_) {}
+    try { _monitorGain?.disconnect() } catch (_) {}
+    _micSource = _monitorGain = _inputAnalyser = null
+    audioInputReady.value = false
+    inputLevel.value = 0
   }
 
   // ── CHOP slicer ────────────────────────────────────────────────────────────────
@@ -2224,6 +2617,43 @@ export function useStudio() {
   }
 
   function getChopBuf(channelId) { return chopBufs.get(channelId) ?? null }
+
+  // ── Slice → MIDI / Drum Rack ─────────────────────────────────────────────────
+  //   Turn a CHOP/FORGE channel's slices into a playable sequence: a new pattern
+  //   that triggers each slice in order, laid out chromatically from the root
+  //   note. Both slicers already map note → slice, so the channel itself is the
+  //   "drum rack"; this generates the MIDI clip that plays it.
+  function sliceToMidi(channelId, { spacingSteps = 1 } = {}) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch || (ch.type !== 'chop' && ch.type !== 'forge')) return null
+    const slices = ch.params?.slices ?? []
+    const n = slices.length
+    if (!n) return null
+    const root = ch.params.rootNote ?? 60
+
+    const id    = 'p' + (++_pid + 1)
+    const color = ch.color ?? COLORS[patterns.length % COLORS.length]
+    patterns.push({ id, name: ((ch.name || 'SLICE') + ' SEQ').slice(0, 16), color })
+    patternData[id] = {}
+
+    const d = getPatData(channelId, id)
+    // Piano-roll representation: one ascending note per slice.
+    d.pianoNotes = Array.from({ length: n }, (_, i) => ({
+      startTick:    i * spacingSteps * TICKS_PER_STEP,
+      durationTicks: TICKS_PER_STEP,
+      pitch:        root + i,
+      velocity:     0.8,
+    }))
+    // Step representation (stepPitch == slice index → slice N on step N).
+    const cap = 32
+    d.steps       = Array.from({ length: cap }, (_, i) => i < n && i % spacingSteps === 0)
+    d.stepPitches = Array.from({ length: cap }, (_, i) => Math.floor(i / spacingSteps) % n)
+
+    currentPatternId.value = id
+    pickerPatternId.value  = id
+    markDirty()
+    return id
+  }
 
   function detectChopTransients(channelId, sensitivity = 1.5) {
     const buf = chopBufs.get(channelId)
@@ -2631,6 +3061,7 @@ export function useStudio() {
       split.connect(scopeAnalyserL, 0)
       split.connect(scopeAnalyserR, 1)
       buildMixerInserts()
+      _startSidechainLoop()
     }
     if (audioCtx.state === 'suspended') audioCtx.resume()
     rebuildGains()
@@ -2643,6 +3074,7 @@ export function useStudio() {
       const eqMid     = audioCtx.createBiquadFilter()
       const eqHigh    = audioCtx.createBiquadFilter()
       const phaseGain = audioCtx.createGain()
+      const duckGain  = audioCtx.createGain()   // sidechain ducking lives here (1 = open)
       const gain      = audioCtx.createGain()
       const panner    = audioCtx.createStereoPanner()
       const analyser  = audioCtx.createAnalyser()
@@ -2651,15 +3083,39 @@ export function useStudio() {
       eqMid.type  = 'peaking';    eqMid.frequency.value  = 1000; eqMid.Q.value = 1; eqMid.gain.value = mt.eq.mid
       eqHigh.type = 'highshelf';  eqHigh.frequency.value = 8000; eqHigh.gain.value = mt.eq.high
       phaseGain.gain.value = mt.phaseInvert ? -1 : 1
+      duckGain.gain.value  = 1
       gain.gain.value  = mt.muted ? 0 : mt.volume
       panner.pan.value = mt.pan
       eqLow.connect(eqMid); eqMid.connect(eqHigh)
-      phaseGain.connect(gain); gain.connect(panner); panner.connect(analyser); analyser.connect(masterGain)
-      const node = { eqLow, eqMid, eqHigh, phaseGain, gain, panner, analyser, fxHandles: [] }
+      phaseGain.connect(duckGain); duckGain.connect(gain); gain.connect(panner)
+      panner.connect(analyser); analyser.connect(masterGain)
+      const node = { eqLow, eqMid, eqHigh, phaseGain, duckGain, gain, panner, analyser, fxHandles: [], sendGains: {} }
       mixerInsertNodes.push(node)
       // Wire FX chain: eqHigh → [enabled fx slots] → phaseGain
       _wireMixerFxChain(node, mt)
     })
+    // Second pass: post-fader send taps into the return buses.
+    mixerTracks.slice(1).forEach((mt, i) => _wireMixerSends(mixerInsertNodes[i], mt))
+  }
+
+  // (Re)build the post-fader send taps from one track into the return buses.
+  function _wireMixerSends(node, mt) {
+    if (!node) return
+    Object.values(node.sendGains).forEach(g => { try { g.disconnect() } catch (_) {} })
+    node.sendGains = {}
+    const sends = mt.sends ?? {}
+    for (const rtnId of Object.keys(sends)) {
+      const amt = sends[rtnId]
+      if (!amt || amt <= 0) continue
+      const rtnIdx  = mixerTracks.findIndex(t => t.id === rtnId)
+      const rtnNode = rtnIdx >= 1 ? mixerInsertNodes[rtnIdx - 1] : null
+      if (!rtnNode || rtnNode === node) continue   // skip missing / self-send
+      const sg = audioCtx.createGain()
+      sg.gain.value = amt
+      node.panner.connect(sg)        // post-fader, post-pan tap
+      sg.connect(rtnNode.eqLow)
+      node.sendGains[rtnId] = sg
+    }
   }
 
   function _wireMixerFxChain(node, mt) {
@@ -2683,6 +3139,72 @@ export function useStudio() {
     if (!node || !mt || !audioCtx) return
     _wireMixerFxChain(node, mt)
   }
+
+  // ── Sends ────────────────────────────────────────────────────────────────────
+  // amount 0..1 from a source track (index into mixerTracks) to a return bus.
+  function setMixerSend(trackIdx, returnTrackId, amount) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt || trackIdx === 0) return
+    if (!mt.sends) mt.sends = {}
+    const amt = Math.max(0, Math.min(1, amount))
+    if (amt <= 0) delete mt.sends[returnTrackId]
+    else mt.sends[returnTrackId] = amt
+    const node = mixerInsertNodes[trackIdx - 1]
+    if (node) {
+      // Live-update an existing tap, or rewire if it didn't exist yet.
+      const sg = node.sendGains[returnTrackId]
+      if (sg && amt > 0) sg.gain.value = amt
+      else _wireMixerSends(node, mt)
+    }
+    markDirty()
+  }
+
+  // ── Sidechain (envelope-follower duck keyed off another track) ───────────────
+  function setMixerSidechain(trackIdx, patch) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt) return
+    mt.sidechain = { ...(mt.sidechain ?? { source: null, amount: 0, attack: 0.01, release: 0.18 }), ...patch }
+    // When fully disabled, make sure the duck gain is wide open again.
+    if ((!mt.sidechain.source && mt.sidechain.source !== 0) || mt.sidechain.amount <= 0) {
+      const node = mixerInsertNodes[trackIdx - 1]
+      if (node?.duckGain) node.duckGain.gain.value = 1
+    }
+    markDirty()
+  }
+
+  // Source level for a track index: 0 (master) → analyserNode, ≥1 → its analyser.
+  function _trackLevel(srcIdx, scratch) {
+    const an = srcIdx === 0 ? analyserNode : mixerInsertNodes[srcIdx - 1]?.analyser
+    if (!an) return 0
+    an.getByteTimeDomainData(scratch)
+    let peak = 0
+    for (let i = 0; i < scratch.length; i++) { const v = Math.abs(scratch[i] - 128) / 128; if (v > peak) peak = v }
+    return peak
+  }
+
+  let _scAF = null
+  const _scScratch = new Uint8Array(256)
+  const _scSmooth  = {}   // trackIdx → smoothed source level
+  function _tickSidechains() {
+    if (!audioCtx) { _scAF = null; return }
+    mixerTracks.forEach((mt, idx) => {
+      if (idx === 0) return
+      const sc = mt.sidechain
+      const node = mixerInsertNodes[idx - 1]
+      if (!node?.duckGain) return
+      if (!sc || sc.amount <= 0 || (sc.source == null)) return
+      const lvl = _trackLevel(sc.source, _scScratch)
+      // Asymmetric smoothing: fast attack (duck quickly), slower release.
+      const prev = _scSmooth[idx] ?? 0
+      const coef = lvl > prev ? 0.6 : 0.12
+      const sm   = prev + (lvl - prev) * coef
+      _scSmooth[idx] = sm
+      // duck = 1 - amount * level → louder source = more ducking.
+      node.duckGain.gain.value = Math.max(0, 1 - sc.amount * sm)
+    })
+    _scAF = requestAnimationFrame(_tickSidechains)
+  }
+  function _startSidechainLoop() { if (!_scAF) _tickSidechains() }
 
   // Build the live insert-FX handles for a channel, aligned 1:1 with ch.effects
   // (disabled effects → null so the UI index still maps to a handle slot).
@@ -3193,13 +3715,16 @@ export function useStudio() {
       if (clip.type !== 'audio' || clip.muted) continue
       if (_scheduledAudioClipIds.has(clip.id)) continue
 
-      const buf = audioClipBufs.get(clip.id)
+      // Warp-aware buffer + rate (time-stretch modes → rate 1; repitch → rate).
+      const buf  = getWarpedClipBuf(clip)
       if (!buf) continue
+      const rate = warpClipRate(clip)
 
       const clipStart  = playbackStartAudioTime + (clip.cell - playbackStartCell.value) * secPerCell
       const startFrac  = clip.startOffset ?? 0
       const endFrac    = clip.endOffset   ?? 1
-      const sampLen    = buf.duration * (endFrac - startFrac)
+      // Real-time duration of the selected region (rate compresses repitch clips).
+      const sampLen    = buf.duration * (endFrac - startFrac) / rate
       const clipEnd    = clipStart + sampLen
 
       if (clipEnd   < now     ) { _scheduledAudioClipIds.add(clip.id); continue }
@@ -3208,19 +3733,28 @@ export function useStudio() {
       _scheduledAudioClipIds.add(clip.id)
 
       // When seeking into the middle of a clip, offset the sample playback.
+      // start()'s offset/duration args are in BUFFER seconds, so scale the
+      // real-time seek by the playback rate.
       const seekOffset   = Math.max(0, now - clipStart)
-      const sampleOffset = buf.duration * startFrac + seekOffset
-      const remaining    = sampLen - seekOffset
+      const sampleOffset = buf.duration * startFrac + seekOffset * rate
+      const remaining    = (sampLen - seekOffset) * rate
       if (remaining <= 0) continue
 
       const when = Math.max(now + 0.005, clipStart)
 
       const src = audioCtx.createBufferSource()
       src.buffer = buf
+      src.playbackRate.value = rate
       const g = audioCtx.createGain()
       g.gain.value = clip.volume ?? 1
       src.connect(g)
-      g.connect(masterGain)
+      // Route through the clip's mixer track insert (EQ/FX/pan/volume) when set,
+      // otherwise straight to the mixer master bus.
+      const mtIdx = clip.mixerTrack || 0
+      const dest  = (mtIdx >= 1 && mixerInsertNodes[mtIdx - 1])
+        ? mixerInsertNodes[mtIdx - 1].eqLow
+        : masterGain
+      g.connect(dest)
       src.start(when, sampleOffset, remaining)
       _activeAudioClipNodes.push({ src, g })
     }
@@ -4743,6 +5277,7 @@ export function useStudio() {
       mixerTracks: mixerTracks.map(mt => ({
         id:          mt.id,
         name:        mt.name,
+        kind:        mt.kind,
         color:       mt.color,
         volume:      mt.volume,
         pan:         mt.pan,
@@ -4750,6 +5285,8 @@ export function useStudio() {
         eq:          { ...mt.eq },
         fxSlots:     (mt.fxSlots ?? []).map(fx => fx ? { ...fx } : null),
         phaseInvert: mt.phaseInvert ?? false,
+        sends:       { ...(mt.sends ?? {}) },
+        sidechain:   { ...(mt.sidechain ?? { source: null, amount: 0, attack: 0.01, release: 0.18 }) },
       })),
     }
 
@@ -4908,8 +5445,13 @@ export function useStudio() {
       mixerTracks[i]._soloed     = false
       mixerTracks[i].phaseInvert = mt.phaseInvert  ?? false
       mixerTracks[i].fxSlots     = (mt.fxSlots ?? []).map(fx => fx ? { ...fx } : null)
+      mixerTracks[i].sends       = { ...(mt.sends ?? {}) }
+      mixerTracks[i].sidechain   = { ...(mixerTracks[i].sidechain ?? {}), ...(mt.sidechain ?? {}) }
+      if (mt.kind) mixerTracks[i].kind = mt.kind
       if (mt.eq) Object.assign(mixerTracks[i].eq, mt.eq)
     })
+    // Rebuild the mixer graph so loaded FX / sends / sidechain take effect.
+    if (audioCtx) buildMixerInserts()
 
     // Update selected channel
     selectedChannelId.value = channels[0]?.id ?? ''
@@ -5014,10 +5556,19 @@ export function useStudio() {
     // Audio file sampler (Channel Rack)
     addAudioFileChannel, loadAudioFileForChannel, getAudioFileBuf, audioFileVersions,
     normalizeAudioFile, buildLoopXfade, snapToZero,
+    setSamplerWarp, redetectSampleBpm,
+    getSamplerZones, addSamplerZone, removeSamplerZone, updateSamplerZone,
     // Audio clips (Playlist timeline)
     addAudioClip, loadAudioClipFile, getAudioClipBuf, cloneAudioClip, audioClipVersions,
+    addAudioClipFromBuffer,
+    setClipWarp, redetectClipBpm, WARP_MODES,
+    // Audio input recording
+    audioInputReady, inputMonitor, isRecordingAudio, inputLevel,
+    enableAudioInput, disableAudioInput, setInputMonitor,
+    startAudioRecording, stopAudioRecording,
     // CHOP quick slicer
     addChopChannel, loadChopFile, getChopBuf, chopVersions, detectChopTransients,
+    sliceToMidi,
     // FORGE deep slicer
     addForgeChannel, loadForgeDeck, getForgeBuf, forgeVersions,
     // Window manager
@@ -5057,6 +5608,7 @@ export function useStudio() {
     toggleMixerPhaseInvert,
     addMixerTrackFx, removeMixerTrackFx, updateMixerTrackFxParam,
     toggleMixerTrackFxEnabled, moveMixerTrackFxSlot,
+    setMixerSend, setMixerSidechain, NUM_MX_RETURNS, returnTrackIdxStart,
     // Scale snap
     snapScale,
     // Pattern length (infinite canvas)

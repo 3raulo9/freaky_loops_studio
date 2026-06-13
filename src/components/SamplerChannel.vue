@@ -40,6 +40,33 @@
         style="display:none" @change="onFileInput" />
     </div>
 
+    <!-- ── Warp bar (Ableton-style tempo follow) ──────────────────────────────── -->
+    <div class="smp-warp-bar">
+      <button class="smp-mode-btn" :class="{ active: p.warpEnabled }"
+        @click="setSamplerWarp(ch.id, { warpEnabled: !p.warpEnabled })"
+        title="Stretch the sample to follow project tempo (pitch from the note still applies)">⟳ WARP</button>
+
+      <div class="smp-group">
+        <span class="smp-lbl">MODE</span>
+        <select class="smp-sel" :value="p.warpMode ?? 'complex'"
+          @change="setSamplerWarp(ch.id, { warpMode: $event.target.value })" :disabled="!p.warpEnabled">
+          <option v-for="m in WARP_MODES" :key="m" :value="m">{{ m }}</option>
+        </select>
+      </div>
+
+      <div class="smp-group">
+        <span class="smp-lbl">BPM</span>
+        <input type="number" class="smp-num" min="20" max="300" step="0.1"
+          :value="p.sampleBpm ?? ''"
+          @change="setSamplerWarp(ch.id, { sampleBpm: +$event.target.value || null })" />
+        <button class="smp-icon-btn" title="Detect tempo from sample" @click="redetectSampleBpm(ch.id)">⌕</button>
+      </div>
+
+      <span v-if="p.warpEnabled && p.sampleBpm" class="smp-xfade-badge">
+        ✓ {{ p.sampleBpm }} → {{ Math.round(projectBpm) }}
+      </span>
+    </div>
+
     <!-- ── Waveform ─────────────────────────────────────────────────────────── -->
     <div class="smp-wave-wrap" ref="waveWrap">
       <canvas ref="canvas" class="smp-canvas" />
@@ -251,6 +278,99 @@
         </div>
       </div>
 
+      <!-- COL 4: Modulation (pitch env + LFO) ───────────────────────────── -->
+      <div class="smp-col">
+        <div class="smp-col-header">PITCH ENV</div>
+        <div class="smp-row">
+          <span class="smp-lbl">AMT</span>
+          <input type="range" class="smp-slider" min="-24" max="24" step="1"
+            :value="p.pEnvAmount ?? 0" @input="p.pEnvAmount = +$event.target.value" />
+          <span class="smp-val">{{ (p.pEnvAmount ?? 0) > 0 ? '+' : '' }}{{ p.pEnvAmount ?? 0 }}st</span>
+        </div>
+        <div class="smp-row">
+          <span class="smp-lbl">ATK</span>
+          <input type="range" class="smp-slider" min="0.001" max="1" step="0.001"
+            :value="p.pEnvAttack ?? 0.002" @input="p.pEnvAttack = +$event.target.value" />
+          <span class="smp-val">{{ msLabel(p.pEnvAttack ?? 0.002) }}</span>
+        </div>
+        <div class="smp-row">
+          <span class="smp-lbl">DCY</span>
+          <input type="range" class="smp-slider" min="0.001" max="3" step="0.001"
+            :value="p.pEnvDecay ?? 0.15" @input="p.pEnvDecay = +$event.target.value" />
+          <span class="smp-val">{{ msLabel(p.pEnvDecay ?? 0.15) }}</span>
+        </div>
+
+        <div class="smp-col-header smp-col-header-sub">LFO</div>
+        <div class="smp-row">
+          <span class="smp-lbl">DEST</span>
+          <select class="smp-sel" :value="p.lfoDest ?? 'off'" @change="p.lfoDest = $event.target.value">
+            <option value="off">Off</option>
+            <option value="pitch">Pitch</option>
+            <option value="filter">Filter</option>
+            <option value="volume">Volume</option>
+            <option value="pan">Pan</option>
+          </select>
+        </div>
+        <div class="smp-row">
+          <span class="smp-lbl">RATE</span>
+          <input type="range" class="smp-slider" min="0" max="1" step="0.01"
+            :value="p.lfoRate ?? 0.3" @input="p.lfoRate = +$event.target.value" />
+          <span class="smp-val">{{ lfoRateLabel }}</span>
+        </div>
+        <div class="smp-row">
+          <span class="smp-lbl">DEPTH</span>
+          <input type="range" class="smp-slider" min="0" max="1" step="0.01"
+            :value="p.lfoDepth ?? 0" @input="p.lfoDepth = +$event.target.value" />
+          <span class="smp-val">{{ Math.round((p.lfoDepth ?? 0) * 100) }}%</span>
+        </div>
+        <div class="smp-row">
+          <span class="smp-lbl">SHAPE</span>
+          <select class="smp-sel" :value="p.lfoShape ?? 'sine'" @change="p.lfoShape = $event.target.value">
+            <option value="sine">Sine</option>
+            <option value="triangle">Tri</option>
+            <option value="square">Square</option>
+            <option value="sawtooth">Saw</option>
+          </select>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ── Multisample zones (velocity layers / key zones / round-robin) ──────── -->
+    <div class="smp-zones">
+      <div class="smp-zones-head">
+        <span class="smp-col-header">ZONES <span v-if="zones.length" class="smp-zone-count">{{ zones.length }}</span></span>
+        <button class="smp-icon-btn" @click="zoneFileInput?.click()" title="Add a sample as a new zone">+ ADD ZONE</button>
+        <span class="smp-zone-hint">Map files to key + velocity ranges; equal matches round-robin.</span>
+        <input ref="zoneFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
+          style="display:none" @change="onZoneFileInput" />
+      </div>
+
+      <div v-if="zones.length" class="smp-zone-table">
+        <div class="smp-zone-row smp-zone-row-head">
+          <span class="smp-zc-name">NAME</span>
+          <span class="smp-zc">ROOT</span>
+          <span class="smp-zc">LO KEY</span>
+          <span class="smp-zc">HI KEY</span>
+          <span class="smp-zc">LO VEL</span>
+          <span class="smp-zc">HI VEL</span>
+          <span class="smp-zc-x"></span>
+        </div>
+        <div v-for="z in zones" :key="z.id" class="smp-zone-row">
+          <span class="smp-zc-name" :title="z.name">{{ z.name }}</span>
+          <input class="smp-zc-num" type="number" min="0" max="127" :value="z.rootNote"
+            @change="updateSamplerZone(ch.id, z.id, { rootNote: clampMidi($event.target.value) })" />
+          <input class="smp-zc-num" type="number" min="0" max="127" :value="z.loKey"
+            @change="updateSamplerZone(ch.id, z.id, { loKey: clampMidi($event.target.value) })" />
+          <input class="smp-zc-num" type="number" min="0" max="127" :value="z.hiKey"
+            @change="updateSamplerZone(ch.id, z.id, { hiKey: clampMidi($event.target.value) })" />
+          <input class="smp-zc-num" type="number" min="0" max="127" :value="z.loVel"
+            @change="updateSamplerZone(ch.id, z.id, { loVel: clampMidi($event.target.value) })" />
+          <input class="smp-zc-num" type="number" min="0" max="127" :value="z.hiVel"
+            @change="updateSamplerZone(ch.id, z.id, { hiVel: clampMidi($event.target.value) })" />
+          <button class="smp-zc-del" @click="removeSamplerZone(ch.id, z.id)" title="Remove zone">✕</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -261,7 +381,25 @@ import { useStudio } from '../store/studio.js'
 
 const props = defineProps({ channel: Object })
 
-const { loadAudioFileForChannel, getAudioFileBuf, audioFileVersions, normalizeAudioFile, buildLoopXfade, snapToZero } = useStudio()
+const { loadAudioFileForChannel, getAudioFileBuf, audioFileVersions, normalizeAudioFile, buildLoopXfade, snapToZero,
+        setSamplerWarp, redetectSampleBpm, WARP_MODES, bpm,
+        getSamplerZones, addSamplerZone, removeSamplerZone, updateSamplerZone } = useStudio()
+
+const projectBpm = computed(() => bpm.value)
+const zoneFileInput = ref(null)
+const zones = computed(() => { void audioFileVersions[ch.value?.id]; return getSamplerZones(ch.value?.id) })
+
+const lfoRateLabel = computed(() => {
+  const hz = 0.05 + (p.value.lfoRate ?? 0.3) * 14
+  return hz.toFixed(1) + 'Hz'
+})
+
+function clampMidi(v) { return Math.max(0, Math.min(127, Math.round(+v || 0))) }
+
+async function onZoneFileInput(e) {
+  const file = e.target.files?.[0]; e.target.value = ''
+  if (file && ch.value) await addSamplerZone(ch.value.id, file)
+}
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const LOOP_MODES   = [{ v: 'off', l: 'OFF' }, { v: 'fwd', l: 'FWD' }, { v: 'pingpong', l: 'PING' }]
@@ -761,6 +899,58 @@ function doSnap(paramName) {
   font-size: 8px !important;
   color: rgba(255,180,80,0.7) !important;
 }
+
+/* Warp bar */
+.smp-warp-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  padding: 2px 0;
+}
+.smp-sel {
+  background: rgba(0,0,0,0.4);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 3px;
+  color: rgba(255,255,255,0.8);
+  font-size: 10px;
+  padding: 1px 3px;
+  text-transform: capitalize;
+}
+.smp-sel:disabled { opacity: 0.4; }
+
+/* Multisample zones */
+.smp-zones {
+  flex-shrink: 0;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  padding-top: 4px;
+  margin-top: 2px;
+}
+.smp-zones-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.smp-zone-count {
+  background: rgba(255,159,67,0.25); color: #ff9f43; border-radius: 8px;
+  padding: 0 5px; font-size: 9px;
+}
+.smp-zone-hint { font-size: 9px; color: rgba(255,255,255,0.3); }
+.smp-zone-table { margin-top: 4px; display: flex; flex-direction: column; gap: 2px; max-height: 120px; overflow-y: auto; }
+.smp-zone-row { display: flex; align-items: center; gap: 4px; }
+.smp-zone-row-head .smp-zc, .smp-zone-row-head .smp-zc-name {
+  font-size: 8px; font-weight: 700; color: rgba(255,255,255,0.3); letter-spacing: 0.04em;
+}
+.smp-zc-name { flex: 1; min-width: 0; font-size: 10px; color: rgba(255,255,255,0.6);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.smp-zc { width: 42px; text-align: center; flex-shrink: 0; }
+.smp-zc-num {
+  width: 42px; flex-shrink: 0; background: rgba(0,0,0,0.4); color: rgba(255,255,255,0.8);
+  border: 1px solid rgba(255,255,255,0.12); border-radius: 3px; font-size: 10px; text-align: center; padding: 1px 2px;
+}
+.smp-zc-x { width: 18px; flex-shrink: 0; }
+.smp-zc-del {
+  width: 18px; flex-shrink: 0; background: none; border: none; color: rgba(255,255,255,0.3);
+  cursor: pointer; font-size: 11px;
+}
+.smp-zc-del:hover { color: #e74c3c; }
 
 /* Loop tools bar */
 .smp-loop-tools {

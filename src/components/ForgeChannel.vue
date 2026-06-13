@@ -38,6 +38,8 @@
           @click="setSliceCount(n)">{{ n }}</button>
       </div>
       <button class="frg-reset-btn" @click="equalizeSlices" title="Equalize slices">⇌</button>
+      <button class="frg-reset-btn" @click="sliceToMidi(ch.id)"
+        title="Slice → MIDI: create a pattern that plays each slice in order">→SEQ</button>
     </div>
 
     <!-- Waveform + slice markers -->
@@ -138,7 +140,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useStudio } from '../store/studio.js'
 
 const props = defineProps({ channel: Object })
-const { loadForgeDeck, getForgeBuf, forgeVersions } = useStudio()
+const { loadForgeDeck, getForgeBuf, forgeVersions, sliceToMidi } = useStudio()
 
 const canvas     = ref(null)
 const waveWrap   = ref(null)

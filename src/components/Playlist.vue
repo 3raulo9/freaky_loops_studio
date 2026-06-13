@@ -486,6 +486,12 @@
         {{ trackMenu.track.locked ? 'Unlock track' : 'Lock to content' }}
       </div>
       <div class="ctx-sep" />
+      <div v-if="!isRecordingAudio" class="ctx-item" @click="ctxRecordAudio">● Record audio here…</div>
+      <div v-else class="ctx-item danger" @click="ctxStopRecordAudio">■ Stop recording</div>
+      <div class="ctx-item" @click="ctxToggleMonitor">
+        <span :class="{ 'ctx-checked': inputMonitor }">🎧 Input monitor</span>
+      </div>
+      <div class="ctx-sep" />
       <div class="ctx-item" @click="ctxMuteAllClips(true)">Mute all clips</div>
       <div class="ctx-item" @click="ctxMuteAllClips(false)">Unmute all clips</div>
       <div class="ctx-sep" />
@@ -531,6 +537,34 @@
           ♪ Load audio file…
           <input ref="audioClipFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
             style="display:none" @change="onAudioClipFileInputChange" />
+        </div>
+        <div class="ctx-sep" />
+        <!-- ── Warp (tempo follow) ── -->
+        <div class="ctx-item" @click.stop="ctxToggleWarp">
+          <span :class="{ 'ctx-checked': clipMenu.clip.warpEnabled }">⟳ Warp to tempo</span>
+          <span class="ctx-hint">{{ clipMenu.clip.clipBpm ? clipMenu.clip.clipBpm + ' BPM' : 'no BPM' }}</span>
+        </div>
+        <div class="ctx-sub" @click.stop>
+          <span class="ctx-sub-lbl">Mode</span>
+          <select class="ctx-sel" :value="clipMenu.clip.warpMode ?? 'complex'"
+            @change="setClipWarp(clipMenu.clip.id, { warpMode: $event.target.value })">
+            <option v-for="m in WARP_MODES" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </div>
+        <div class="ctx-sub" @click.stop>
+          <span class="ctx-sub-lbl">Clip BPM</span>
+          <input type="number" class="ctx-num" min="20" max="300" step="0.1"
+            :value="clipMenu.clip.clipBpm ?? ''"
+            @change="setClipWarp(clipMenu.clip.id, { clipBpm: +$event.target.value || null })" />
+          <button class="ctx-mini" title="Detect tempo" @click="redetectClipBpm(clipMenu.clip.id)">⌕</button>
+        </div>
+        <div class="ctx-sub" @click.stop>
+          <span class="ctx-sub-lbl">Mixer</span>
+          <select class="ctx-sel" :value="clipMenu.clip.mixerTrack ?? 0"
+            @change="setClipWarp(clipMenu.clip.id, { mixerTrack: +$event.target.value })">
+            <option :value="0">Master</option>
+            <option v-for="n in 8" :key="n" :value="n">Insert {{ n }}</option>
+          </select>
         </div>
         <div class="ctx-sep" />
       </template>
@@ -761,6 +795,8 @@ const {
   autoScroll, seekTo,
   PLAYLIST_CELLS,
   addAudioClip, loadAudioClipFile, getAudioClipBuf, cloneAudioClip, audioClipVersions,
+  setClipWarp, redetectClipBpm, WARP_MODES,
+  isRecordingAudio, inputMonitor, startAudioRecording, stopAudioRecording, setInputMonitor,
 } = useStudio()
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
@@ -1785,6 +1821,21 @@ function ctxMuteAllClips(muted) {
   muteAllClipsOnTrack(trackMenu.value.track.id, muted)
   trackMenu.value = null
 }
+async function ctxRecordAudio() {
+  const t = trackMenu.value?.track
+  trackMenu.value = null
+  if (!t) return
+  const cell = Math.max(0, Math.round(displayCell?.value ?? 0))
+  await startAudioRecording({ trackId: t.id, cell })
+}
+function ctxStopRecordAudio() {
+  trackMenu.value = null
+  stopAudioRecording()
+}
+function ctxToggleMonitor() {
+  setInputMonitor(!inputMonitor.value)
+  trackMenu.value = null
+}
 function ctxAutoColorGroup() {
   const t = trackMenu.value.track
   trackMenu.value = null
@@ -1839,6 +1890,10 @@ async function onAudioClipFileInputChange(e) {
     await loadAudioClipFile(clipMenu.value.clip.id, file)
   }
   clipMenu.value = null
+}
+function ctxToggleWarp() {
+  const c = clipMenu.value?.clip
+  if (c) setClipWarp(c.id, { warpEnabled: !c.warpEnabled })
 }
 
 function ctxDuplicateClip() {
@@ -2962,6 +3017,24 @@ onBeforeUnmount(() => {
 .ctx-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .ctx-item.danger:hover { background: #1a0808; color: #e74c3c; }
 .ctx-sep { height: 1px; background: var(--border-subtle); margin: 4px 0; }
+.ctx-hint { float: right; font-size: 10px; color: #6a6a8a; margin-left: 12px; }
+/* Inline sub-rows (warp controls) */
+.ctx-sub {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 16px; font-family: 'Rajdhani', sans-serif; font-size: 11px; color: #8080a8;
+}
+.ctx-sub-lbl { width: 56px; flex-shrink: 0; letter-spacing: 0.06em; }
+.ctx-sel, .ctx-num {
+  flex: 1; min-width: 0; background: var(--bg-base, #14141e); color: #c8c8e0;
+  border: 1px solid var(--border-subtle, #2a2a3a); border-radius: 3px;
+  font-size: 11px; padding: 2px 4px; text-transform: capitalize;
+}
+.ctx-num { flex: 0 0 56px; text-transform: none; }
+.ctx-mini {
+  flex-shrink: 0; background: var(--bg-base, #14141e); color: #8080a8; cursor: pointer;
+  border: 1px solid var(--border-subtle, #2a2a3a); border-radius: 3px; font-size: 12px; padding: 1px 6px;
+}
+.ctx-mini:hover { color: #4ecdc4; border-color: #4ecdc4; }
 
 /* ── Rename / marker overlay ─────────────────────────────────────────────────── */
 .rename-overlay {

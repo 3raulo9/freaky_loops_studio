@@ -164,6 +164,36 @@
               </span>
             </div>
 
+            <!-- Sends + sidechain (insert tracks only) -->
+            <div v-if="track.kind !== 'return' && returnTracks.length" class="mx-sends">
+              <div v-for="rtn in returnTracks" :key="rtn.id" class="mx-send-row">
+                <span class="mx-send-lbl" :style="{ color: rtn.color }"
+                  :title="'Send to ' + rtn.name">{{ rtn.name.replace('RETURN ', '►') }}</span>
+                <input type="range" class="mx-send-slider" min="0" max="1" step="0.01"
+                  :value="track.sends?.[rtn.id] ?? 0"
+                  @input="setMixerSend(i + 1, rtn.id, +$event.target.value)"
+                  @mousedown.stop />
+              </div>
+              <div class="mx-send-row mx-sc-row">
+                <span class="mx-send-lbl" :class="{ 'sc-on': track.sidechain?.source != null && track.sidechain?.amount > 0 }"
+                  title="Sidechain key — duck this track off another">SC</span>
+                <select class="mx-sc-sel" :value="track.sidechain?.source ?? ''"
+                  @change="onSidechainSource(i + 1, $event.target.value)" @mousedown.stop>
+                  <option value="">—</option>
+                  <option :value="0">Master</option>
+                  <option v-for="(s, si) in insertTracks" :key="s.id" :value="si + 1"
+                    v-show="si + 1 !== i + 1">{{ s.name }}</option>
+                </select>
+              </div>
+              <div v-if="track.sidechain?.source != null" class="mx-send-row">
+                <span class="mx-send-lbl">AMT</span>
+                <input type="range" class="mx-send-slider" min="0" max="1" step="0.01"
+                  :value="track.sidechain?.amount ?? 0"
+                  @input="setMixerSidechain(i + 1, { amount: +$event.target.value })"
+                  @mousedown.stop />
+              </div>
+            </div>
+
             <!-- Mute / Solo -->
             <div class="mx-ms">
               <button class="mx-btn mx-mute-btn" :class="{ active: track.muted }"
@@ -377,6 +407,7 @@ const {
   setMixerTrackColor, toggleMixerPhaseInvert,
   addMixerTrackFx, removeMixerTrackFx, updateMixerTrackFxParam,
   toggleMixerTrackFxEnabled, moveMixerTrackFxSlot,
+  setMixerSend, setMixerSidechain,
 } = useStudio()
 
 const EQ_BANDS = [
@@ -393,6 +424,16 @@ const TRACK_COLORS = [
 
 const masterTrack  = computed(() => mixerTracks[0])
 const insertTracks = computed(() => mixerTracks.slice(1))
+const returnTracks = computed(() => mixerTracks.filter(t => t.kind === 'return'))
+
+function onSidechainSource(trackIdx, val) {
+  const source = val === '' ? null : Number(val)
+  const patch = { source }
+  // Give a sensible default depth when first enabling a sidechain.
+  const mt = mixerTracks[trackIdx]
+  if (source != null && (!mt.sidechain || mt.sidechain.amount <= 0)) patch.amount = 0.6
+  setMixerSidechain(trackIdx, patch)
+}
 
 // ── Selection / rename ────────────────────────────────────────────────────
 const selectedTrack = ref(-1)
@@ -889,6 +930,23 @@ function panLabel(p) {
 }
 
 /* ── Mute / Solo ────────────────────────────────────────────────────────── */
+/* Sends + sidechain */
+.mx-sends {
+  display: flex; flex-direction: column; gap: 2px; width: 100%;
+  padding: 3px 2px; border-top: 1px solid rgba(255,255,255,0.06);
+}
+.mx-send-row { display: flex; align-items: center; gap: 4px; }
+.mx-send-lbl {
+  font-size: 8px; font-weight: 700; letter-spacing: 0.04em;
+  color: rgba(255,255,255,0.4); width: 22px; flex-shrink: 0; text-align: left;
+}
+.mx-send-lbl.sc-on { color: #f1c40f; }
+.mx-send-slider { flex: 1; height: 3px; accent-color: var(--accent); cursor: pointer; min-width: 0; }
+.mx-sc-row { margin-top: 1px; }
+.mx-sc-sel {
+  flex: 1; min-width: 0; background: rgba(0,0,0,0.4); color: rgba(255,255,255,0.7);
+  border: 1px solid rgba(255,255,255,0.12); border-radius: 3px; font-size: 8px; padding: 0 2px;
+}
 .mx-ms { display: flex; gap: 3px; }
 .mx-btn {
   width: 24px; height: 18px;
