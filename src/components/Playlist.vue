@@ -1826,7 +1826,7 @@ async function ctxRecordAudio() {
   trackMenu.value = null
   if (!t) return
   const cell = Math.max(0, Math.round(displayCell?.value ?? 0))
-  await startAudioRecording({ trackId: t.id, cell })
+  await startAudioRecording({ trackId: t.id, cell, withPlayback: true })
 }
 function ctxStopRecordAudio() {
   trackMenu.value = null
