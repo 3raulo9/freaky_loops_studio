@@ -528,6 +528,7 @@ const warpedClipBufs        = new Map()  // clipId    -> { sig, buf } cached tim
 const warpedSampleBufs      = new Map()  // channelId -> { sig, buf } cached time-stretched sampler buffer
 const samplerZoneBufs       = new Map()  // channelId+':'+zoneId -> AudioBuffer (multisample zones)
 const _samplerRR            = new Map()  // channelId -> round-robin counter
+const sampleEditHistory     = new Map()  // channelId -> [{ buf, params }] undo stack for destructive sample edits
 
 // ─── Channel factory ───────────────────────────────────────────────────────────
 let _cid = 0
@@ -631,6 +632,8 @@ export function useStudio() {
   // Reactive version counter keyed by channelId — increments when an audio buffer
   // is loaded or cleared so that computed refs in SamplerChannel.vue re-evaluate.
   const audioFileVersions = reactive({})
+  // Reactive undo-stack depth per sampler channel (drives the EDIT ↶ UNDO button).
+  const sampleHistoryDepth = reactive({})
   // Same pattern for playlist Audio Clips: keyed by clip ID.
   const audioClipVersions = reactive({})
   // CHOP and FORGE slicer version counters (same "silent dependency" pattern).
@@ -1803,9 +1806,20 @@ export function useStudio() {
       const fwdBuf = zoneSel?.buf ?? getWarpedSampleBuf(channelId, params) ?? audioFileBufs.get(channelId)
       if (!fwdBuf) return
 
-      // Zones always play one-shot forward (per-zone loop/reverse not modelled yet).
-      const loopMode = zoneSel ? 'off'  : (params.loopMode ?? 'off')
-      const reverse  = zoneSel ? false  : (params.reverse  ?? false)
+      // ── Slicer: the played note selects a slice region ──────────────────────
+      const sliceMarkers = (!zoneSel && params.sliceMode) ? (params.sliceMarkers ?? []) : null
+      let sliceRegion = null
+      if (sliceMarkers && sliceMarkers.length >= 2) {
+        const sorted = [...sliceMarkers].sort((a, b) => a.pos - b.pos)
+        const sIdx = ((Math.round(params.pitch ?? 60) - (params.rootNote ?? 60)) % sorted.length + sorted.length) % sorted.length
+        const s0 = Math.max(0, Math.min(1, sorted[sIdx].pos))
+        const s1 = sIdx + 1 < sorted.length ? sorted[sIdx + 1].pos : 1
+        sliceRegion = { start: s0, end: Math.max(s0 + 0.001, Math.min(1, s1)) }
+      }
+
+      // Zones + slices always play one-shot forward (the note picks which one).
+      const loopMode = (zoneSel || sliceRegion) ? 'off'  : (params.loopMode ?? 'off')
+      const reverse  = (zoneSel || sliceRegion) ? false  : (params.reverse  ?? false)
 
       // ── Buffer selection ─────────────────────────────────────────────────
       let buf
@@ -1820,14 +1834,17 @@ export function useStudio() {
       }
 
       // ── Pitch / tuning ───────────────────────────────────────────────────
+      //   Slices play untransposed (the note selects the slice, not the pitch).
       const rootNote  = zoneSel ? (zoneSel.zone.rootNote ?? 60) : (params.rootNote ?? 60)
-      const keyTrack  = params.keyTrack ?? 1
+      const keyTrack  = sliceRegion ? 0 : (params.keyTrack ?? 1)
       const fineTune  = params.fineTune ?? 0
       const deltaSemi = (params.pitch - rootNote) * keyTrack + fineTune / 100
 
-      // ── Start / end offsets (zones use the whole buffer) ─────────────────
-      const fwdStart = zoneSel ? 0 : Math.max(0, Math.min(1, params.startOffset ?? 0))
-      const fwdEnd   = zoneSel ? 1 : Math.max(fwdStart + 0.001, Math.min(1, params.endOffset ?? 1))
+      // ── Start / end offsets (zones use the whole buffer; slices their region) ─
+      const fwdStart = sliceRegion ? sliceRegion.start
+                     : zoneSel ? 0 : Math.max(0, Math.min(1, params.startOffset ?? 0))
+      const fwdEnd   = sliceRegion ? sliceRegion.end
+                     : zoneSel ? 1 : Math.max(fwdStart + 0.001, Math.min(1, params.endOffset ?? 1))
 
       let offset, playDur
       if (loopMode === 'pingpong') {
@@ -1851,7 +1868,7 @@ export function useStudio() {
       //   sample — pitch (from the note) and time are independent, giving
       //   pad / texture playback. Self-contained: its own amp envelope; filter
       //   and LFO are bypassed for this mode.
-      const playMode = zoneSel ? 'classic' : (params.playMode ?? 'classic')
+      const playMode = (zoneSel || sliceRegion) ? 'classic' : (params.playMode ?? 'classic')
       if (playMode === 'granular') {
         const dG   = Math.max(0, params.envDelay ?? 0)
         const aG   = Math.max(0.001, params.envAttack  ?? 0.005)
@@ -1859,11 +1876,15 @@ export function useStudio() {
         const sG   = Math.max(0,     params.envSustain ?? 0.8)
         const rG   = Math.max(0.02,  params.envRelease ?? 0.2)
         const rate = Math.pow(2, deltaSemi / 12)
-        const gSize = Math.max(0.01, Math.min(0.5, params.grainSize ?? 0.08))
-        const scan  = Math.max(0, Math.min(1, params.grainScan ?? 0.5))
+        const gSize    = Math.max(0.01, Math.min(0.5, params.grainSize ?? 0.08))
+        const scan     = Math.max(0, Math.min(1, params.grainScan ?? 0.5))
+        const density  = Math.max(0.1, Math.min(1, params.grainDensity ?? 0.5))   // overlap
+        const spray    = Math.max(0, Math.min(1, params.grainSpray ?? 0.15))      // position jitter
+        const panSpread = Math.max(0, Math.min(1, params.grainPan ?? 0))          // stereo spread
+        const motion   = (params.grainMotion ?? 0)                               // scan drift over life
+        const shape    = params.grainShape ?? 'hann'
         const regStart = buf.duration * fwdStart
         const regLen   = buf.duration * (fwdEnd - fwdStart)
-        const center   = regStart + regLen * scan
         const hold     = Math.max(0.3, aG + cG + 0.4)
         const lifeT    = dG + aG + cG + hold + rG
         const t0g      = when + dG
@@ -1875,17 +1896,39 @@ export function useStudio() {
         _applyEnvPhase(ampG.gain, peak*sG, 0,        t0g + aG + cG + hold, rG, params.envReleaseCurve ?? -0.5)
         ampG.connect(dest)
 
-        const hop = Math.max(0.005, gSize / 2)
+        // Denser overlap = smaller hop (more simultaneous grains → smoother cloud).
+        const hop = Math.max(0.004, (gSize / 2) * (1.05 - density))
         let lastSrc = null
         for (let t = 0; t < lifeT; t += hop) {
           const gsrc = ctx.createBufferSource(); gsrc.buffer = buf; gsrc.playbackRate.value = rate
           const gg = ctx.createGain()
           const gt = t0g + t, half = gSize / 2
-          gg.gain.setValueAtTime(0, gt)
-          gg.gain.linearRampToValueAtTime(1, gt + half)
-          gg.gain.linearRampToValueAtTime(0, gt + gSize)
-          gsrc.connect(gg); gg.connect(ampG)
-          const jitter = (Math.random() * 2 - 1) * Math.min(regLen * 0.1, 0.05)
+          // Grain window: Hann (smooth) vs triangular (sharper) vs gate (buzzy).
+          if (shape === 'gate') {
+            gg.gain.setValueAtTime(1, gt)
+          } else if (shape === 'tri') {
+            gg.gain.setValueAtTime(0, gt)
+            gg.gain.linearRampToValueAtTime(1, gt + half)
+            gg.gain.linearRampToValueAtTime(0, gt + gSize)
+          } else {
+            gg.gain.setValueAtTime(0, gt)
+            gg.gain.setTargetAtTime(1, gt, half * 0.4)
+            gg.gain.setValueAtTime(1, gt + half)
+            gg.gain.setTargetAtTime(0, gt + half, half * 0.4)
+            gg.gain.linearRampToValueAtTime(0, gt + gSize)
+          }
+          // Optional stereo spread: alternate grains left/right.
+          if (panSpread > 0.001) {
+            const pn = ctx.createStereoPanner()
+            pn.pan.value = (Math.random() * 2 - 1) * panSpread
+            gsrc.connect(gg); gg.connect(pn); pn.connect(ampG)
+          } else {
+            gsrc.connect(gg); gg.connect(ampG)
+          }
+          // Scan position drifts across the grain's lifetime when motion ≠ 0.
+          const driftedScan = Math.max(0, Math.min(1, scan + motion * (t / Math.max(0.001, lifeT))))
+          const center = regStart + regLen * driftedScan
+          const jitter = (Math.random() * 2 - 1) * (regLen * 0.5 * spray)
           let off = center + jitter
           off = Math.max(0, Math.min(buf.duration - gSize * rate - 0.001, off))
           gsrc.start(gt, off, gSize * rate)
@@ -2070,6 +2113,9 @@ export function useStudio() {
         lfoDest: 'off', lfoRate: 0.3, lfoDepth: 0, lfoShape: 'sine',
         lfo2Dest: 'off', lfo2Rate: 0.2, lfo2Depth: 0, lfo2Shape: 'triangle',
         playMode: 'classic', grainSize: 0.08, grainScan: 0.5,
+        grainDensity: 0.5, grainSpray: 0.15, grainPan: 0, grainMotion: 0, grainShape: 'hann',
+        arpEnabled: false, arpMode: 'up', arpRate: '1/16', arpGate: 0.5, arpRange: 1,
+        sliceMode: false, sliceMarkers: [],
         zones: [],
       },
       knobs: [{ key: 'pitch', label: 'NOTE', min: 0, max: 127, decimals: 0 }],
@@ -2104,6 +2150,7 @@ export function useStudio() {
     }
     audioFileBufs.set(channelId, buf)
     warpedSampleBufs.delete(channelId)
+    _clearSampleHistory(channelId)        // a fresh file starts a clean undo history
     _buildSamplerDerivedBufs(channelId, buf)
     const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
     ch.name = base.length > 14 ? base.slice(0, 14) : base
@@ -2129,6 +2176,9 @@ export function useStudio() {
         lfoDest: 'off', lfoRate: 0.3, lfoDepth: 0, lfoShape: 'sine',
         lfo2Dest: 'off', lfo2Rate: 0.2, lfo2Depth: 0, lfo2Shape: 'triangle',
         playMode: 'classic', grainSize: 0.08, grainScan: 0.5,
+        grainDensity: 0.5, grainSpray: 0.15, grainPan: 0, grainMotion: 0, grainShape: 'hann',
+        arpEnabled: false, arpMode: 'up', arpRate: '1/16', arpGate: 0.5, arpRange: 1,
+        sliceMode: false, sliceMarkers: [],
         zones: [],
       }
       ch.knobs  = [{ key: 'pitch', label: 'NOTE', min: 0, max: 127, decimals: 0 }]
@@ -2203,6 +2253,7 @@ export function useStudio() {
   function normalizeAudioFile(channelId) {
     const buf = audioFileBufs.get(channelId)
     if (!buf) return
+    _pushSampleHistory(channelId)
     let maxAbs = 0
     for (let c = 0; c < buf.numberOfChannels; c++) {
       const d = buf.getChannelData(c)
@@ -2284,6 +2335,289 @@ export function useStudio() {
         }
       }
     }
+  }
+
+  // ── Sample-edit undo history ─────────────────────────────────────────────────
+  //   Destructive ops mutate the AudioBuffer directly, so before each one we snap a
+  //   copy of the buffer plus the params an op can reset (offsets / loop / markers).
+  //   undoSampleEdit() pops one step back. Capped to bound memory.
+  const SAMPLE_HISTORY_MAX = 20
+  const _HIST_PARAM_KEYS = ['startOffset', 'endOffset', 'loopStart', 'loopEnd',
+    'warpMarkers', 'sliceMarkers', 'sliceMode', 'reverse', 'sampleBpm', 'warpEnabled']
+
+  function _cloneBuffer(buf) {
+    const out = audioCtx.createBuffer(buf.numberOfChannels, buf.length, buf.sampleRate)
+    for (let c = 0; c < buf.numberOfChannels; c++) out.getChannelData(c).set(buf.getChannelData(c))
+    return out
+  }
+
+  function _pushSampleHistory(channelId) {
+    const buf = audioFileBufs.get(channelId)
+    const ch  = channels.find(c => c.id === channelId)
+    if (!buf || !ch?.params) return
+    const snap = { buf: _cloneBuffer(buf), params: {} }
+    for (const k of _HIST_PARAM_KEYS) {
+      const v = ch.params[k]
+      snap.params[k] = Array.isArray(v) ? JSON.parse(JSON.stringify(v)) : v
+    }
+    const stack = sampleEditHistory.get(channelId) ?? []
+    stack.push(snap)
+    while (stack.length > SAMPLE_HISTORY_MAX) stack.shift()
+    sampleEditHistory.set(channelId, stack)
+    sampleHistoryDepth[channelId] = stack.length
+  }
+
+  function _clearSampleHistory(channelId) {
+    sampleEditHistory.delete(channelId)
+    sampleHistoryDepth[channelId] = 0
+  }
+
+  function canUndoSampleEdit(channelId) {
+    return (sampleHistoryDepth[channelId] ?? 0) > 0
+  }
+
+  // Revert the last destructive edit on a sampler channel (one step back).
+  function undoSampleEdit(channelId) {
+    const stack = sampleEditHistory.get(channelId)
+    const ch    = channels.find(c => c.id === channelId)
+    if (!stack || !stack.length || !ch?.params) return
+    const snap = stack.pop()
+    sampleHistoryDepth[channelId] = stack.length
+    audioFileBufs.set(channelId, snap.buf)
+    for (const k of _HIST_PARAM_KEYS) if (k in snap.params) ch.params[k] = snap.params[k]
+    _buildSamplerDerivedBufs(channelId, snap.buf)
+    _clearWarpCache(channelId)
+    xfadeLoopBufs.delete(channelId)
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+    markDirty()
+  }
+
+  // ── Destructive sample processing (built-in wave editor) ─────────────────────
+  //   A toolbox of offline DSP operations that bake permanently into the sampler's
+  //   buffer (Normalize / Amplify / DC-offset / Invert / Fades / Swap / Trim / Crop
+  //   / Reverse / Silence). After any op we rebuild the derived buffers (reverse,
+  //   ping-pong), drop the warp + crossfade caches and bump the reactive version.
+  function processSampleAudio(channelId, op, arg) {
+    const src = audioFileBufs.get(channelId)
+    const ch  = channels.find(c => c.id === channelId)
+    if (!src || !ch?.params) return
+    initAudio()
+    const nch = src.numberOfChannels, len = src.length, sr = src.sampleRate
+    let out = src                     // most ops mutate in place
+    let lengthChanged = false
+
+    const SIL = 0.0008                // ≈ -62 dBFS silence threshold
+
+    if (op === 'normalize') { normalizeAudioFile(channelId); return }
+
+    // Snapshot for undo before mutating (normalize handles its own snapshot above).
+    _pushSampleHistory(channelId)
+
+    if (op === 'amplify') {
+      const db   = (arg ?? 0)
+      const gain = Math.pow(10, db / 20)
+      for (let c = 0; c < nch; c++) {
+        const d = src.getChannelData(c)
+        for (let i = 0; i < len; i++) d[i] = Math.max(-1, Math.min(1, d[i] * gain))
+      }
+    } else if (op === 'dcoffset') {
+      for (let c = 0; c < nch; c++) {
+        const d = src.getChannelData(c)
+        let m = 0; for (let i = 0; i < len; i++) m += d[i]; m /= len
+        for (let i = 0; i < len; i++) d[i] -= m
+      }
+    } else if (op === 'invert') {
+      for (let c = 0; c < nch; c++) {
+        const d = src.getChannelData(c)
+        for (let i = 0; i < len; i++) d[i] = -d[i]
+      }
+    } else if (op === 'reverse') {
+      for (let c = 0; c < nch; c++) {
+        const d = src.getChannelData(c)
+        for (let i = 0, j = len - 1; i < j; i++, j--) { const t = d[i]; d[i] = d[j]; d[j] = t }
+      }
+      ch.params.reverse = false       // baked in — clear the live-reverse toggle
+    } else if (op === 'fadein' || op === 'fadeout') {
+      const fadeN = Math.max(1, Math.min(len, Math.floor(Math.min(len / 3, sr * 0.25))))
+      for (let c = 0; c < nch; c++) {
+        const d = src.getChannelData(c)
+        for (let i = 0; i < fadeN; i++) {
+          const t = Math.sin((i / fadeN) * Math.PI * 0.5)   // equal-power curve
+          if (op === 'fadein') d[i] *= t
+          else                 d[len - 1 - i] *= t
+        }
+      }
+    } else if (op === 'swapstereo') {
+      if (nch >= 2) {
+        const L = src.getChannelData(0), R = src.getChannelData(1)
+        for (let i = 0; i < len; i++) { const t = L[i]; L[i] = R[i]; R[i] = t }
+      }
+    } else if (op === 'silence') {
+      for (let c = 0; c < nch; c++) src.getChannelData(c).fill(0)
+    } else if (op === 'crop' || op === 'trimsilence') {
+      let a, b
+      if (op === 'crop') {
+        a = Math.floor(Math.max(0, Math.min(1, ch.params.startOffset ?? 0)) * len)
+        b = Math.ceil (Math.max(0, Math.min(1, ch.params.endOffset   ?? 1)) * len)
+      } else {
+        a = 0; b = len
+        const peakAt = i => { let p = 0; for (let c = 0; c < nch; c++) p = Math.max(p, Math.abs(src.getChannelData(c)[i])); return p }
+        while (a < len && peakAt(a) < SIL) a++
+        while (b > a   && peakAt(b - 1) < SIL) b--
+      }
+      const newLen = Math.max(1, b - a)
+      if (newLen !== len) {
+        out = audioCtx.createBuffer(nch, newLen, sr)
+        for (let c = 0; c < nch; c++) out.getChannelData(c).set(src.getChannelData(c).subarray(a, b))
+        lengthChanged = true
+      }
+    }
+
+    if (out !== src) audioFileBufs.set(channelId, out)
+    if (lengthChanged) {
+      ch.params.startOffset = 0; ch.params.endOffset = 1
+      ch.params.loopStart   = 0; ch.params.loopEnd   = 1
+      ch.params.warpMarkers = []; ch.params.sliceMarkers = []
+    }
+    _buildSamplerDerivedBufs(channelId, audioFileBufs.get(channelId))
+    _clearWarpCache(channelId)
+    xfadeLoopBufs.delete(channelId)
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+    markDirty()
+  }
+
+  // Detect the fundamental pitch of a sampler's audio (normalized autocorrelation
+  // over a window taken from the sample start) and set the root note to match —
+  // the building block behind "load a vocal, hit detect, play it in tune".
+  function detectSamplePitch(channelId) {
+    const buf = audioFileBufs.get(channelId)
+    const ch  = channels.find(c => c.id === channelId)
+    if (!buf || !ch?.params) return null
+    const sr   = buf.sampleRate
+    const data = buf.getChannelData(0)
+    let start  = Math.floor(Math.max(0, Math.min(1, ch.params.startOffset ?? 0)) * data.length)
+    const N    = Math.min(data.length - start, Math.max(2048, Math.floor(sr * 0.3)))
+    if (N < 1024) { start = 0 }
+    const M = Math.min(N, data.length - start)
+    if (M < 1024) return null
+
+    // De-mean + RMS gate
+    const x = new Float32Array(M)
+    let mean = 0
+    for (let i = 0; i < M; i++) { x[i] = data[start + i]; mean += x[i] }
+    mean /= M
+    let rms = 0
+    for (let i = 0; i < M; i++) { x[i] -= mean; rms += x[i] * x[i] }
+    rms = Math.sqrt(rms / M)
+    if (rms < 1e-4) return null
+
+    const minLag = Math.floor(sr / 2000)             // up to ~2 kHz
+    const maxLag = Math.min(M - 1, Math.floor(sr / 50))   // down to ~50 Hz
+    let bestLag = -1, best = 0
+    for (let lag = minLag; lag <= maxLag; lag++) {
+      let sum = 0, e0 = 0, e1 = 0
+      for (let i = 0; i + lag < M; i++) { sum += x[i] * x[i + lag]; e0 += x[i] * x[i]; e1 += x[i + lag] * x[i + lag] }
+      const norm = sum / (Math.sqrt(e0 * e1) + 1e-9)
+      if (norm > best) { best = norm; bestLag = lag }
+    }
+    if (bestLag < 0 || best < 0.5) return null        // not pitched enough
+    const freq = sr / bestLag
+    const midi = Math.round(69 + 12 * Math.log2(freq / 440))
+    if (midi < 0 || midi > 127) return null
+    ch.params.rootNote = midi
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+    markDirty()
+    return midi
+  }
+
+  // ── Slicer: transient detection + slice markers (chop a loop in the channel) ──
+  //   Detects onset peaks and stores them as fractional slice positions. With slice
+  //   mode on, each played note (relative to the root) triggers the matching slice.
+  function detectSampleSlices(channelId, sensitivity = 0.5) {
+    const buf = audioFileBufs.get(channelId)
+    const ch  = channels.find(c => c.id === channelId)
+    if (!buf || !ch?.params) return
+    const sr   = buf.sampleRate
+    const data = buf.getChannelData(0)
+    const N    = data.length
+    const win  = Math.max(1, Math.floor(sr * 0.01))   // 10 ms energy frames
+    const frames = Math.floor(N / win)
+    const env = new Float32Array(frames)
+    for (let f = 0; f < frames; f++) {
+      let e = 0
+      for (let i = 0; i < win; i++) { const v = data[f * win + i]; e += v * v }
+      env[f] = Math.sqrt(e / win)
+    }
+    let maxE = 0; for (let f = 0; f < frames; f++) maxE = Math.max(maxE, env[f])
+    if (maxE < 1e-4) return
+    const thresh   = maxE * (0.12 + (1 - sensitivity) * 0.4)
+    const minGapFr = Math.max(1, Math.floor((sr * 0.05) / win))   // ≥50 ms apart
+    const markers  = [{ pos: 0 }]
+    let lastF = -minGapFr
+    for (let f = 1; f < frames - 1; f++) {
+      const rising = env[f] - env[f - 1]
+      if (env[f] > thresh && rising > thresh * 0.35 && f - lastF >= minGapFr) {
+        markers.push({ pos: (f * win) / N })
+        lastF = f
+      }
+    }
+    ch.params.sliceMarkers = markers
+    ch.params.sliceMode = true
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+    markDirty()
+  }
+
+  function setSampleSlices(channelId, markers) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch?.params) return
+    ch.params.sliceMarkers = (markers ?? []).slice().sort((a, b) => a.pos - b.pos)
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+    markDirty()
+  }
+
+  function clearSampleSlices(channelId) {
+    const ch = channels.find(c => c.id === channelId)
+    if (!ch?.params) return
+    ch.params.sliceMarkers = []
+    ch.params.sliceMode = false
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+    markDirty()
+  }
+
+  // Dump a sliced sampler's slices to a fresh pattern, one slice per step in order
+  // (the classic "slices → sequencer" workflow). Each step carries a pitch offset
+  // selecting its slice; slice playback in makeAudioFileFn reads that offset.
+  function sliceSamplerToSequencer(channelId) {
+    const ch = channels.find(c => c.id === channelId)
+    const slices = ch?.params?.sliceMarkers ?? []
+    const n = slices.length
+    if (!ch || n < 2) return null
+    ch.params.sliceMode = true
+    const root = ch.params.rootNote ?? 60
+
+    const id    = 'p' + (++_pid + 1)
+    const color = ch.color ?? COLORS[patterns.length % COLORS.length]
+    patterns.push({ id, name: ((ch.name || 'SLICE') + ' SLICES').slice(0, 16), color })
+    patternData[id] = {}
+
+    const d = getPatData(channelId, id)
+    // Piano-roll: one ascending note per slice (note = root + sliceIndex).
+    d.pianoNotes = Array.from({ length: n }, (_, i) => ({
+      startTick:    i * TICKS_PER_STEP,
+      durationTicks: TICKS_PER_STEP,
+      pitch:        root + i,
+      velocity:     0.8,
+    }))
+    // Step representation: step i fires slice i (stepPitch is the semitone offset).
+    const cap = 32
+    d.steps       = Array.from({ length: cap }, (_, i) => i < n)
+    d.stepPitches = Array.from({ length: cap }, (_, i) => i % n)
+
+    currentPatternId.value = id
+    pickerPatternId.value  = id
+    audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
+    markDirty()
+    return id
   }
 
   // ── Playlist Audio Clips ───────────────────────────────────────────────────────
@@ -3763,8 +4097,14 @@ export function useStudio() {
               cg.linearRampToValueAtTime(0.0001, when + 0.002)
               cg.linearRampToValueAtTime(1.0,    when + 0.004)
             }
-            ch.fn(audioCtx, when, { ...ch.params, pitch: (ch.params.pitch ?? 60) + pitchOff, velocity: vel }, cutDest)
-            registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
+            const basePitch = (ch.params.pitch ?? 60) + pitchOff
+            if (ch.params.arpEnabled && ch.type === 'audiofile') {
+              // Per-step ratchet/arp: the arp fills one step (lower the rate for rolls).
+              _scheduleArp(ch, [basePitch], when, secPerStep, cutDest, { ...ch.params, velocity: vel })
+            } else {
+              ch.fn(audioCtx, when, { ...ch.params, pitch: basePitch, velocity: vel }, cutDest)
+              registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
+            }
           }
         } else {
           // Piano channels: compute the absolute step within the pattern.
@@ -3783,6 +4123,10 @@ export function useStudio() {
           const _stepNotes = _byStep?.get(patternStep)
           if (_stepNotes) {
             const rawParams = toRaw(ch.params)
+            const arpOn = ch.params.arpEnabled && ch.type === 'audiofile'
+            // Arp: group notes that start on the same tick into a chord, then
+            // arpeggiate each chord across its (longest) note length.
+            const arpGroups = arpOn ? new Map() : null
             for (const note of _stepNotes) {
               if (note.muted) continue
               const noteWhen    = when + (note.startTick - stepStartTick) * secPerTick
@@ -3791,9 +4135,18 @@ export function useStudio() {
               const gate = ticksToEnd > 0
                 ? Math.min(nominalGate, Math.max(0.01, ticksToEnd * secPerTick - 0.005))
                 : nominalGate
-              ch.fn(audioCtx, noteWhen, { ...rawParams, pitch: note.pitch + masterPitchSemis.value, velocity: note.velocity ?? 1, gate }, dest)
-              registerVoice(noteWhen, gate + 0.12)
+              if (arpOn) {
+                let g = arpGroups.get(note.startTick)
+                if (!g) { g = { when: noteWhen, span: 0, pitches: [], vel: note.velocity ?? 1 }; arpGroups.set(note.startTick, g) }
+                g.pitches.push(note.pitch + masterPitchSemis.value)
+                if (gate > g.span) g.span = gate
+              } else {
+                ch.fn(audioCtx, noteWhen, { ...rawParams, pitch: note.pitch + masterPitchSemis.value, velocity: note.velocity ?? 1, gate }, dest)
+                registerVoice(noteWhen, gate + 0.12)
+              }
             }
+            if (arpGroups) for (const g of arpGroups.values())
+              _scheduleArp(ch, g.pitches, g.when, g.span, dest, { ...rawParams, velocity: g.vel })
           }
         }
       })
@@ -4273,6 +4626,99 @@ export function useStudio() {
     try { v.release(when) } catch (_) {}
   }
 
+  // ── Arpeggiator (Sampler "misc functions" arp) ───────────────────────────────
+  //   Note rates are expressed in beats so the arp always follows project tempo.
+  //   Works in three contexts: step sequencer (ratchets per step), piano roll
+  //   (held chords arpeggiate across the note length), and live audition.
+  const ARP_DIVISIONS = {
+    '1/4': 1, '1/4T': 2 / 3, '1/8': 0.5, '1/8T': 1 / 3,
+    '1/16': 0.25, '1/16T': 1 / 6, '1/32': 0.125,
+  }
+
+  // Build the ordered pitch ladder a chord arpeggiates through.
+  function _arpLadder(basePitches, range, mode) {
+    const sorted = [...new Set(basePitches)].sort((a, b) => a - b)
+    let lad = []
+    for (let o = 0; o < Math.max(1, range || 1); o++) for (const p of sorted) lad.push(p + 12 * o)
+    if (mode === 'down') lad.reverse()
+    else if (mode === 'updown' && lad.length > 2) lad = lad.concat(lad.slice(1, -1).reverse())
+    return lad
+  }
+
+  // Offline arp expansion used by the scheduler: schedule a run of notes across
+  // `spanSec`, starting at `when`. Pitches must already include any master shift.
+  function _scheduleArp(ch, basePitches, when, spanSec, dest, baseParams) {
+    if (!ch.fn) return
+    const secPerBeat = 60 / bpm.value
+    const stepSec = Math.max(0.02, (ARP_DIVISIONS[ch.params.arpRate] ?? 0.25) * secPerBeat)
+    const mode = ch.params.arpMode ?? 'up'
+    const lad  = _arpLadder(basePitches, ch.params.arpRange ?? 1, mode)
+    if (!lad.length) return
+    const gateFrac = ch.params.arpGate ?? 0.5
+    // Each arp note is a discrete one-shot (never inherit fwd/ping-pong looping,
+    // which would leave every arp note ringing forever).
+    const np = { ...baseParams, loopMode: 'off' }
+    let i = 0
+    for (let t = 0; t < spanSec - 0.0005; t += stepSec) {
+      const pitch = mode === 'random' ? lad[(Math.random() * lad.length) | 0] : lad[i % lad.length]
+      const gate  = Math.max(0.02, stepSec * gateFrac)
+      ch.fn(audioCtx, when + t, { ...np, pitch, gate }, dest)
+      registerVoice(when + t, gate + 0.1)
+      i++
+    }
+  }
+
+  // Live arp clock — drives held audition / QWERTY notes for arp-enabled samplers.
+  const _liveArp = new Map()        // channelId -> { held:[], idx, nextTime }
+  let _arpClockOn = false
+
+  function _arpDest(ch) {
+    const ci = channels.indexOf(ch)
+    return (ci >= 0 && trackGains[ci]) ? trackGains[ci] : audioCtx.destination
+  }
+
+  function _ensureArpClock() {
+    if (_arpClockOn) return
+    _arpClockOn = true
+    const loop = () => {
+      if (!_liveArp.size || !audioCtx) { _arpClockOn = false; return }
+      const now = audioCtx.currentTime, ahead = now + 0.12
+      const secPerBeat = 60 / bpm.value
+      for (const [cid, st] of _liveArp) {
+        const ch = channels.find(c => c.id === cid)
+        if (!ch || !st.held.length || !ch.params?.arpEnabled) { _liveArp.delete(cid); continue }
+        const stepSec = Math.max(0.03, (ARP_DIVISIONS[ch.params.arpRate] ?? 0.25) * secPerBeat)
+        const mode = ch.params.arpMode ?? 'up'
+        const lad  = _arpLadder(st.held, ch.params.arpRange ?? 1, mode)
+        if (!lad.length) continue
+        if (st.nextTime < now) st.nextTime = now + 0.02
+        while (st.nextTime < ahead) {
+          const pitch = (mode === 'random' ? lad[(Math.random() * lad.length) | 0] : lad[st.idx % lad.length]) + masterPitchSemis.value
+          const gate  = Math.max(0.02, stepSec * (ch.params.arpGate ?? 0.5))
+          ch.fn(audioCtx, st.nextTime, { ...ch.params, loopMode: 'off', pitch, velocity: 1, gate }, _arpDest(ch))
+          registerVoice(st.nextTime, gate + 0.1)
+          st.idx++
+          st.nextTime += stepSec
+        }
+      }
+      requestAnimationFrame(loop)
+    }
+    requestAnimationFrame(loop)
+  }
+
+  function _liveArpNoteOn(ch, pitch) {
+    let st = _liveArp.get(ch.id)
+    if (!st) { st = { held: [], idx: 0, nextTime: 0 }; _liveArp.set(ch.id, st) }
+    if (!st.held.includes(pitch)) st.held.push(pitch)
+    _ensureArpClock()
+  }
+  function _liveArpNoteOff(ch, pitch) {
+    const st = _liveArp.get(ch.id)
+    if (!st) return
+    st.held = st.held.filter(p => p !== pitch)
+    if (!st.held.length) _liveArp.delete(ch.id)
+  }
+
   // sustain=true → held voice that lasts until stopNote (live keyboard / piano keys).
   // sustain=false → brief one-shot audition (note drawing) with the instrument's
   // own natural decay; never leaves a voice open.
@@ -4327,6 +4773,13 @@ export function useStudio() {
       return
     }
 
+    // Arp-enabled sampler: feed the live arp clock instead of one held voice.
+    if (ch.type === 'audiofile' && ch.params?.arpEnabled) {
+      _liveArpNoteOn(ch, pitch)
+      registerVoice(when, 0.2)
+      return
+    }
+
     // Audio-file sampler: capture the returned voice so a held / looping note can
     // be released on note-off (a looping sample would otherwise ring forever). This
     // is what lets the live keyboard audition the sampler with its current settings.
@@ -4368,6 +4821,7 @@ export function useStudio() {
   function stopNote(ch, pitch) {
     if (!ch || !audioCtx) return
     const t = audioCtx.currentTime + 0.005
+    if (ch.type === 'audiofile' && ch.params?.arpEnabled) _liveArpNoteOff(ch, pitch)
     _releaseLiveVoice(ch.id + ':' + pitch, t)
     if (ch.type === 'wasm') {
       const node = wasmNodes.get(ch.id)
@@ -4398,6 +4852,7 @@ export function useStudio() {
   // release every held voice (otherwise a looping GM sample could ring forever).
   if (typeof window !== 'undefined') {
     window.addEventListener('blur', () => {
+      _liveArp.clear()
       if (!audioCtx || !liveVoices.size) return
       const t = audioCtx.currentTime
       for (const key of [...liveVoices.keys()]) _releaseLiveVoice(key, t)
@@ -4414,6 +4869,7 @@ export function useStudio() {
     if (isPlaying.value) stopPlay()
     pressedKeys.clear()
     pressedKeyPitch.clear()
+    _liveArp.clear()
     if (!audioCtx) return
 
     const t = audioCtx.currentTime
@@ -5179,6 +5635,7 @@ export function useStudio() {
     // Release audio file / slicer buffers
     audioFileBufs.delete(id); reversedAudioFileBufs.delete(id)
     pingpongAudioFileBufs.delete(id); xfadeLoopBufs.delete(id)
+    _clearSampleHistory(id)
     delete audioFileVersions[id]
     chopBufs.delete(id);      delete chopVersions[id]
     forgeBufsA.delete(id);    forgeBufsB.delete(id)
@@ -5797,6 +6254,9 @@ export function useStudio() {
     // Audio file sampler (Channel Rack)
     addAudioFileChannel, loadAudioFileForChannel, getAudioFileBuf, audioFileVersions,
     normalizeAudioFile, buildLoopXfade, snapToZero,
+    processSampleAudio, detectSamplePitch,
+    undoSampleEdit, canUndoSampleEdit, sampleHistoryDepth,
+    detectSampleSlices, setSampleSlices, clearSampleSlices, sliceSamplerToSequencer,
     setSamplerWarp, redetectSampleBpm,
     addSampleWarpMarker, updateSampleWarpMarker, removeSampleWarpMarker, clearSampleWarpMarkers,
     getSamplerZones, addSamplerZone, removeSamplerZone, updateSamplerZone,

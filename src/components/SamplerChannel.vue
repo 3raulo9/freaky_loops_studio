@@ -39,11 +39,6 @@
         </div>
       </div>
 
-      <!-- Normalize -->
-      <button class="smp-icon-btn" @click="onNormalize"
-        v-hint="'Normalize — raise the whole sample so its loudest peak reaches 0 dBFS (maximum level without clipping).'"
-        title="Normalize to 0 dBFS">NORM</button>
-
       <input ref="fileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
         style="display:none" @change="onFileInput" />
     </div>
@@ -88,11 +83,59 @@
       </template>
     </div>
 
+    <!-- ── Process bar (destructive audio editing) ────────────────────────────── -->
+    <div class="smp-process-bar smp-strip" v-if="buf">
+      <span class="smp-lbl smp-lbl-section">EDIT</span>
+      <button class="smp-icon-btn smp-undo-btn" :disabled="undoDepth === 0" @click="onUndoEdit"
+        v-hint="'Undo — step back through destructive sample edits (normalize, fades, crop, slice changes…). Each click reverts one edit.'"
+        title="Undo last sample edit">↶ UNDO<span v-if="undoDepth" class="smp-undo-count">{{ undoDepth }}</span></button>
+      <button class="smp-icon-btn" @click="onNormalize"
+        v-hint="'Normalize — raise the whole sample so its loudest peak reaches 0 dBFS.'" title="Normalize to 0 dBFS">NORM</button>
+
+      <div class="smp-group" v-hint="'Amplify — apply a fixed gain (in dB) to the whole sample. Negative values attenuate.'">
+        <input type="number" class="smp-num" min="-24" max="24" step="0.5" v-model.number="amplifyDb" title="Gain in dB" />
+        <button class="smp-icon-btn" @click="onAmplify" title="Apply gain (dB)">dB ✓</button>
+      </div>
+
+      <button class="smp-icon-btn" @click="onProcess('dcoffset')"
+        v-hint="'Remove DC offset — re-centre the waveform on zero (fixes a vertically shifted wave).'" title="Remove DC offset">DC</button>
+      <button class="smp-icon-btn" @click="onProcess('invert')"
+        v-hint="'Invert polarity — flip the waveform vertically (phase reverse).'" title="Invert polarity (phase)">INV φ</button>
+      <button class="smp-icon-btn" @click="onProcess('fadein')"
+        v-hint="'Fade in — apply an equal-power fade up at the start of the sample (removes the click on attack).'" title="Fade in">FADE ◢</button>
+      <button class="smp-icon-btn" @click="onProcess('fadeout')"
+        v-hint="'Fade out — apply an equal-power fade down at the end of the sample.'" title="Fade out">FADE ◣</button>
+      <button class="smp-icon-btn" :disabled="!isStereo" @click="onProcess('swapstereo')"
+        v-hint="'Swap stereo — exchange the left and right channels (stereo samples only).'" title="Swap L/R channels">SWAP L/R</button>
+      <button class="smp-icon-btn" @click="onProcess('reverse')"
+        v-hint="'Reverse (bake) — permanently reverse the audio in the buffer (distinct from the live REV toggle).'" title="Reverse audio permanently">⟲ REV</button>
+      <button class="smp-icon-btn" @click="onProcess('trimsilence')"
+        v-hint="'Trim silence — crop near-silent audio from the start and end of the sample.'" title="Trim leading/trailing silence">TRIM</button>
+      <button class="smp-icon-btn smp-warn-btn" @click="onProcess('crop')"
+        v-hint="'Crop — discard everything outside the start/end handles, keeping only the selection.'" title="Crop to start/end selection">✂ CROP</button>
+      <button class="smp-icon-btn smp-warn-btn" @click="onProcess('silence')"
+        v-hint="'Silence — clear the entire buffer to digital silence.'" title="Clear buffer to silence">SILENCE</button>
+
+      <span v-if="pitchFlash" class="smp-xfade-badge">PITCH {{ pitchFlash }}</span>
+    </div>
+
     <!-- ── Waveform ─────────────────────────────────────────────────────────── -->
     <div class="smp-wave-wrap" ref="waveWrap"
-      :class="{ 'smp-wave-warpedit': p.warpEnabled }"
+      :class="{ 'smp-wave-warpedit': p.warpEnabled || p.sliceMode }"
       @dblclick="onWaveDblClick">
       <canvas ref="canvas" class="smp-canvas" />
+
+      <!-- Slice markers (slicer mode): each region is one playable slice -->
+      <template v-if="p.sliceMode">
+        <div v-for="(sm, si) in slices" :key="'sl' + si"
+          class="smp-slice-marker"
+          :style="{ left: sm.pos * 100 + '%' }"
+          :title="'Slice ' + (si + 1) + ' — drag to move, double-click to remove'"
+          @mousedown.stop.prevent="startSliceDrag(si, $event)"
+          @dblclick.stop.prevent="removeSlice(si)">
+          <span class="smp-slice-lbl">{{ si + 1 }}</span>
+        </div>
+      </template>
 
       <!-- Warp markers (when warp is enabled): drag to pin a sample position to a beat -->
       <template v-if="p.warpEnabled">
@@ -159,6 +202,62 @@
       <span v-if="hasXfade" class="smp-xfade-badge">✓ XFADE READY</span>
     </div>
 
+    <!-- ── Slicer bar (chop a beat into playable slices) ──────────────────────── -->
+    <div class="smp-slice-bar smp-strip" v-if="buf">
+      <button class="smp-mode-btn" :class="{ active: p.sliceMode }" @click="toggleSliceMode"
+        v-hint="'Slice mode — split the sample into regions that each play from one key (root = slice 1, root+1 = slice 2 …). Great for chopping drum loops.'"
+        title="Toggle slice playback (note selects slice)">⋔ SLICE</button>
+      <button class="smp-icon-btn" @click="onDetectSlices"
+        v-hint="'Detect slices — automatically place slice markers at the transient onsets in the loop.'"
+        title="Auto-detect slices from transients">DETECT</button>
+      <div class="smp-group" v-hint="'Detection sensitivity — higher finds more, closely-spaced slices.'">
+        <span class="smp-lbl">SENS</span>
+        <input type="range" class="smp-slider" min="0" max="1" step="0.01" v-model.number="sliceSens" />
+      </div>
+      <span class="smp-slice-count" v-if="slices.length">{{ slices.length }} slices</span>
+      <button class="smp-icon-btn" v-if="slices.length >= 2" @click="onSliceToSeq"
+        v-hint="'Dump to sequencer — build a new pattern that triggers every slice in order.'"
+        title="Send slices to a new pattern">→ SEQ</button>
+      <button class="smp-icon-btn" v-if="slices.length" @click="onClearSlices" title="Clear all slices">CLR</button>
+      <span class="smp-zone-hint" v-if="p.sliceMode">dbl-click wave = add slice</span>
+    </div>
+
+    <!-- ── Arpeggiator bar ────────────────────────────────────────────────────── -->
+    <div class="smp-arp-bar smp-strip">
+      <button class="smp-mode-btn" :class="{ active: p.arpEnabled }" @click="p.arpEnabled = !p.arpEnabled"
+        v-hint="'Arpeggiator — turn held chords (or single notes across octaves) into a tempo-synced sequence. Works live, in the piano roll, and as per-step ratchets.'"
+        title="Toggle arpeggiator">⇮ ARP</button>
+
+      <div class="smp-group" v-hint="'Arp direction — Up, Down, Up-Down, or Random order through the chord.'">
+        <span class="smp-lbl">DIR</span>
+        <div class="smp-seg smp-seg-sm">
+          <button v-for="m in ARP_MODES" :key="m.v" :class="{ active: (p.arpMode ?? 'up') === m.v }"
+            :disabled="!p.arpEnabled" @click="p.arpMode = m.v">{{ m.l }}</button>
+        </div>
+      </div>
+
+      <div class="smp-group" v-hint="'Arp rate — note value between steps, synced to project tempo (lower this for per-step ratchet rolls).'">
+        <span class="smp-lbl">RATE</span>
+        <select class="smp-sel" :value="p.arpRate ?? '1/16'" :disabled="!p.arpEnabled"
+          @change="p.arpRate = $event.target.value">
+          <option v-for="r in ARP_RATES" :key="r" :value="r">{{ r }}</option>
+        </select>
+      </div>
+
+      <div class="smp-group" v-hint="'Gate — how much of each arp step the note sounds (lower = more staccato).'">
+        <span class="smp-lbl">GATE</span>
+        <input type="range" class="smp-slider" min="0.05" max="1" step="0.01"
+          :value="p.arpGate ?? 0.5" :disabled="!p.arpEnabled" @input="p.arpGate = +$event.target.value" />
+        <span class="smp-val">{{ Math.round((p.arpGate ?? 0.5) * 100) }}%</span>
+      </div>
+
+      <div class="smp-group" v-hint="'Range — how many octaves the arp spans above the held notes.'">
+        <span class="smp-lbl">OCT</span>
+        <input type="number" class="smp-num" min="1" max="4" :value="p.arpRange ?? 1"
+          :disabled="!p.arpEnabled" @change="p.arpRange = Math.max(1, Math.min(4, +$event.target.value || 1))" />
+      </div>
+    </div>
+
     <!-- ── Audition keyboard (click a key to hear the sample with current settings) ── -->
     <div class="smp-kbd-bar">
       <div class="smp-kbd-side">
@@ -203,6 +302,9 @@
           <input type="number" class="smp-num" v-model.number="p.rootNote"
             min="0" max="127" @change="clampRoot" />
           <span class="smp-note-name">{{ noteLabel(p.rootNote ?? 60) }}</span>
+          <button class="smp-icon-btn smp-detect-btn" @click="onDetectPitch"
+            v-hint="'Detect pitch — analyse the sample and set the root note to its fundamental, so a played C sounds a C.'"
+            title="Detect pitch → set root">⌖</button>
         </div>
 
         <div class="smp-row"
@@ -399,6 +501,41 @@
               :value="p.grainScan ?? 0.5" @input="p.grainScan = +$event.target.value" />
             <span class="smp-val">{{ Math.round((p.grainScan ?? 0.5) * 100) }}%</span>
           </div>
+          <div class="smp-row"
+            v-hint="'Density — grain overlap. Higher packs more simultaneous grains for a thicker, smoother cloud.'">
+            <span class="smp-lbl">DENS</span>
+            <input type="range" class="smp-slider" min="0.1" max="1" step="0.01"
+              :value="p.grainDensity ?? 0.5" @input="p.grainDensity = +$event.target.value" />
+            <span class="smp-val">{{ Math.round((p.grainDensity ?? 0.5) * 100) }}%</span>
+          </div>
+          <div class="smp-row"
+            v-hint="'Spray — randomises the read position of each grain around the scan point for a more organic texture.'">
+            <span class="smp-lbl">SPRAY</span>
+            <input type="range" class="smp-slider" min="0" max="1" step="0.01"
+              :value="p.grainSpray ?? 0.15" @input="p.grainSpray = +$event.target.value" />
+            <span class="smp-val">{{ Math.round((p.grainSpray ?? 0.15) * 100) }}%</span>
+          </div>
+          <div class="smp-row"
+            v-hint="'Pan spread — scatters grains across the stereo field for a wide, lush cloud.'">
+            <span class="smp-lbl">SPRD</span>
+            <input type="range" class="smp-slider" min="0" max="1" step="0.01"
+              :value="p.grainPan ?? 0" @input="p.grainPan = +$event.target.value" />
+            <span class="smp-val">{{ Math.round((p.grainPan ?? 0) * 100) }}%</span>
+          </div>
+          <div class="smp-row"
+            v-hint="'Motion — drifts the scan position across each note so the cloud slowly travels through the sample.'">
+            <span class="smp-lbl">MOVE</span>
+            <input type="range" class="smp-slider" min="-1" max="1" step="0.01"
+              :value="p.grainMotion ?? 0" @input="p.grainMotion = +$event.target.value" />
+            <span class="smp-val">{{ Math.round((p.grainMotion ?? 0) * 100) }}%</span>
+          </div>
+          <div class="smp-row"
+            v-hint="'Grain window — Smooth (Hann) is clean, Tri is sharper, Gate is buzzy/raw.'">
+            <span class="smp-lbl">WIN</span>
+            <select class="smp-sel" :value="p.grainShape ?? 'hann'" @change="p.grainShape = $event.target.value">
+              <option v-for="g in GRAIN_SHAPES" :key="g.v" :value="g.v">{{ g.l }}</option>
+            </select>
+          </div>
         </template>
 
         <div class="smp-col-header smp-col-header-sub">PITCH ENV</div>
@@ -546,6 +683,9 @@ import { useStudio } from '../store/studio.js'
 const props = defineProps({ channel: Object })
 
 const { loadAudioFileForChannel, getAudioFileBuf, audioFileVersions, normalizeAudioFile, buildLoopXfade, snapToZero,
+        processSampleAudio, detectSamplePitch,
+        undoSampleEdit, sampleHistoryDepth,
+        detectSampleSlices, setSampleSlices, clearSampleSlices, sliceSamplerToSequencer,
         setSamplerWarp, redetectSampleBpm, WARP_MODES, bpm,
         addSampleWarpMarker, updateSampleWarpMarker, removeSampleWarpMarker, clearSampleWarpMarkers,
         getSamplerZones, addSamplerZone, removeSamplerZone, updateSamplerZone,
@@ -572,6 +712,9 @@ const LOOP_MODES   = [{ v: 'off', l: 'OFF' }, { v: 'fwd', l: 'FWD' }, { v: 'ping
 const FILTER_TYPES = [{ v: 'off', l: 'OFF' }, { v: 'lowpass', l: 'LP' }, { v: 'highpass', l: 'HP' }, { v: 'bandpass', l: 'BP' }, { v: 'notch', l: 'NT' }]
 const NOTE_NAMES   = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B']
 const ADSR_W = 120, ADSR_H = 36
+const ARP_MODES    = [{ v: 'up', l: 'UP' }, { v: 'down', l: 'DN' }, { v: 'updown', l: 'UD' }, { v: 'random', l: 'RND' }]
+const ARP_RATES    = ['1/4', '1/4T', '1/8', '1/8T', '1/16', '1/16T', '1/32']
+const GRAIN_SHAPES = [{ v: 'hann', l: 'Smooth' }, { v: 'tri', l: 'Tri' }, { v: 'gate', l: 'Gate' }]
 
 // ── Refs ───────────────────────────────────────────────────────────────────────
 const canvas       = ref(null)
@@ -876,10 +1019,16 @@ function onMarkerUp() {
   window.removeEventListener('mousemove', onMarkerMove)
   window.removeEventListener('mouseup', onMarkerUp)
 }
-// Double-click the waveform (warp mode) to drop a new marker.
+// Double-click the waveform: drop a warp marker (warp mode) or a slice marker
+// (slice mode). Warp takes priority when both are enabled.
 function onWaveDblClick(e) {
-  if (!ch.value || !p.value.warpEnabled) return
-  addSampleWarpMarker(ch.value.id, fracFromEvent(e))
+  if (!ch.value) return
+  if (p.value.warpEnabled) { addSampleWarpMarker(ch.value.id, fracFromEvent(e)); return }
+  if (p.value.sliceMode) {
+    const arr = [...(p.value.sliceMarkers ?? []), { pos: fracFromEvent(e) }]
+    setSampleSlices(ch.value.id, arr)
+    nextTick(drawWaveform)
+  }
 }
 
 // ── Root note clamp ────────────────────────────────────────────────────────────
@@ -918,6 +1067,81 @@ function doBuildXfade() {
 
 function doSnap(paramName) {
   if (ch.value) { snapToZero(ch.value.id, paramName); nextTick(drawWaveform) }
+}
+
+// ── Sample processing (built-in wave editor) ──────────────────────────────────────
+const amplifyDb  = ref(0)
+const pitchFlash = ref('')
+
+// Undo depth for THIS channel (reactive — drives the ↶ UNDO button).
+const undoDepth = computed(() => sampleHistoryDepth[ch.value?.id] ?? 0)
+
+function onProcess(op, arg) {
+  if (!ch.value) return
+  processSampleAudio(ch.value.id, op, arg)
+  nextTick(drawWaveform)
+}
+function onUndoEdit() {
+  if (!ch.value) return
+  undoSampleEdit(ch.value.id)
+  nextTick(drawWaveform)
+}
+function onAmplify() {
+  if (!ch.value) return
+  processSampleAudio(ch.value.id, 'amplify', +amplifyDb.value || 0)
+  amplifyDb.value = 0
+  nextTick(drawWaveform)
+}
+function onDetectPitch() {
+  if (!ch.value) return
+  const midi = detectSamplePitch(ch.value.id)
+  pitchFlash.value = midi == null ? 'no pitch' : '→ ' + noteLabel(midi)
+  setTimeout(() => { pitchFlash.value = '' }, 1800)
+}
+
+// ── Slicer ───────────────────────────────────────────────────────────────────────
+const sliceSens = ref(0.5)
+const slices    = computed(() => { void audioFileVersions[ch.value?.id]; return p.value.sliceMarkers ?? [] })
+
+function onDetectSlices() {
+  if (ch.value) { detectSampleSlices(ch.value.id, +sliceSens.value); nextTick(drawWaveform) }
+}
+function onClearSlices() {
+  if (ch.value) { clearSampleSlices(ch.value.id); nextTick(drawWaveform) }
+}
+function onSliceToSeq() {
+  if (ch.value) sliceSamplerToSequencer(ch.value.id)
+}
+function toggleSliceMode() {
+  if (!ch.value) return
+  p.value.sliceMode = !p.value.sliceMode
+}
+
+// Slice-marker dragging (mirrors warp markers).
+let _sliceIdx = null
+function startSliceDrag(idx, e) {
+  _sliceIdx = idx
+  window.addEventListener('mousemove', onSliceMove)
+  window.addEventListener('mouseup', onSliceUp)
+}
+function onSliceMove(e) {
+  if (_sliceIdx === null || !ch.value) return
+  const arr = (p.value.sliceMarkers ?? []).map((m, i) => i === _sliceIdx ? { ...m, pos: fracFromEvent(e) } : m)
+  setSampleSlices(ch.value.id, arr)
+  // Keep dragging the same (now possibly re-sorted) marker by tracking its pos.
+  _sliceIdx = (p.value.sliceMarkers ?? []).findIndex(m => Math.abs(m.pos - fracFromEvent(e)) < 1e-6)
+  nextTick(drawWaveform)
+}
+function onSliceUp() {
+  _sliceIdx = null
+  window.removeEventListener('mousemove', onSliceMove)
+  window.removeEventListener('mouseup', onSliceUp)
+}
+function removeSlice(idx) {
+  if (!ch.value) return
+  const arr = (p.value.sliceMarkers ?? []).filter((_, i) => i !== idx)
+  setSampleSlices(ch.value.id, arr)
+  nextTick(drawWaveform)
 }
 </script>
 
@@ -1393,6 +1617,43 @@ function doSnap(paramName) {
 .smp-warp-marker-lbl {
   position: absolute; top: 0; left: 3px; font-size: 8px; font-weight: 700;
   color: #f1c40f; background: rgba(0,0,0,0.55); padding: 0 2px; border-radius: 2px; pointer-events: none;
+}
+
+/* Process / slice / arp bars all wrap to fit narrow panels */
+.smp-process-bar, .smp-slice-bar, .smp-arp-bar { flex-wrap: wrap; }
+.smp-lbl-section { color: var(--accent); width: auto; }
+.smp-warn-btn { color: #e67e22; border-color: color-mix(in srgb, #e67e22 45%, transparent); }
+.smp-warn-btn:hover { background: color-mix(in srgb, #e67e22 18%, transparent); color: #e67e22; }
+.smp-undo-btn {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.smp-undo-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.smp-undo-btn:disabled { opacity: 0.35; cursor: default; color: var(--smp-muted); border-color: var(--smp-border); background: var(--smp-btn); }
+.smp-undo-count {
+  font-size: 8px; font-weight: 700; line-height: 1;
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent); border-radius: 7px; padding: 1px 4px;
+}
+.smp-detect-btn { padding: 2px 6px; color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.smp-slice-count {
+  font-size: 9px; font-weight: 700; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-radius: 8px; padding: 1px 7px;
+}
+
+/* Slice markers on the waveform (cyan) */
+.smp-slice-marker {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  background: #1abc9c; transform: translateX(-50%); z-index: 5; cursor: ew-resize;
+  box-shadow: 0 0 4px rgba(26,188,156,0.6);
+}
+.smp-slice-marker::after { content: ''; position: absolute; top: 0; bottom: 0; left: -4px; right: -4px; }
+.smp-slice-lbl {
+  position: absolute; bottom: 0; left: 3px; font-size: 8px; font-weight: 700;
+  color: #1abc9c; background: rgba(0,0,0,0.55); padding: 0 2px; border-radius: 2px; pointer-events: none;
 }
 .smp-sel {
   background: var(--smp-input);
