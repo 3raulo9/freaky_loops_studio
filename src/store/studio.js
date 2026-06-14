@@ -4051,7 +4051,9 @@ export function useStudio() {
     return playlistClips
       .filter(c => {
         const w = c.width || 1
-        return cellMod >= c.cell && cellMod < c.cell + w && playingTrackIds.has(c.trackId) && !c.muted
+        // Audio clips are scheduled separately by scheduleAudioClips — excluding
+        // them here stops an audio clip from triggering phantom pattern notes.
+        return c.type !== 'audio' && cellMod >= c.cell && cellMod < c.cell + w && playingTrackIds.has(c.trackId) && !c.muted
       })
       .map(c => ({
         patternId:  c.patternId,
@@ -4100,7 +4102,7 @@ export function useStudio() {
             const basePitch = (ch.params.pitch ?? 60) + pitchOff
             if (ch.params.arpEnabled && ch.type === 'audiofile') {
               // Per-step ratchet/arp: the arp fills one step (lower the rate for rolls).
-              _scheduleArp(ch, [basePitch], when, secPerStep, cutDest, { ...ch.params, velocity: vel })
+              _scheduleArp(audioCtx, ch, [basePitch], when, secPerStep, cutDest, { ...ch.params, velocity: vel })
             } else {
               ch.fn(audioCtx, when, { ...ch.params, pitch: basePitch, velocity: vel }, cutDest)
               registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
@@ -4146,7 +4148,7 @@ export function useStudio() {
               }
             }
             if (arpGroups) for (const g of arpGroups.values())
-              _scheduleArp(ch, g.pitches, g.when, g.span, dest, { ...rawParams, velocity: g.vel })
+              _scheduleArp(audioCtx, ch, g.pitches, g.when, g.span, dest, { ...rawParams, velocity: g.vel })
           }
         }
       })
@@ -4467,81 +4469,353 @@ export function useStudio() {
     isPlaying.value ? pausePlay() : startPlay()
   }
 
-  // ── Real-time render capture ──────────────────────────────────────────────────
-  //   Renders by playing the project through the *live* audio graph and recording
-  //   the master bus, so every voice — including the AudioWorklet plugins (Custom
-  //   Synth / SUBTERRA / WASM) that an OfflineAudioContext can't reproduce — is
-  //   captured exactly as it sounds. Slower than offline (real time) but complete.
-  //   `tracks` is the same resolved list the offline renderer takes (per channel:
-  //   { id, mode, fn, params, volume, pan, muted, swingMix, pattern, pianoNotes,
-  //     stepVelocities }). Returns an AudioBuffer at the live context sample rate.
-  async function renderRealtimeToBuffer(tracks, opts = {}) {
+  // Channel types whose DSP runs in a live AudioWorklet — they cannot be reproduced
+  // inside an OfflineAudioContext, so the offline renderer skips them and the
+  // realtime capture path records them through the live graph instead.
+  const _WORKLET_TYPES = new Set(['wasm', 'custom', 'subterra'])
+  function _offlineRenderable(ch) { return !_WORKLET_TYPES.has(ch?.type) }
+
+  // ── Shared render scheduler ────────────────────────────────────────────────────
+  //   Flattens a pattern- or song-render into a flat, channel-tagged event list
+  //   using the EXACT same per-cell / per-step resolution as the live scheduler
+  //   (scheduleStep), so an exported file lines up with playback: multi-bar
+  //   patterns, slip offsets, clip boundaries, per-channel loop length, swing,
+  //   cut-self and the sampler arp are all honoured. Both render paths consume it.
+  //   Event kinds: 'note' (ch.fn), 'arp' (_scheduleArp), 'cut' (cut-self de-click);
+  //   `cut:true` routes the note through the channel's cut-self gain.
+  function _compileRenderSchedule({ mode = 'song', patternId: renderPatId = currentPatternId.value, bars = 2 } = {}) {
+    const bpmV         = bpm.value
+    const swingV       = swing.value
+    const secPerStep   = (60 / bpmV) / 4
+    const secPerTick   = secPerStep / TICKS_PER_STEP
+    const stepsPerCell = totalSteps.value
+    const masterPitch  = masterPitchSemis.value
+    const rawChannels  = toRaw(channels)
+    const START        = 0.01
+    const isSong       = mode === 'song'
+    const events       = []
+
+    // Timeline length in steps.
+    let totalRenderSteps, patSteps
+    if (isSong) {
+      const playing = new Set(playlistTracks.filter(t => !t.muted).map(t => t.id))
+      let cells = 0
+      for (const c of playlistClips) {
+        if (c.muted || !playing.has(c.trackId)) continue
+        cells = Math.max(cells, c.cell + (c.width || 1))
+      }
+      totalRenderSteps = Math.max(stepsPerCell, cells * stepsPerCell)
+      patSteps = stepsPerCell
+    } else {
+      patSteps = Math.max(stepsPerCell, Math.ceil(getPatternLengthTicks(renderPatId) / TICKS_PER_STEP))
+      totalRenderSteps = patSteps * Math.max(1, bars)
+    }
+
+    // Raw (no-Proxy) per-(pattern:channel) note index, built lazily.
+    const byStepCache = new Map()
+    const offByStep = (pid, cid) => {
+      const key = pid + ':' + cid
+      if (byStepCache.has(key)) return byStepCache.get(key)
+      const notes = toRaw(patternData[pid]?.[cid]?.pianoNotes)
+      let bs = null
+      if (notes?.length) {
+        bs = new Map()
+        for (const n of notes) {
+          if (n.muted) continue
+          const s = Math.floor((n.startTick ?? 0) / TICKS_PER_STEP)
+          if (!bs.has(s)) bs.set(s, [])
+          bs.get(s).push(n)
+        }
+      }
+      byStepCache.set(key, bs)
+      return bs
+    }
+
+    const clipsForCell = (cell) => {
+      if (!isSong) return [{ patternId: renderPatId, clipOffset: 0, clipWidth: 0x7FFFFFFF, slipOffset: 0 }]
+      const playingTrackIds = new Set(playlistTracks.filter(t => !t.muted).map(t => t.id))
+      return playlistClips
+        .filter(c => c.type !== 'audio' && cell >= c.cell && cell < c.cell + (c.width || 1) && playingTrackIds.has(c.trackId) && !c.muted)
+        .map(c => ({ patternId: c.patternId, clipOffset: cell - c.cell, clipWidth: c.width || 1, slipOffset: c.slipOffset ?? 0 }))
+    }
+
+    for (let abs = 0; abs < totalRenderSteps; abs++) {
+      const cell = isSong ? Math.floor(abs / stepsPerCell) : 0
+      const step = isSong ? (abs % stepsPerCell) : (abs % patSteps)
+      const clips = clipsForCell(cell)
+      rawChannels.forEach((ch, ci) => {
+        if (ch.muted) return
+        const swingMix = ch.swingMix ?? 1
+        const swingOff = step % 2 === 1 ? swingV * swingMix * (secPerStep / 3) : 0
+        const when = START + abs * secPerStep + swingOff
+        clips.forEach(({ patternId, clipOffset, clipWidth, slipOffset }) => {
+          const d = getPatData(ch.id, patternId)
+          if (ch.mode === 'steps') {
+            const loopLen = ch.loopEnabled && ch.loopLength > 0 && ch.loopLength < stepsPerCell ? ch.loopLength : null
+            const s = loopLen !== null ? step % loopLen : step
+            if (!d.steps[s]) return
+            const vel      = d.stepVelocities?.[s] ?? 0.8
+            const pitchOff = d.stepPitches?.[s]    ?? 0
+            if (ch.cutSelf) events.push({ kind: 'cut', ci, when })
+            const basePitch = (ch.params.pitch ?? 60) + pitchOff
+            if (ch.params.arpEnabled && ch.type === 'audiofile') {
+              events.push({ kind: 'arp', ci, cut: true, when, span: secPerStep, pitches: [basePitch], baseParams: { ...ch.params, velocity: vel } })
+            } else {
+              events.push({ kind: 'note', ci, cut: true, when, params: { ...ch.params, pitch: basePitch, velocity: vel } })
+            }
+          } else {
+            const patternStep = clipOffset * stepsPerCell + step + slipOffset
+            if (patternStep >= clipWidth * stepsPerCell) return
+            const stepStartTick = patternStep * TICKS_PER_STEP
+            const clipEndTick   = (slipOffset + clipWidth * stepsPerCell) * TICKS_PER_STEP
+            const byStep    = offByStep(patternId, ch.id)
+            const stepNotes = byStep?.get(patternStep)
+            if (!stepNotes) return
+            const arpOn = ch.params.arpEnabled && ch.type === 'audiofile'
+            const arpGroups = arpOn ? new Map() : null
+            for (const note of stepNotes) {
+              if (note.muted) continue
+              const noteWhen    = when + (note.startTick - stepStartTick) * secPerTick
+              const nominalGate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
+              const ticksToEnd  = clipEndTick - note.startTick
+              const gate = ticksToEnd > 0 ? Math.min(nominalGate, Math.max(0.01, ticksToEnd * secPerTick - 0.005)) : nominalGate
+              if (arpOn) {
+                let g = arpGroups.get(note.startTick)
+                if (!g) { g = { when: noteWhen, span: 0, pitches: [], vel: note.velocity ?? 1 }; arpGroups.set(note.startTick, g) }
+                g.pitches.push(note.pitch + masterPitch)
+                if (gate > g.span) g.span = gate
+              } else {
+                events.push({ kind: 'note', ci, cut: false, when: noteWhen, params: { ...ch.params, pitch: note.pitch + masterPitch, velocity: note.velocity ?? 1, gate } })
+              }
+            }
+            if (arpGroups) for (const g of arpGroups.values())
+              events.push({ kind: 'arp', ci, cut: false, when: g.when, span: g.span, pitches: g.pitches, baseParams: { ...ch.params, velocity: g.vel } })
+          }
+        })
+      })
+    }
+
+    return { events, totalRenderSteps, secPerStep, START }
+  }
+
+  // ── Faithful offline render ────────────────────────────────────────────────────
+  //   Renders the project (song or single pattern) to an AudioBuffer through a full
+  //   offline rebuild of the live signal chain: per-channel volume/pan + insert FX,
+  //   mixer-track EQ/FX/volume/pan + sends, playlist audio clips, and the master
+  //   limiter — so the export sounds like playback. Worklet-plugin channels are
+  //   skipped (captured separately in real time and mixed in afterwards).
+  async function renderProjectToBuffer(opts = {}) {
     const {
-      bpm: bpmV = bpm.value, totalSteps: tsteps = totalSteps.value,
-      swing: swingV = 0, bars = 1, tail = 3, normalize = true, onProgress,
+      mode = 'song',
+      patternId: renderPatId = currentPatternId.value,
+      bars = 2,
+      sampleRate = 44100,
+      tail = 3.5,
+      normalize = true,
     } = opts
+
+    const bpmV         = bpm.value
+    const secPerStep   = (60 / bpmV) / 4
+    const stepsPerCell = totalSteps.value
+    const secPerCell   = stepsPerCell * secPerStep
+    const rawChannels  = toRaw(channels)
+    const START        = 0.01
+
+    const { events, totalRenderSteps } = _compileRenderSchedule({ mode, patternId: renderPatId, bars })
+
+    // Total run length: last scheduled voice end, extended by any audio clip that
+    // rings past it, plus the requested tail.
+    let contentSec = totalRenderSteps * secPerStep
+    for (const ev of events) {
+      const end = ev.when + (ev.kind === 'arp' ? ev.span : (ev.params?.gate ?? 0.35))
+      if (end > contentSec) contentSec = end
+    }
+
+    // Resolve playlist audio clips (song mode only — the playlist owns them).
+    const playingTracks = new Set(playlistTracks.filter(t => !t.muted).map(t => t.id))
+    const audioClips = []
+    if (mode === 'song') {
+      for (const clip of playlistClips) {
+        if (clip.type !== 'audio' || clip.muted || !playingTracks.has(clip.trackId)) continue
+        const buf = getWarpedClipBuf(clip)
+        if (!buf) continue
+        const rate      = warpClipRate(clip)
+        const startFrac = clip.startOffset ?? 0
+        const endFrac   = clip.endOffset   ?? 1
+        const sampLen   = buf.duration * (endFrac - startFrac) / rate
+        const when      = START + clip.cell * secPerCell
+        audioClips.push({ clip, buf, rate, startFrac, sampLen, when })
+        if (when + sampLen > contentSec) contentSec = when + sampLen
+      }
+    }
+
+    const totalFrames = Math.max(1, Math.ceil(sampleRate * (contentSec + tail)))
+    const offCtx = new OfflineAudioContext(2, totalFrames, sampleRate)
+
+    // Master bus: mixer-master fader → brickwall limiter → destination. (Mirrors
+    // initAudio; the post-limiter monitor trim is a live-only control, excluded.)
+    const masterGainOff = offCtx.createGain()
+    masterGainOff.gain.value = mixerTracks[0]?.muted ? 0 : (mixerTracks[0]?.volume ?? 1)
+    const limiter = offCtx.createDynamicsCompressor()
+    limiter.threshold.value = -3
+    limiter.knee.value      = 0
+    limiter.ratio.value     = 20
+    limiter.attack.value    = 0.002
+    limiter.release.value   = 0.1
+    masterGainOff.connect(limiter)
+    limiter.connect(offCtx.destination)
+
+    // Mixer inserts (mirror buildMixerInserts). Sidechain ducking is dynamic in the
+    // live engine; offline leaves the duck gain open (EQ + FX + sends still render).
+    const inserts = mixerTracks.slice(1).map(mt => {
+      const eqLow  = offCtx.createBiquadFilter()
+      const eqMid  = offCtx.createBiquadFilter()
+      const eqHigh = offCtx.createBiquadFilter()
+      const gain   = offCtx.createGain()
+      const panner = offCtx.createStereoPanner()
+      eqLow.type  = 'lowshelf';  eqLow.frequency.value  = 80;   eqLow.gain.value  = mt.eq.low
+      eqMid.type  = 'peaking';   eqMid.frequency.value  = 1000; eqMid.Q.value = 1; eqMid.gain.value = mt.eq.mid
+      eqHigh.type = 'highshelf'; eqHigh.frequency.value = 8000; eqHigh.gain.value = mt.eq.high
+      gain.gain.value  = mt.muted ? 0 : mt.volume
+      panner.pan.value = mt.pan
+      eqLow.connect(eqMid); eqMid.connect(eqHigh)
+      let tail = eqHigh
+      ;(mt.fxSlots ?? []).forEach(fx => {
+        if (!fx || !fx.enabled) return
+        let h; try { h = createEffect(offCtx, fx) } catch (_) { h = null }
+        if (h) { tail.connect(h.input); tail = h.output }
+      })
+      const phase = offCtx.createGain(); phase.gain.value = mt.phaseInvert ? -1 : 1
+      tail.connect(phase); phase.connect(gain); gain.connect(panner)
+      panner.connect(masterGainOff)
+      return { id: mt.id, eqLow, panner, sendGains: {} }
+    })
+    const insertById = id => inserts.find(n => n.id === id)
+    // Post-fader send taps into the return buses.
+    mixerTracks.slice(1).forEach((mt, i) => {
+      const node = inserts[i]
+      const sends = mt.sends ?? {}
+      for (const rtnId of Object.keys(sends)) {
+        const amt = sends[rtnId]
+        if (!amt || amt <= 0) continue
+        const rtn = insertById(rtnId)
+        if (!rtn || rtn === node) continue
+        const sg = offCtx.createGain(); sg.gain.value = amt
+        node.panner.connect(sg); sg.connect(rtn.eqLow)
+        node.sendGains[rtnId] = sg
+      }
+    })
+    const insertDest = mtIdx => (mtIdx >= 1 && inserts[mtIdx - 1]) ? inserts[mtIdx - 1].eqLow : masterGainOff
+
+    // Pre-decode GM soundfonts into THIS offline context.
+    const gmProgs = [...new Set(
+      rawChannels.filter(c => !c.muted && _offlineRenderable(c) && c.params?.gmProgram != null)
+                 .map(c => Math.max(0, Math.min(127, c.params.gmProgram)))
+    )]
+    if (gmProgs.length) {
+      try { await Promise.all(gmProgs.map(p => preloadGMInstrument(offCtx, p))) } catch (_) {}
+    }
+
+    // Per-channel routing: fn → [cut] → gain(vol) → pan → insert FX → mixer/master.
+    const gainNode = new Array(rawChannels.length).fill(null)
+    const cutNode  = new Array(rawChannels.length).fill(null)
+    rawChannels.forEach((ch, ci) => {
+      if (ch.muted || !_offlineRenderable(ch)) return
+      const g = offCtx.createGain(); g.gain.value = ch.volume ?? 1
+      const p = offCtx.createStereoPanner(); p.pan.value = ch.pan ?? 0
+      g.connect(p)
+      let tail = p
+      ;(ch.effects ?? []).forEach(fx => {
+        if (!fx || !fx.enabled) return
+        let h; try { h = createEffect(offCtx, fx) } catch (_) { h = null }
+        if (h) { tail.connect(h.input); tail = h.output }
+      })
+      tail.connect(insertDest(ch.mixerTrack || 0))
+      gainNode[ci] = g
+      if (ch.cutSelf) { const cg = offCtx.createGain(); cg.gain.value = 1; cg.connect(g); cutNode[ci] = cg }
+    })
+
+    // Dispatch the schedule into the offline graph.
+    for (const ev of events) {
+      const ci = ev.ci
+      const ch = rawChannels[ci]
+      if (!ch || !_offlineRenderable(ch) || !gainNode[ci]) continue
+      const dest = ev.cut ? (cutNode[ci] ?? gainNode[ci]) : gainNode[ci]
+      if (ev.kind === 'cut') {
+        const cg = cutNode[ci]; if (!cg) continue
+        cg.gain.cancelScheduledValues(ev.when)
+        cg.gain.setValueAtTime(cg.gain.value, ev.when)
+        cg.gain.linearRampToValueAtTime(0.0001, ev.when + 0.002)
+        cg.gain.linearRampToValueAtTime(1.0,    ev.when + 0.004)
+      } else if (ev.kind === 'arp') {
+        _scheduleArp(offCtx, ch, ev.pitches, ev.when, ev.span, dest, ev.baseParams)
+      } else {
+        try { ch.fn(offCtx, ev.when, ev.params, dest) } catch (_) {}
+      }
+    }
+
+    // Playlist audio clips.
+    for (const a of audioClips) {
+      const src = offCtx.createBufferSource()
+      src.buffer = a.buf
+      src.playbackRate.value = a.rate
+      const g = offCtx.createGain(); g.gain.value = a.clip.volume ?? 1
+      src.connect(g)
+      g.connect(insertDest(a.clip.mixerTrack || 0))
+      src.start(a.when, a.buf.duration * a.startFrac, a.sampLen * a.rate)
+    }
+
+    const rendered = await offCtx.startRendering()
+    if (normalize) {
+      let peak = 0
+      for (let c = 0; c < rendered.numberOfChannels; c++) {
+        const data = rendered.getChannelData(c)
+        for (let i = 0; i < data.length; i++) { const v = Math.abs(data[i]); if (v > peak) peak = v }
+      }
+      if (peak > 0 && peak < 0.97) {
+        const gnorm = 0.97 / peak
+        for (let c = 0; c < rendered.numberOfChannels; c++) {
+          const data = rendered.getChannelData(c)
+          for (let i = 0; i < data.length; i++) data[i] *= gnorm
+        }
+      }
+    }
+    return rendered
+  }
+
+  // ── Real-time render capture (live AudioWorklet plugin channels) ────────────────
+  //   OfflineAudioContext can't host the plugin worklets, so those channels are
+  //   played through the *live* graph and captured at the limited master bus. Uses
+  //   the same compiled schedule as the offline render, filtered to worklet
+  //   channels, so the captured part lines up with the offline remainder when mixed.
+  async function renderRealtimeToBuffer(opts = {}) {
+    const { tail = 3, normalize = true, onProgress } = opts
 
     initAudio()
     if (isPlaying.value) stopPlay()
     try { await audioCtx.resume() } catch (_) {}
 
-    const secPerStep   = (60 / bpmV) / 4
-    const secPerTick   = secPerStep / TICKS_PER_STEP
-    const patternTicks = tsteps * TICKS_PER_STEP
+    const rawChannels = toRaw(channels)
+    const { events } = _compileRenderSchedule(opts)
+    const wk = events
+      .filter(e => { const ch = rawChannels[e.ci]; return ch && !_offlineRenderable(ch) })
+      .sort((a, b) => a.when - b.when)
 
-    // Decode any GM soundfonts into the live context up-front so they're audible.
+    if (!wk.length) return audioCtx.createBuffer(2, 1, audioCtx.sampleRate)
+
+    // GM soundfonts used by any worklet-adjacent channel (rare, but harmless).
     const gmProgs = [...new Set(
-      tracks.filter(t => !t.muted && t.params?.gmProgram != null)
-            .map(t => Math.max(0, Math.min(127, t.params.gmProgram)))
+      rawChannels.filter(c => !c.muted && c.params?.gmProgram != null)
+                 .map(c => Math.max(0, Math.min(127, c.params.gmProgram)))
     )]
     if (gmProgs.length) {
       try { await Promise.all(gmProgs.map(p => preloadGMInstrument(audioCtx, p))) } catch (_) {}
     }
 
-    // Build a flat, time-sorted event list (offsets relative to render start).
-    const chIndex = new Map(channels.map((c, i) => [c.id, i]))
-    const events  = []
-    for (const track of tracks) {
-      if (track.muted || typeof track.fn !== 'function') continue
-      const ci = chIndex.get(track.id)
-      if (ci == null) continue
-      const dest     = cutGains[ci] ?? trackGains[ci] ?? masterGain
-      const swingMix = track.swingMix ?? 1
-      for (let rep = 0; rep < bars; rep++) {
-        const repSec = rep * patternTicks * secPerTick
-        if (track.mode === 'piano') {
-          for (const n of (track.pianoNotes || [])) {
-            if (n.muted) continue
-            const startTick = n.startTick ?? 0
-            const step      = Math.floor(startTick / TICKS_PER_STEP)
-            const swingOff  = (step % 2 === 1) ? swingV * swingMix * (secPerStep / 3) : 0
-            const offset    = repSec + startTick * secPerTick + swingOff
-            const gate      = Math.max(0.05, (n.durationTicks ?? TICKS_PER_STEP) * secPerTick)
-            events.push({ offset, fn: track.fn, dest, params: {
-              ...track.params, pitch: n.pitch + masterPitchSemis.value, velocity: n.velocity ?? 1, gate,
-            } })
-          }
-        } else {
-          const steps = track.pattern || []
-          for (let s = 0; s < tsteps; s++) {
-            if (!steps[s]) continue
-            const swingOff = (s % 2 === 1) ? swingV * swingMix * (secPerStep / 3) : 0
-            const offset   = repSec + s * secPerStep + swingOff
-            events.push({ offset, fn: track.fn, dest, params: {
-              ...track.params, velocity: track.stepVelocities?.[s] ?? 0.8,
-            } })
-          }
-        }
-      }
-    }
-    events.sort((a, b) => a.offset - b.offset)
-
-    // Only capture as long as the passed instruments actually play (up to their
-    // last note's end), not the whole arrangement — so a short plugin part inside
-    // a long song records its own span instead of trailing silence to the end.
+    // Capture only as long as the worklet parts actually play, plus the tail.
     let contentSec = 0
-    for (const ev of events) {
-      const end = ev.offset + (ev.params.gate ?? 0.35)
+    for (const ev of wk) {
+      const end = ev.when + (ev.kind === 'arp' ? ev.span : (ev.params?.gate ?? 0.35))
       if (end > contentSec) contentSec = end
     }
     const captureSec = contentSec
@@ -4563,16 +4837,33 @@ export function useStudio() {
     const sink = audioCtx.createGain(); sink.gain.value = 0   // keep the processor pulled without re-outputting
     rec.connect(sink); sink.connect(audioCtx.destination)
 
-    // Real-time lookahead dispatch: fire events ~0.3 s before they sound so we
-    // never create the whole song's worth of nodes at once.
+    // Real-time lookahead dispatch: fire events ~0.3 s before they sound.
     const LOOK = 0.3
     let ei = 0
     await new Promise(resolve => {
       const iv = setInterval(() => {
         const now = audioCtx.currentTime
-        while (ei < events.length && startAt + events[ei].offset <= now + LOOK) {
-          const ev = events[ei++]
-          try { ev.fn(audioCtx, startAt + ev.offset, ev.params, ev.dest) } catch (_) {}
+        while (ei < wk.length && startAt + wk[ei].when <= now + LOOK) {
+          const ev = wk[ei++]
+          const ci = ev.ci
+          const ch = rawChannels[ci]
+          const dest = ev.cut ? (cutGains[ci] ?? trackGains[ci] ?? masterGain) : (trackGains[ci] ?? masterGain)
+          try {
+            if (ev.kind === 'cut') {
+              const cg = cutGains[ci]
+              if (cg) {
+                const t = startAt + ev.when
+                cg.gain.cancelScheduledValues(t)
+                cg.gain.setValueAtTime(cg.gain.value, t)
+                cg.gain.linearRampToValueAtTime(0.0001, t + 0.002)
+                cg.gain.linearRampToValueAtTime(1.0, t + 0.004)
+              }
+            } else if (ev.kind === 'arp') {
+              _scheduleArp(audioCtx, ch, ev.pitches, startAt + ev.when, ev.span, dest, ev.baseParams)
+            } else {
+              ch.fn(audioCtx, startAt + ev.when, ev.params, dest)
+            }
+          } catch (_) {}
         }
         if (onProgress) onProgress(Math.max(0, Math.min(0.99, (now - startAt) / (captureSec + tail))))
         if (now >= endAt) { clearInterval(iv); resolve() }
@@ -4647,7 +4938,7 @@ export function useStudio() {
 
   // Offline arp expansion used by the scheduler: schedule a run of notes across
   // `spanSec`, starting at `when`. Pitches must already include any master shift.
-  function _scheduleArp(ch, basePitches, when, spanSec, dest, baseParams) {
+  function _scheduleArp(ctx, ch, basePitches, when, spanSec, dest, baseParams) {
     if (!ch.fn) return
     const secPerBeat = 60 / bpm.value
     const stepSec = Math.max(0.02, (ARP_DIVISIONS[ch.params.arpRate] ?? 0.25) * secPerBeat)
@@ -4662,8 +4953,8 @@ export function useStudio() {
     for (let t = 0; t < spanSec - 0.0005; t += stepSec) {
       const pitch = mode === 'random' ? lad[(Math.random() * lad.length) | 0] : lad[i % lad.length]
       const gate  = Math.max(0.02, stepSec * gateFrac)
-      ch.fn(audioCtx, when + t, { ...np, pitch, gate }, dest)
-      registerVoice(when + t, gate + 0.1)
+      ch.fn(ctx, when + t, { ...np, pitch, gate }, dest)
+      if (ctx === audioCtx) registerVoice(when + t, gate + 0.1)
       i++
     }
   }
@@ -6325,7 +6616,8 @@ export function useStudio() {
     loopRegion, setLoopRegion, clearLoopRegion,
     // Project save / load
     saveProject, loadProjectFile,
-    // Real-time render capture (covers live AudioWorklet plugins)
+    // Render / export: faithful offline render (+ real-time capture for plugins)
+    renderProjectToBuffer,
     renderRealtimeToBuffer,
     // Drum modules
     addDrumModule, removeDrumModule,
