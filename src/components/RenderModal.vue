@@ -259,24 +259,23 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { useStudio, TICKS_PER_STEP } from '../store/studio.js'
+import { useStudio } from '../store/studio.js'
 import {
   renderLoopToWav,
   renderLoopToMp3,
   renderLoopToOgg,
   getOggMimeType,
   isOfflineRenderable,
-  renderAudioBuffer,
   mixBuffers,
 } from '../audio/export.js'
 
 defineEmits(['close'])
 
 const {
-  channels, bpm, totalSteps, swing, masterPitchSemis,
+  channels, bpm, totalSteps,
   getPatData, currentPatternId,
   patterns, playlistClips, playlistTracks,
-  renderRealtimeToBuffer,
+  renderProjectToBuffer, renderRealtimeToBuffer,
 } = useStudio()
 
 // Channels whose DSP runs in a live AudioWorklet (Custom Synth / SUBTERRA / WASM).
@@ -300,71 +299,19 @@ const songTotalCells = computed(() => {
   return Math.max(...clips.map(c => c.cell + (c.width || 1)))
 })
 
-// Build track list for a single pattern render
-function resolvedPatternTracks(patId) {
-  return channels.map(ch => {
-    const d = getPatData(ch.id, patId)
-    return { ...ch, pattern: d.steps, pianoNotes: d.pianoNotes, stepVelocities: d.stepVelocities }
-  })
-}
-
-// Build expanded track list for full song render.
-// Returns { tracks, songSteps } where songSteps is the total linear step count.
-function resolvedSongTracks() {
-  const stepsPerCell = totalSteps.value
-  const cells        = songTotalCells.value
-  if (!cells) return { tracks: resolvedPatternTracks(currentPatternId.value), songSteps: stepsPerCell }
-
-  const totalSongSteps = cells * stepsPerCell
-  const muted          = mutedTrackIds.value
-
-  return {
-    tracks: channels.map(ch => {
-      if (ch.muted) {
-        return { ...ch, pattern: new Array(totalSongSteps).fill(false), pianoNotes: [], stepVelocities: new Array(totalSongSteps).fill(0.8) }
-      }
-      const steps       = new Array(totalSongSteps).fill(false)
-      const vels        = new Array(totalSongSteps).fill(0.8)
-      const pianoNotes  = []
-
-      playlistClips.forEach(clip => {
-        if (clip.muted || muted.has(clip.trackId)) return
-        const d           = getPatData(ch.id, clip.patternId)
-        const clipSteps   = (clip.width || 1) * stepsPerCell
-        const clipStart   = clip.cell * stepsPerCell
-
-        for (let cs = 0; cs < clipSteps; cs++) {
-          const absStep = clipStart + cs
-          if (absStep >= totalSongSteps) break
-          const patStep = cs % stepsPerCell
-
-          if (ch.mode === 'steps') {
-            if (d.steps[patStep]) {
-              steps[absStep] = true
-              vels[absStep]  = d.stepVelocities?.[patStep] ?? 0.8
-            }
-          } else {
-            // Map each pattern note (tick-based) to its absolute position in the
-            // song timeline, preserving its sub-step offset and full duration.
-            for (const n of d.pianoNotes) {
-              const nStep = Math.floor((n.startTick ?? 0) / TICKS_PER_STEP)
-              if (nStep !== patStep) continue
-              const subTick = (n.startTick ?? 0) - nStep * TICKS_PER_STEP
-              pianoNotes.push({
-                startTick:     absStep * TICKS_PER_STEP + subTick,
-                pitch:         n.pitch,
-                velocity:      n.velocity ?? 0.8,
-                durationTicks: n.durationTicks ?? TICKS_PER_STEP,
-              })
-            }
-          }
-        }
-      })
-
-      return { ...ch, pattern: steps, pianoNotes, stepVelocities: vels }
-    }),
-    songSteps: totalSongSteps,
+// Whether any live-worklet plugin channel (Custom Synth / SUBTERRA / WASM) has
+// notes in this render — if so the realtime capture path runs and is mixed in.
+function workletHasContent() {
+  const wk = workletChannels.value.filter(c => !c.muted)
+  if (!wk.length) return false
+  if (renderMode.value === 'pattern') {
+    return wk.some(c => (getPatData(c.id, renderPatternId.value).pianoNotes || []).length > 0)
   }
+  const muted = mutedTrackIds.value
+  return playlistClips.some(clip => {
+    if (clip.muted || clip.type === 'audio' || muted.has(clip.trackId)) return false
+    return wk.some(c => (getPatData(c.id, clip.patternId).pianoNotes || []).length > 0)
+  })
 }
 
 // ── Format definitions ────────────────────────────────────────────────────────
@@ -499,55 +446,37 @@ async function startRender() {
   let timer
 
   try {
-    // Resolve tracks and timing based on render mode
-    let tracks, renderTotalSteps, renderBars
-    if (renderMode.value === 'song') {
-      const { tracks: t, songSteps } = resolvedSongTracks()
-      tracks           = t
-      renderTotalSteps = songSteps
-      renderBars       = 1
-    } else {
-      tracks           = resolvedPatternTracks(renderPatternId.value)
-      renderTotalSteps = totalSteps.value
-      renderBars       = bars.value
+    const renderOpts = {
+      mode:      renderMode.value,        // 'song' | 'pattern'
+      patternId: renderPatternId.value,
+      bars:      bars.value,
+      tail:      tail.value,
     }
+    const sampleRate = format.value === 'wav' ? wav.value.sampleRate
+                     : format.value === 'mp3' ? 44100 : 48000
+    const normalize  = format.value === 'wav' ? wav.value.normalize
+                     : format.value === 'mp3' ? mp3.value.normalize
+                     : ogg.value.normalize
 
-    const shared = {
-      bpm:         bpm.value,
-      totalSteps:  renderTotalSteps,
-      swing:       swing.value,
-      bars:        renderBars,
-      tail:        tail.value,
-      masterPitch: masterPitchSemis.value,
-    }
-
-    const normalize = format.value === 'wav' ? wav.value.normalize
-                    : format.value === 'mp3' ? mp3.value.normalize
-                    : ogg.value.normalize
-
-    // Smart split: instruments that an OfflineAudioContext can reproduce (synth,
-    // FM, GM, drums, samples) render offline — fast, regardless of song length.
-    // Live AudioWorklet plugins (Custom Synth / SUBTERRA / WASM) can't, so only
-    // *those* tracks are captured in real time, and only for as long as they
-    // actually play. The two are then mixed. So a simple MIDI song is instant, and
-    // a song with one plugin only pays real-time for that plugin's part.
-    const realtimeTracks = tracks.filter(t => !isOfflineRenderable(t) && !t.muted &&
-      ((t.pianoNotes && t.pianoNotes.length) || (t.pattern && t.pattern.some(Boolean))))
-
-    let buffer = null
-    if (realtimeTracks.length) {
+    // The whole project renders offline through a faithful rebuild of the live
+    // signal chain (mixer EQ/FX/sends + master limiter + playlist audio clips), so
+    // the export sounds like playback. Live AudioWorklet plugins (Custom Synth /
+    // SUBTERRA / WASM) can't run offline, so when one actually plays it is captured
+    // in real time and mixed into the offline render.
+    let buffer
+    if (workletHasContent()) {
       progressLabel.value = 'Capturing plugins in real time…'
-      const rtBuf = await renderRealtimeToBuffer(realtimeTracks, {
-        ...shared, normalize: false,
+      const rtBuf = await renderRealtimeToBuffer({
+        ...renderOpts, normalize: false,
         onProgress: p => { progress.value = Math.min(90, p * 88) },
       })
-      // Render everything else offline at the captured buffer's rate, then mix.
       progressLabel.value = 'Rendering the rest offline & mixing…'
-      const offlineTracks = tracks.filter(t => isOfflineRenderable(t))
-      const offBuf = await renderAudioBuffer(offlineTracks, { ...shared, sampleRate: rtBuf.sampleRate, normalize: false })
+      const offBuf = await renderProjectToBuffer({ ...renderOpts, sampleRate: rtBuf.sampleRate, normalize: false })
       buffer = mixBuffers([offBuf, rtBuf], { normalize })
       progressLabel.value = 'Encoding…'
     } else if (format.value === 'ogg') {
+      progressLabel.value = 'Rendering offline…'
+      buffer = await renderProjectToBuffer({ ...renderOpts, sampleRate, normalize })
       progressLabel.value = 'Encoding in real time (plays back audio)…'
       const est = duration.value * 1000
       const start = Date.now()
@@ -555,33 +484,29 @@ async function startRender() {
     } else {
       progressLabel.value = 'Rendering offline…'
       timer = setInterval(() => { if (progress.value < 88) progress.value += (90 - progress.value) * 0.06 }, 80)
+      buffer = await renderProjectToBuffer({ ...renderOpts, sampleRate, normalize })
     }
-
-    const encOpts = extra => ({ ...shared, ...extra, buffer })
 
     let result
     if (format.value === 'wav') {
-      result = await renderLoopToWav(tracks, encOpts({
-        sampleRate: wav.value.sampleRate,
-        bitDepth:   wav.value.bitDepth,
-        channels:   wav.value.channels,
-        normalize:  wav.value.normalize,
-        dither:     wav.value.dither,
-      }))
+      result = await renderLoopToWav([], {
+        buffer,
+        bitDepth: wav.value.bitDepth,
+        channels: wav.value.channels,
+        dither:   wav.value.dither,
+      })
     } else if (format.value === 'mp3') {
-      result = await renderLoopToMp3(tracks, encOpts({
-        bitrate:    mp3.value.bitrate,
-        channels:   mp3.value.channels,
-        normalize:  mp3.value.normalize,
-        sampleRate: 44100,
-      }))
+      result = await renderLoopToMp3([], {
+        buffer,
+        bitrate:  mp3.value.bitrate,
+        channels: mp3.value.channels,
+      })
     } else if (format.value === 'ogg') {
-      result = await renderLoopToOgg(tracks, encOpts({
-        bitrate:    ogg.value.bitrate,
-        channels:   ogg.value.channels,
-        normalize:  ogg.value.normalize,
-        sampleRate: 48000,
-      }))
+      result = await renderLoopToOgg([], {
+        buffer,
+        bitrate:  ogg.value.bitrate,
+        channels: ogg.value.channels,
+      })
     }
 
     clearInterval(timer)
