@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>FreakyLoops.Shell</RootNamespace>
+    <AssemblyName>FreakyLoopsStudio</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Floating version pulls the latest 1.0.x at restore time; pin once stable. -->
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.*" />
+    <!-- Audio device I/O. WaveOut/WASAPI now; ASIO comes with the real engine. -->
+    <PackageReference Include="NAudio" Version="2.2.1" />
+  </ItemGroup>
+
+  <!-- Release only: copy the built Vue app (repo-root /dist) next to the exe so
+       the host can serve it from a virtual host. Run `npm run build` first.
+       Harmless no-op if /dist doesn't exist yet. -->
+  <Target Name="CopyVueDist" AfterTargets="Build"
+          Condition="Exists('$(MSBuildProjectDirectory)\..\..\dist')">
+    <ItemGroup>
+      <VueDist Include="$(MSBuildProjectDirectory)\..\..\dist\**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(VueDist)"
+          DestinationFiles="@(VueDist->'$(OutDir)wwwroot\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
