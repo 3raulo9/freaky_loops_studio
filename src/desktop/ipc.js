@@ -51,8 +51,40 @@ export function testTone(on = true, freq = 440) {
   sendToHost('testTone', { on, freq })
 }
 
+/** Open the native file picker to choose a VST2 .dll, then load it. */
+export function pickVst() {
+  sendToHost('pickVst')
+}
+
+/** Load a VST2 .dll by absolute path into the native host. */
+export function loadVst(path) {
+  sendToHost('loadVst', { path })
+}
+
+/** Play / release a note on the loaded VST instrument. */
+export function vstNoteOn(pitch = 60, velocity = 100) {
+  sendToHost('vstNoteOn', { pitch, velocity })
+}
+export function vstNoteOff(pitch = 60) {
+  sendToHost('vstNoteOff', { pitch })
+}
+
+/** Unload the current VST instrument. */
+export function unloadVst() {
+  sendToHost('vstUnload')
+}
+
 // Debug handle exposed only inside the desktop shell, so you can poke the bridge
-// from the WebView DevTools console — e.g. __desktop.testTone(true) to hear it.
+// from the WebView DevTools console — e.g. __desktop.testTone(true), or
+// __desktop.loadVst('C:\\path\\to\\synth.dll') then __desktop.vstNoteOn(60).
 if (host) {
-  window.__desktop = { sendToHost, onHostMessage, testTone, ping: pingHost, isDesktop }
+  onHostMessage((msg) => {
+    if (msg.type === 'vstLoaded') console.info('[vst] loaded:', msg.payload?.name, msg.payload)
+    if (msg.type === 'vstError') console.error('[vst] error:', msg.payload?.message)
+    if (msg.type === 'vstPeak') console.info('[vst] level:', msg.payload?.peak)
+  })
+  window.__desktop = {
+    sendToHost, onHostMessage, isDesktop, ping: pingHost,
+    testTone, pickVst, loadVst, vstNoteOn, vstNoteOff, unloadVst,
+  }
 }

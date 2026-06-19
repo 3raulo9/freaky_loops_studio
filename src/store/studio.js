@@ -2,6 +2,7 @@ import { ref, reactive, computed, watch, toRaw } from 'vue'
 import { applyTheme } from '../themes.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
+import { sendToHost, onHostMessage, isDesktop } from '../desktop/ipc.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
 import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
@@ -5024,6 +5025,14 @@ export function useStudio() {
     // Retrigger: release any voice already sounding for this exact key first.
     _releaseLiveVoice(key, when)
 
+    // VST2 instrument (native host): forward the note over IPC; audio comes from
+    // the native engine, not the Web Audio graph.
+    if (ch.type === 'vst') {
+      sendToHost('vstNoteOn', { pitch: p, velocity: 100 })
+      registerVoice(when, 0.2)
+      return
+    }
+
     // Continuous built-in synths (sawtooth + FM): sustain the note open-ended via a
     // generous gate, routed through a dedicated release-gain so note-off applies a
     // controllable release tail regardless of the instrument's internal envelope.
@@ -5114,7 +5123,9 @@ export function useStudio() {
     const t = audioCtx.currentTime + 0.005
     if (ch.type === 'audiofile' && ch.params?.arpEnabled) _liveArpNoteOff(ch, pitch)
     _releaseLiveVoice(ch.id + ':' + pitch, t)
-    if (ch.type === 'wasm') {
+    if (ch.type === 'vst') {
+      sendToHost('vstNoteOff', { pitch: pitch + masterPitchSemis.value })
+    } else if (ch.type === 'wasm') {
       const node = wasmNodes.get(ch.id)
       if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
     } else if (ch.type === 'custom') {
@@ -5528,6 +5539,60 @@ export function useStudio() {
     channels.push(ch)
     if (audioCtx) rebuildGains()
     selectedChannelId.value = ch.id
+  }
+
+  // ── VST2 plugin channel (native desktop host) ───────────────────────────────
+  //   The plugin lives in the C# host; this channel's play fn forwards notes to
+  //   it over IPC. Audio comes out of the native engine, not the Web Audio graph,
+  //   so ctx/dest are ignored. One plugin is hosted at a time for now.
+  function makeVstPlayFn() {
+    return function playVstNote(ctx, time, { pitch = 60, velocity = 1, gate = null } = {}, _dest) {
+      const delayMs = Math.max(0, (time - ctx.currentTime) * 1000)
+      const vel = Math.max(1, Math.min(127, Math.round((velocity ?? 1) * 127)))
+      const send = (offsetMs, fn) => {
+        const d = delayMs + offsetMs
+        if (d <= 4) fn(); else setTimeout(fn, d)
+      }
+      send(0, () => sendToHost('vstNoteOn', { pitch, velocity: vel }))
+      if (gate !== null) send(gate * 1000, () => sendToHost('vstNoteOff', { pitch }))
+    }
+  }
+
+  function addVstChannel(name = 'VST', path = '') {
+    const ch = makeChannel({
+      name:    (name || 'VST').toUpperCase().slice(0, 14),
+      color:   '#1abc9c',
+      type:    'vst',
+      mode:    'steps',
+      vstPath: path,
+      knobs:   [],
+      params:  {},
+      fn:      makeVstPlayFn(),
+    })
+    channels.push(ch)
+    if (audioCtx) rebuildGains()
+    selectedChannelId.value = ch.id
+    return ch
+  }
+
+  // Trigger the native "choose a .dll" dialog. The channel is created when the
+  // host replies with 'vstLoaded' (listener below). Desktop shell only.
+  function addVstPlugin() {
+    if (!isDesktop) return
+    sendToHost('pickVst')
+  }
+
+  // Open the loaded plugin's own editor window (native host renders the VST GUI).
+  function openVstEditor() {
+    if (isDesktop) sendToHost('openVstEditor')
+  }
+
+  // When the native host finishes loading a plugin (picker or console), surface
+  // it as an instrument channel in the rack.
+  if (isDesktop) {
+    onHostMessage((msg) => {
+      if (msg.type === 'vstLoaded') addVstChannel(msg.payload?.name, msg.payload?.path)
+    })
   }
 
   // Called from the UI when the user uploads a .wasm file.
@@ -6476,6 +6541,7 @@ export function useStudio() {
     // Channels
     channels, selectedChannelId, selectedChannel,
     soloChannel, addChannel, addFMChannel, addGMChannel, addWasmChannel, loadWasmForChannel,
+    addVstPlugin, addVstChannel, openVstEditor,
     addCustomSynthChannel, getCustomSynthNode,
     addSubterraChannel, getSubterraNode,
     GM_CATEGORIES, GM_CAT_COLORS, GM_INSTRUMENTS,

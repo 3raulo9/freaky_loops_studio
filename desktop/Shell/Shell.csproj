@@ -4,11 +4,18 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <RootNamespace>FreakyLoops.Shell</RootNamespace>
     <AssemblyName>FreakyLoopsStudio</AssemblyName>
+    <!-- Built x86 to host 32-bit VST2 .dll plugins (e.g. Delay Lama) in-process.
+         A 32-bit process can only load 32-bit plugins; switch to x64 (or add a
+         bit-bridge) to host 64-bit plugins. -->
+    <Platforms>x86</Platforms>
+    <Platform>x86</Platform>
+    <PlatformTarget>x86</PlatformTarget>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,6 +23,8 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.*" />
     <!-- Audio device I/O. WaveOut/WASAPI now; ASIO comes with the real engine. -->
     <PackageReference Include="NAudio" Version="2.2.1" />
+    <!-- VST2 (.dll) plugin hosting — pure-C# host (community-maintained). -->
+    <PackageReference Include="VST.NET2-Host" Version="2.1.10" />
   </ItemGroup>
 
   <!-- Release only: copy the built Vue app (repo-root /dist) next to the exe so

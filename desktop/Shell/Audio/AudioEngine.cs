@@ -27,7 +27,7 @@ public sealed class AudioEngine : IDisposable
             };
 
             _out = new WaveOutEvent { DesiredLatency = 120 };
-            _out.Init(gen);
+            _out.Init(new SampleToWaveProvider16(gen));
             _out.Play();
         }
     }

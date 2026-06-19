@@ -81,6 +81,9 @@
       <div class="op-item" @click="addWasmChannel(); closeAllMenus()">
         <span class="op-dot" style="background:#7b2fff"/>⬡ WASM Plugin
       </div>
+      <div v-if="isDesktop" class="op-item" @click="addVstPlugin(); closeAllMenus()">
+        <span class="op-dot" style="background:#1abc9c"/>⬡ VST Plugin (.dll)
+      </div>
       <div class="op-item" @click="addChopChannel(); closeAllMenus()">
         <span class="op-dot" style="background:#e67e22"/>⚡ CHOP Slicer
       </div>
@@ -743,6 +746,7 @@
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useStudio, FM_PRESETS, TICKS_PER_STEP } from '../store/studio.js'
 import { getAsset } from '../browserLibrary.js'
+import { isDesktop } from '../desktop/ipc.js'
 import Knob from './Knob.vue'
 
 const {
@@ -750,7 +754,7 @@ const {
   pianoRollOpen, kbOctave,
   patterns, currentPatternId, getSteps, getPianoNotes,
   addPattern, removePattern, duplicatePattern,
-  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, addGMChannel, addWasmChannel, addCustomSynthChannel, addSubterraChannel, removeChannel, moveChannel, setChannelMode,
+  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, addGMChannel, addWasmChannel, addVstPlugin, openVstEditor, addCustomSynthChannel, addSubterraChannel, removeChannel, moveChannel, setChannelMode,
   GM_CATEGORIES, GM_CAT_COLORS, GM_INSTRUMENTS,
   channelGroups, addGroup, removeGroup, renameGroup, assignChannelsToGroup,
   graphEditorOpen, graphParam,
@@ -1201,6 +1205,7 @@ function applyGradient() {
 // ── Piano roll open/select ────────────────────────────────────────────────────
 function openOrSelectChannel(ch) {
   selectedChannelId.value = ch.id
+  if (ch.type === 'vst') { openVstEditor(); return }
   if (ch.mode === 'piano') pianoRollOpen.value = true
 }
 
