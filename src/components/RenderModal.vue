@@ -275,7 +275,7 @@ const {
   channels, bpm, totalSteps,
   getPatData, currentPatternId,
   patterns, playlistClips, playlistTracks,
-  renderProjectToBuffer, renderRealtimeToBuffer,
+  renderProjectToBuffer, renderRealtimeToBuffer, renderVstToBuffer, isDesktop,
 } = useStudio()
 
 // Channels whose DSP runs in a live AudioWorklet (Custom Synth / SUBTERRA / WASM).
@@ -311,6 +311,27 @@ function workletHasContent() {
   return playlistClips.some(clip => {
     if (clip.muted || clip.type === 'audio' || muted.has(clip.trackId)) return false
     return wk.some(c => (getPatData(c.id, clip.patternId).pianoNotes || []).length > 0)
+  })
+}
+
+// VST instrument channels (desktop only). They make no Web-Audio sound, so they
+// are bounced natively and mixed into the export — same as worklet plugins.
+const vstChannels = computed(() => channels.filter(c => c.type === 'vst' && c.vstPath))
+function vstHasContent() {
+  if (!isDesktop) return false
+  const vs = vstChannels.value.filter(c => !c.muted)
+  if (!vs.length) return false
+  const hasNotes = (c, pid) => {
+    const d = getPatData(c.id, pid)
+    return (d.pianoNotes?.length > 0) || (d.steps?.some(Boolean) ?? false)
+  }
+  if (renderMode.value === 'pattern') {
+    return vs.some(c => hasNotes(c, renderPatternId.value))
+  }
+  const muted = mutedTrackIds.value
+  return playlistClips.some(clip => {
+    if (clip.muted || clip.type === 'audio' || muted.has(clip.trackId)) return false
+    return vs.some(c => hasNotes(c, clip.patternId))
   })
 }
 
@@ -460,31 +481,48 @@ async function startRender() {
 
     // The whole project renders offline through a faithful rebuild of the live
     // signal chain (mixer EQ/FX/sends + master limiter + playlist audio clips), so
-    // the export sounds like playback. Live AudioWorklet plugins (Custom Synth /
-    // SUBTERRA / WASM) can't run offline, so when one actually plays it is captured
-    // in real time and mixed into the offline render.
-    let buffer
+    // the export sounds like playback. Two kinds of channel can't render in the
+    // OfflineAudioContext and are mixed in afterwards: live AudioWorklet plugins
+    // (Custom Synth / SUBTERRA / WASM) are captured in real time; native VST
+    // instruments are bounced by the C# host. All three share one compiled
+    // schedule, so they line up sample-accurately.
+    const vstActive = vstHasContent()
+    let buffer, rtBuf = null, vstBuf = null
+
     if (workletHasContent()) {
       progressLabel.value = 'Capturing plugins in real time…'
-      const rtBuf = await renderRealtimeToBuffer({
+      rtBuf = await renderRealtimeToBuffer({
         ...renderOpts, normalize: false,
-        onProgress: p => { progress.value = Math.min(90, p * 88) },
+        onProgress: p => { progress.value = Math.min(80, p * 78) },
       })
-      progressLabel.value = 'Rendering the rest offline & mixing…'
-      const offBuf = await renderProjectToBuffer({ ...renderOpts, sampleRate: rtBuf.sampleRate, normalize: false })
-      buffer = mixBuffers([offBuf, rtBuf], { normalize })
-      progressLabel.value = 'Encoding…'
-    } else if (format.value === 'ogg') {
-      progressLabel.value = 'Rendering offline…'
-      buffer = await renderProjectToBuffer({ ...renderOpts, sampleRate, normalize })
+    }
+
+    const needMix = !!rtBuf || vstActive
+    const effSR   = rtBuf ? rtBuf.sampleRate : sampleRate   // worklet capture forces the live rate
+
+    progressLabel.value = rtBuf ? 'Rendering the rest offline…' : 'Rendering offline…'
+    if (!rtBuf && format.value !== 'ogg') {
+      timer = setInterval(() => { if (progress.value < 85) progress.value += (88 - progress.value) * 0.06 }, 80)
+    }
+    const offBuf = await renderProjectToBuffer({ ...renderOpts, sampleRate: effSR, normalize: needMix ? false : normalize })
+    clearInterval(timer); timer = undefined
+
+    if (vstActive) {
+      progressLabel.value = 'Bouncing VST plugins…'
+      try {
+        vstBuf = await renderVstToBuffer({ ...renderOpts, sampleRate: effSR })
+      } catch (e) { console.error('[render] VST bounce failed:', e) }
+    }
+
+    buffer = needMix ? mixBuffers([offBuf, rtBuf, vstBuf].filter(Boolean), { normalize }) : offBuf
+
+    if (format.value === 'ogg') {
       progressLabel.value = 'Encoding in real time (plays back audio)…'
       const est = duration.value * 1000
       const start = Date.now()
       timer = setInterval(() => { progress.value = Math.min(95, ((Date.now() - start) / est) * 100) }, 100)
     } else {
-      progressLabel.value = 'Rendering offline…'
-      timer = setInterval(() => { if (progress.value < 88) progress.value += (90 - progress.value) * 0.06 }, 80)
-      buffer = await renderProjectToBuffer({ ...renderOpts, sampleRate, normalize })
+      progressLabel.value = 'Encoding…'
     }
 
     let result

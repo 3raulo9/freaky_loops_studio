@@ -147,6 +147,126 @@ public sealed class VstHost : IDisposable
         catch { return "VST"; }
     }
 
+    // ── Offline bounce ───────────────────────────────────────────────────────
+    //   Renders this plugin's notes faster-than-real-time to interleaved stereo
+    //   float PCM, by REUSING the single live plugin instance (NEVER a second
+    //   VstPluginContext from the same .dll — most VST2s keep global state and
+    //   native-crash on a second instantiation). The live WaveOut stream is
+    //   paused for the duration and restored after, so audio output resumes.
+    //
+    //   `notes` are frame-stamped against the render sample rate; each becomes a
+    //   sample-accurate noteOn at startFrame and noteOff at endFrame.
+    public float[] RenderOffline(IReadOnlyList<VstRenderNote> notes, int renderSampleRate, int totalFrames)
+    {
+        lock (_gate)
+        {
+            if (_ctx == null || totalFrames <= 0) return Array.Empty<float>();
+            var cmd = _ctx.PluginCommandStub.Commands;
+
+            // Stop the live audio thread from pulling blocks while we drive the
+            // plugin directly, then drop any queued live MIDI so it doesn't bleed in.
+            bool resume = _out != null;
+            try { _out?.Pause(); } catch { /* best effort */ }
+            while (_midi.TryDequeue(out _)) { }
+
+            // Re-init the plugin at the render sample rate (restored afterwards).
+            try { cmd.StopProcess(); } catch { }
+            try { cmd.MainsChanged(false); } catch { }
+            cmd.SetSampleRate(renderSampleRate);
+            cmd.SetBlockSize(BlockSize);
+            try { cmd.MainsChanged(true); } catch { }
+            try { cmd.StartProcess(); } catch { }
+
+            int outCount = Math.Max(2, AudioOutputCount);
+            int inCount  = Math.Max(1, AudioInputCount);
+            VstAudioBufferManager? inMgr = null, outMgr = null;
+            var pcm = new float[totalFrames * 2];
+
+            // Flatten notes into a frame-sorted on/off event stream.
+            var midiEvents = new List<(int frame, byte status, byte pitch, byte vel)>(notes.Count * 2);
+            foreach (VstRenderNote n in notes)
+            {
+                int p = Math.Clamp(n.Pitch, 0, 127);
+                int v = Math.Clamp(n.Velocity, 1, 127);
+                int on  = Math.Clamp(n.StartFrame, 0, totalFrames - 1);
+                int off = Math.Clamp(n.EndFrame, on + 1, totalFrames);
+                midiEvents.Add((on,  0x90, (byte)p, (byte)v));
+                midiEvents.Add((off, 0x80, (byte)p, 0));
+            }
+            midiEvents.Sort((a, b) => a.frame.CompareTo(b.frame));
+
+            try
+            {
+                inMgr  = new VstAudioBufferManager(inCount, BlockSize);
+                outMgr = new VstAudioBufferManager(outCount, BlockSize);
+                VstAudioBuffer[] inBuf  = inMgr.Buffers.ToArray();
+                VstAudioBuffer[] outBuf = outMgr.Buffers.ToArray();
+
+                int evIdx = 0;
+                for (int frame = 0; frame < totalFrames; frame += BlockSize)
+                {
+                    int n = Math.Min(BlockSize, totalFrames - frame);
+
+                    // Events landing inside this block, delta-stamped to block start.
+                    List<VstEvent>? blockEvents = null;
+                    while (evIdx < midiEvents.Count && midiEvents[evIdx].frame < frame + n)
+                    {
+                        var e = midiEvents[evIdx++];
+                        (blockEvents ??= new List<VstEvent>()).Add(
+                            new VstMidiEvent(Math.Max(0, e.frame - frame), 0, 0,
+                                new byte[] { e.status, e.pitch, e.vel, 0 }, 0, 0));
+                    }
+                    if (blockEvents != null) cmd.ProcessEvents(blockEvents.ToArray());
+
+                    try { cmd.ProcessReplacing(inBuf, outBuf); }
+                    catch (Exception ex) { if (!_loggedRenderErr) { _loggedRenderErr = true; Log.Write("RenderOffline ProcessReplacing threw: " + ex); } }
+
+                    VstAudioBuffer l = outBuf[0];
+                    VstAudioBuffer r = outBuf.Length > 1 ? outBuf[1] : outBuf[0];
+                    for (int i = 0; i < n; i++)
+                    {
+                        pcm[(frame + i) * 2]     = l[i];
+                        pcm[(frame + i) * 2 + 1] = r[i];
+                    }
+                }
+
+                // Flush any note-offs that landed on the final frame (and so were
+                // never consumed above) in one discarded block, so no voice is left
+                // sounding on the live instance after the bounce.
+                if (evIdx < midiEvents.Count)
+                {
+                    var tail = new List<VstEvent>();
+                    while (evIdx < midiEvents.Count)
+                    {
+                        var e = midiEvents[evIdx++];
+                        tail.Add(new VstMidiEvent(0, 0, 0, new byte[] { e.status, e.pitch, e.vel, 0 }, 0, 0));
+                    }
+                    cmd.ProcessEvents(tail.ToArray());
+                    try { cmd.ProcessReplacing(inBuf, outBuf); } catch { /* ignore */ }
+                }
+            }
+            finally
+            {
+                try { inMgr?.Dispose(); } catch { }
+                try { outMgr?.Dispose(); } catch { }
+
+                // Restore the live sample rate / block size and resume playback.
+                try { cmd.StopProcess(); } catch { }
+                try { cmd.MainsChanged(false); } catch { }
+                cmd.SetSampleRate(SampleRate);
+                cmd.SetBlockSize(BlockSize);
+                try { cmd.MainsChanged(true); } catch { }
+                try { cmd.StartProcess(); } catch { }
+                if (resume) { try { _out?.Play(); } catch { } }
+            }
+
+            Log.Write($"RenderOffline {PluginName}: {notes.Count} notes → {totalFrames} frames @ {renderSampleRate}Hz");
+            return pcm;
+        }
+    }
+
+    private bool _loggedRenderErr;
+
     private void UnloadInternal()
     {
         _out?.Stop();
@@ -169,6 +289,10 @@ public sealed class VstHost : IDisposable
     public void Unload() { lock (_gate) UnloadInternal(); }
     public void Dispose() { lock (_gate) UnloadInternal(); }
 }
+
+// One frame-stamped note for an offline VST bounce. Frames are relative to the
+// render sample rate (not the live 44.1 kHz stream).
+public readonly record struct VstRenderNote(int Pitch, int Velocity, int StartFrame, int EndFrame);
 
 // Pulls audio from the plugin a block at a time and feeds NAudio. Renders one
 // fixed-size VST block, spills it into the interleaved stereo output, and tops

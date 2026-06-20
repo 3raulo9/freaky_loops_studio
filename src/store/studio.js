@@ -4475,6 +4475,10 @@ export function useStudio() {
   // realtime capture path records them through the live graph instead.
   const _WORKLET_TYPES = new Set(['wasm', 'custom', 'subterra'])
   function _offlineRenderable(ch) { return !_WORKLET_TYPES.has(ch?.type) }
+  // VST channels make no sound in the Web-Audio graph (their fn only forwards MIDI
+  // to the native host), so they're excluded from BOTH the offline render and the
+  // realtime worklet capture, and bounced natively instead (renderVstToBuffer).
+  function _isVst(ch) { return ch?.type === 'vst' }
 
   // ── Shared render scheduler ────────────────────────────────────────────────────
   //   Flattens a pattern- or song-render into a flat, channel-tagged event list
@@ -4721,7 +4725,7 @@ export function useStudio() {
     const gainNode = new Array(rawChannels.length).fill(null)
     const cutNode  = new Array(rawChannels.length).fill(null)
     rawChannels.forEach((ch, ci) => {
-      if (ch.muted || !_offlineRenderable(ch)) return
+      if (ch.muted || !_offlineRenderable(ch) || _isVst(ch)) return
       const g = offCtx.createGain(); g.gain.value = ch.volume ?? 1
       const p = offCtx.createStereoPanner(); p.pan.value = ch.pan ?? 0
       g.connect(p)
@@ -4898,6 +4902,111 @@ export function useStudio() {
       }
     }
     return buf
+  }
+
+  // ── Native VST bounce (export) ─────────────────────────────────────────────────
+  //   VST instrument channels make no sound in the Web-Audio graph, so their notes
+  //   are bounced by the native host: we compile the same schedule, hand each VST
+  //   channel a frame-stamped note list to the C# host (`renderVst` IPC), and get
+  //   back interleaved-stereo float32 PCM (base64). Each channel's buffer is summed
+  //   at its volume/pan into one stereo buffer, which RenderModal mixes alongside
+  //   the offline (Web-Audio) and realtime (worklet) renders — sample-aligned
+  //   because all three share `_compileRenderSchedule`.
+  const _vstRenderPending = new Map()   // reqId → { resolve, reject, timer }
+  let   _vstRenderSeq     = 0
+  if (isDesktop) {
+    onHostMessage((msg) => {
+      const reqId = msg.payload?.reqId
+      if (!reqId || !_vstRenderPending.has(reqId)) return
+      const p = _vstRenderPending.get(reqId)
+      if (msg.type === 'vstRenderResult') { _vstRenderPending.delete(reqId); clearTimeout(p.timer); p.resolve(msg.payload) }
+      else if (msg.type === 'vstRenderError') { _vstRenderPending.delete(reqId); clearTimeout(p.timer); p.reject(new Error(msg.payload?.message || 'VST render failed.')) }
+    })
+  }
+
+  function _requestVstRender(channelId, sampleRate, totalFrames, notes) {
+    const reqId = 'vr-' + (++_vstRenderSeq)
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        _vstRenderPending.delete(reqId)
+        reject(new Error('VST render timed out.'))
+      }, 5 * 60 * 1000)
+      _vstRenderPending.set(reqId, { resolve, reject, timer })
+      sendToHost('renderVst', { reqId, channelId, sampleRate, totalFrames, notes })
+    })
+  }
+
+  // base64 interleaved-stereo float32 PCM → AudioBuffer, scaled by volume/pan.
+  function _pcmToBuffer(b64, sampleRate, volume, pan) {
+    const bin = atob(b64)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    const f32 = new Float32Array(bytes.buffer)
+    const frames = Math.floor(f32.length / 2)
+    if (frames <= 0) return null
+    const buf = new AudioBuffer({ length: frames, numberOfChannels: 2, sampleRate })
+    const L = buf.getChannelData(0), R = buf.getChannelData(1)
+    const gL = (volume ?? 1) * (pan <= 0 ? 1 : 1 - pan)
+    const gR = (volume ?? 1) * (pan >= 0 ? 1 : 1 + pan)
+    for (let i = 0; i < frames; i++) { L[i] = f32[i * 2] * gL; R[i] = f32[i * 2 + 1] * gR }
+    return buf
+  }
+
+  async function renderVstToBuffer(opts = {}) {
+    if (!isDesktop) return null
+    const { mode = 'song', patternId: renderPatId = currentPatternId.value, bars = 2,
+            sampleRate = 44100, tail = 3.5 } = opts
+
+    const rawChannels = toRaw(channels)
+    const hasVst = rawChannels.some(c => !c.muted && _isVst(c) && c.vstPath)
+    if (!hasVst) return null
+
+    const { events } = _compileRenderSchedule({ mode, patternId: renderPatId, bars })
+    const defaultGate = (60 / bpm.value) / 4   // one step — fallback for step-mode notes
+
+    // Collect per-VST-channel frame-stamped note lists.
+    const byChannel = new Map()   // ci → { channelId, volume, pan, notes:[] }
+    let lastEndFrame = 0
+    for (const ev of events) {
+      const ch = rawChannels[ev.ci]
+      if (!ch || ch.muted || !_isVst(ch) || !ch.vstPath || ev.kind !== 'note') continue
+      const pitch = Math.max(0, Math.min(127, Math.round(ev.params?.pitch ?? 60)))
+      const vel   = Math.max(1, Math.min(127, Math.round((ev.params?.velocity ?? 1) * 127)))
+      const gate  = ev.params?.gate ?? defaultGate
+      const s = Math.max(0, Math.round(ev.when * sampleRate))
+      const e = Math.max(s + 1, Math.round((ev.when + gate) * sampleRate))
+      if (e > lastEndFrame) lastEndFrame = e
+      let entry = byChannel.get(ev.ci)
+      if (!entry) { entry = { channelId: ch.id, volume: ch.volume ?? 1, pan: ch.pan ?? 0, notes: [] }; byChannel.set(ev.ci, entry) }
+      entry.notes.push({ p: pitch, v: vel, s, e })
+    }
+    if (!byChannel.size) return null
+
+    // Run long enough to capture note tails (delay/reverb ring past noteOff).
+    const totalFrames = lastEndFrame + Math.ceil(tail * sampleRate)
+
+    // Bounce each channel natively, then sum at volume/pan.
+    const buffers = []
+    for (const entry of byChannel.values()) {
+      try {
+        const res = await _requestVstRender(entry.channelId, sampleRate, totalFrames, entry.notes)
+        const buf = _pcmToBuffer(res.pcm, sampleRate, entry.volume, entry.pan)
+        if (buf) buffers.push(buf)
+      } catch (err) {
+        console.error('[vst-render]', entry.channelId, err)
+      }
+    }
+    if (!buffers.length) return null
+    if (buffers.length === 1) return buffers[0]
+
+    const len = Math.max(...buffers.map(b => b.length))
+    const out = new AudioBuffer({ length: len, numberOfChannels: 2, sampleRate })
+    const oL = out.getChannelData(0), oR = out.getChannelData(1)
+    for (const b of buffers) {
+      const bl = b.getChannelData(0), br = b.getChannelData(1)
+      for (let i = 0; i < b.length; i++) { oL[i] += bl[i]; oR[i] += br[i] }
+    }
+    return out
   }
 
   // ── Keyboard live play ────────────────────────────────────────────────────────
@@ -6717,9 +6826,12 @@ export function useStudio() {
     loopRegion, setLoopRegion, clearLoopRegion,
     // Project save / load
     saveProject, loadProjectFile,
-    // Render / export: faithful offline render (+ real-time capture for plugins)
+    // Render / export: faithful offline render (+ real-time capture for plugins,
+    // + native bounce for VST instrument channels)
     renderProjectToBuffer,
     renderRealtimeToBuffer,
+    renderVstToBuffer,
+    isDesktop,
     // Drum modules
     addDrumModule, removeDrumModule,
   }

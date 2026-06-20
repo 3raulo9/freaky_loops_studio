@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 
 namespace FreakyLoops.Shell.Audio;
@@ -16,6 +17,10 @@ public sealed class VstBridgeClient : IDisposable
     public event Action<BridgeLoaded>? Loaded;
     public event Action<string>? Error;
     public event Action<double>? Peak;
+    // Offline-bounce result: a temp file holding interleaved-stereo float32 PCM,
+    // or a failure message. One render at a time (single plugin per bridge).
+    public event Action<string>? RenderComplete;
+    public event Action<string>? RenderFailed;
 
     public bool IsRunning { get { lock (_gate) return _proc is { HasExited: false }; } }
 
@@ -59,6 +64,17 @@ public sealed class VstBridgeClient : IDisposable
     public void NoteOff(int pitch) => Send(new { t = "noteOff", pitch });
     public void OpenEditor() => Send(new { t = "editor", open = true });
     public void CloseEditor() => Send(new { t = "editor", open = false });
+
+    // Ask the helper to bounce its plugin offline. Result arrives asynchronously
+    // via RenderComplete (temp file path) / RenderFailed.
+    public void Render(int sampleRate, int totalFrames, IReadOnlyList<VstRenderNote> notes)
+        => Send(new
+        {
+            t = "render",
+            sr = sampleRate,
+            frames = totalFrames,
+            notes = notes.Select(n => new { p = n.Pitch, v = n.Velocity, s = n.StartFrame, e = n.EndFrame }).ToArray(),
+        });
 
     public void Stop()
     {
@@ -114,6 +130,12 @@ public sealed class VstBridgeClient : IDisposable
             case "peak":
                 if (m.TryGetProperty("peak", out var pe) && pe.ValueKind == JsonValueKind.Number)
                     Peak?.Invoke(pe.GetDouble());
+                break;
+            case "renderResult":
+                RenderComplete?.Invoke(Str(m, "file", ""));
+                break;
+            case "renderError":
+                RenderFailed?.Invoke(Str(m, "message", "Bridge render failed."));
                 break;
         }
     }

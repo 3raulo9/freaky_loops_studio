@@ -1,6 +1,7 @@
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Threading;
@@ -29,6 +30,7 @@ public partial class MainWindow : Window
         public VstBridgeClient? Bridge;  // 32-bit, out-of-process helper
         public VstEditorWindow? Editor;  // in-process editor window
         public DispatcherTimer? Meter;   // in-process peak meter
+        public string? PendingRenderReqId;  // export bounce in flight (bridge only)
         public bool IsBridge => Bridge != null;
     }
 
@@ -66,6 +68,8 @@ public partial class MainWindow : Window
                 SendLoaded(id, b.Name, path, b.Inputs, b.Outputs, b.CanReplacing, b.IsSynth));
             bridge.Error += m => Dispatcher.Invoke(() => SendVstError(id, m));
             bridge.Peak += p => Dispatcher.Invoke(() => SendPeak(id, p));
+            bridge.RenderComplete += file => Dispatcher.Invoke(() => OnBridgeRenderComplete(inst, file));
+            bridge.RenderFailed += m => Dispatcher.Invoke(() => OnBridgeRenderFailed(inst, m));
             inst.Bridge = bridge;
             _vsts[id] = inst;
             // Pass our window handle so the helper owns its editor to the app window.
@@ -284,6 +288,105 @@ public partial class MainWindow : Window
                 if (id != null && _vsts.TryGetValue(id, out VstInstance? inst)) ToggleEditor(id, inst);
                 break;
             }
+
+            case "renderVst":
+            {
+                if (msg.Payload is JsonElement re) HandleRenderVst(re);
+                break;
+            }
         }
     }
+
+    // ── Offline VST bounce (export) ──────────────────────────────────────────────
+    //   The Vue render path asks each VST channel to bounce its notes to PCM so the
+    //   plugin's audio can be mixed into the exported file alongside the Web-Audio
+    //   instruments. Correlated by `reqId`; PCM returns base64 (interleaved stereo
+    //   float32) as `vstRenderResult`, or `vstRenderError`.
+    private void HandleRenderVst(JsonElement re)
+    {
+        string? reqId     = GetStr(re, "reqId");
+        string? channelId = GetStr(re, "channelId");
+        int sampleRate    = GetInt(re, "sampleRate", 44100);
+        int totalFrames   = GetInt(re, "totalFrames", 0);
+        if (reqId == null) return;
+
+        if (channelId == null || !_vsts.TryGetValue(channelId, out VstInstance? inst))
+        { SendVstRenderError(reqId, "No plugin for channel."); return; }
+
+        var notes = ParseRenderNotes(re);
+
+        if (inst.Bridge != null)
+        {
+            inst.PendingRenderReqId = reqId;
+            inst.Bridge.Render(sampleRate, totalFrames, notes);
+            return;
+        }
+
+        VstHost? host = inst.InProc;
+        if (host == null) { SendVstRenderError(reqId, "Plugin not loaded."); return; }
+
+        // Bounce off the UI thread (it pauses WaveOut and drives the plugin); reply
+        // on the dispatcher. STA matches the plugin's loaded apartment.
+        var t = new Thread(() =>
+        {
+            try
+            {
+                float[] pcm = host.RenderOffline(notes, sampleRate, totalFrames);
+                string b64 = FloatsToBase64(pcm);
+                Dispatcher.Invoke(() => SendVstRenderResult(reqId, b64, totalFrames));
+            }
+            catch (Exception ex)
+            {
+                Log.Write("renderVst (in-proc) FAILED: " + ex);
+                Dispatcher.Invoke(() => SendVstRenderError(reqId, $"{ex.GetType().Name}: {ex.Message}"));
+            }
+        });
+        t.SetApartmentState(ApartmentState.STA);
+        t.IsBackground = true;
+        t.Start();
+    }
+
+    private void OnBridgeRenderComplete(VstInstance inst, string file)
+    {
+        string? reqId = inst.PendingRenderReqId;
+        inst.PendingRenderReqId = null;
+        if (reqId == null) return;
+        try
+        {
+            byte[] bytes = File.ReadAllBytes(file);
+            SendVstRenderResult(reqId, Convert.ToBase64String(bytes), bytes.Length / (sizeof(float) * 2));
+        }
+        catch (Exception ex) { SendVstRenderError(reqId, "Read bounce failed: " + ex.Message); }
+        finally { try { File.Delete(file); } catch { /* ignore */ } }
+    }
+
+    private void OnBridgeRenderFailed(VstInstance inst, string message)
+    {
+        string? reqId = inst.PendingRenderReqId;
+        inst.PendingRenderReqId = null;
+        if (reqId != null) SendVstRenderError(reqId, message);
+    }
+
+    private static List<VstRenderNote> ParseRenderNotes(JsonElement re)
+    {
+        var notes = new List<VstRenderNote>();
+        if (re.TryGetProperty("notes", out JsonElement arr) && arr.ValueKind == JsonValueKind.Array)
+            foreach (JsonElement n in arr.EnumerateArray())
+                notes.Add(new VstRenderNote(
+                    GetInt(n, "p", 60), GetInt(n, "v", 100), GetInt(n, "s", 0), GetInt(n, "e", 0)));
+        return notes;
+    }
+
+    private static string FloatsToBase64(float[] pcm)
+    {
+        byte[] bytes = new byte[pcm.Length * sizeof(float)];
+        Buffer.BlockCopy(pcm, 0, bytes, 0, bytes.Length);
+        return Convert.ToBase64String(bytes);
+    }
+
+    private void SendVstRenderResult(string reqId, string pcm, int frames)
+        => _ipc?.Send(new IpcMessage("vstRenderResult", new { reqId, pcm, frames }));
+
+    private void SendVstRenderError(string reqId, string message)
+        => _ipc?.Send(new IpcMessage("vstRenderError", new { reqId, message }));
 }

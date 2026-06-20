@@ -119,10 +119,44 @@ internal static class Program
                 bool open = m.TryGetProperty("open", out var oEl) && oEl.ValueKind == JsonValueKind.True;
                 _pump.BeginInvoke(new Action(() => { if (open) ToggleEditor(); else CloseEditor(); }));
                 break;
+            case "render":
+                RenderOffline(m);
+                break;
             case "unload":
             case "quit":
                 Quit();
                 break;
+        }
+    }
+
+    // Bounce the loaded plugin to interleaved-stereo float32 PCM and hand the
+    // result back as a temp file path (PCM is far too large for a stdout line).
+    private static void RenderOffline(JsonElement m)
+    {
+        try
+        {
+            int sr     = GetInt(m, "sr", 44100);
+            int frames = GetInt(m, "frames", 0);
+            var notes = new List<VstRenderNote>();
+            if (m.TryGetProperty("notes", out var arr) && arr.ValueKind == JsonValueKind.Array)
+                foreach (JsonElement n in arr.EnumerateArray())
+                    notes.Add(new VstRenderNote(
+                        GetInt(n, "p", 60), GetInt(n, "v", 100), GetInt(n, "s", 0), GetInt(n, "e", 0)));
+
+            float[] pcm = Vst.RenderOffline(notes, sr, frames);
+
+            string file = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(), "flvst-" + Guid.NewGuid().ToString("N") + ".f32");
+            byte[] bytes = new byte[pcm.Length * sizeof(float)];
+            Buffer.BlockCopy(pcm, 0, bytes, 0, bytes.Length);
+            System.IO.File.WriteAllBytes(file, bytes);
+
+            WriteOut(new { t = "renderResult", file, frames });
+        }
+        catch (Exception ex)
+        {
+            Log.Write("[bridge] render FAILED: " + ex);
+            WriteOut(new { t = "renderError", message = $"{ex.GetType().Name}: {ex.Message}" });
         }
     }
 
