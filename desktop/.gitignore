@@ -2,6 +2,9 @@
 bin/
 obj/
 
+# publish output / shareable packages
+publish/
+
 # Rider / VS
 .idea/
 .vs/

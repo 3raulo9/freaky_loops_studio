@@ -27,17 +27,14 @@
     <PackageReference Include="VST.NET2-Host" Version="2.1.10" />
   </ItemGroup>
 
-  <!-- Release only: copy the built Vue app (repo-root /dist) next to the exe so
-       the host can serve it from a virtual host. Run `npm run build` first.
-       Harmless no-op if /dist doesn't exist yet. -->
-  <Target Name="CopyVueDist" AfterTargets="Build"
-          Condition="Exists('$(MSBuildProjectDirectory)\..\..\dist')">
-    <ItemGroup>
-      <VueDist Include="$(MSBuildProjectDirectory)\..\..\dist\**\*.*" />
-    </ItemGroup>
-    <Copy SourceFiles="@(VueDist)"
-          DestinationFiles="@(VueDist->'$(OutDir)wwwroot\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
-  </Target>
+  <!-- Bundle the built Vue app (repo-root /dist) into wwwroot for both normal
+       builds and `dotnet publish`, so the Release build serves the UI from its
+       virtual host. Run `npm run build` first so /dist exists. -->
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)\..\..\dist')">
+    <Content Include="..\..\dist\**\*.*"
+             Link="wwwroot\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 
 </Project>

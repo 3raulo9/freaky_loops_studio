@@ -5029,6 +5029,9 @@ export function useStudio() {
     // the native engine, not the Web Audio graph.
     if (ch.type === 'vst') {
       sendToHost('vstNoteOn', { pitch: p, velocity: 100 })
+      // One-shot audition (drawing a note): auto-release so it doesn't hang.
+      // Held notes (sustain=true, live keyboard) are released by stopNote on key-up.
+      if (!sustain) setTimeout(() => sendToHost('vstNoteOff', { pitch: p }), 250)
       registerVoice(when, 0.2)
       return
     }
@@ -5563,7 +5566,7 @@ export function useStudio() {
       name:    (name || 'VST').toUpperCase().slice(0, 14),
       color:   '#1abc9c',
       type:    'vst',
-      mode:    'steps',
+      mode:    'piano',
       vstPath: path,
       knobs:   [],
       params:  {},

@@ -416,7 +416,7 @@
                    behind them as a label / empty-state. -->
               <div v-if="!isMultiBarChannel(ch)"
                 class="mini-pr" :style="{ '--cols': totalSteps }"
-                @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
+                @click="openPianoRoll(ch)" title="Click to open Piano Roll">
                 <div v-for="s in totalSteps" :key="s-1" class="mini-pr-col"
                   :class="{
                     playing: isPlaying && displayStep === s-1,
@@ -434,7 +434,7 @@
                    the window pages with playback (see miniWindowStartBar). -->
               <div v-else
                 class="mini-pr mini-pr-wide"
-                @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
+                @click="openPianoRoll(ch)" title="Click to open Piano Roll">
                 <!-- Playhead lives outside v-memo so it updates every tick without re-rendering notes.
                      Positioned relative to the visible 4-bar window so it tracks the audible part. -->
                 <div v-if="isPlaying && displayStep >= 0"
@@ -1207,6 +1207,14 @@ function openOrSelectChannel(ch) {
   selectedChannelId.value = ch.id
   if (ch.type === 'vst') { openVstEditor(); return }
   if (ch.mode === 'piano') pianoRollOpen.value = true
+}
+
+// Always open the piano roll, for every channel type (incl. VST) — used by the
+// mini piano-roll preview to the right of the name box.
+function openPianoRoll(ch) {
+  selectedChannelId.value = ch.id
+  if (ch.mode !== 'piano') setChannelMode(ch.id, 'piano')
+  pianoRollOpen.value = true
 }
 
 // ── Mini piano-roll preview helpers ──────────────────────────────────────────
