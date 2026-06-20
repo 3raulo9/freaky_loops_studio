@@ -56,6 +56,7 @@ public sealed class VstHost : IDisposable
         {
             UnloadInternal();
             Log.Write($"Loading VST: {path}");
+            Log.Write($"host={(Environment.Is64BitProcess ? "x64" : "x86")} process, dll={PeArch(path)}");
 
             var hostStub = new HostStub();
             VstPluginContext ctx = VstPluginContext.Create(path, hostStub);
@@ -113,6 +114,31 @@ public sealed class VstHost : IDisposable
     {
         var data = new byte[] { (byte)status, (byte)pitch, (byte)velocity, 0 };
         return new VstMidiEvent(0, 0, 0, data, 0, 0);
+    }
+
+    // Reads the COFF machine field from a PE file so the log shows the plugin's
+    // real architecture (x64/x86) — a bitness mismatch is the #1 load failure.
+    // Also used by the host to decide in-process load vs the x86 bit-bridge.
+    internal static string PeArch(string path)
+    {
+        try
+        {
+            using var fs = System.IO.File.OpenRead(path);
+            using var br = new System.IO.BinaryReader(fs);
+            fs.Position = 0x3C;
+            int peOff = br.ReadInt32();
+            fs.Position = peOff;
+            if (br.ReadUInt32() != 0x00004550) return "not-PE"; // "PE\0\0"
+            ushort machine = br.ReadUInt16();
+            return machine switch
+            {
+                0x8664 => "x64",
+                0x014c => "x86",
+                0xAA64 => "arm64",
+                _ => $"machine 0x{machine:X4}",
+            };
+        }
+        catch (Exception ex) { return "unknown (" + ex.GetType().Name + ")"; }
     }
 
     private static string SafeName(VstPluginContext ctx)

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>FreakyLoops.VstBridge</RootNamespace>
+    <AssemblyName>FreakyLoopsVstBridge</AssemblyName>
+    <!-- x86 so it can host 32-bit VST2 .dll plugins that the x64 main app can't
+         load in-process. Spawned by the main app as the "bit-bridge" helper. -->
+    <Platforms>x86</Platforms>
+    <Platform>x86</Platform>
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="VST.NET2-Host" Version="2.1.10" />
+  </ItemGroup>
+
+  <!-- Reuse the exact hosting code from the main app, recompiled here as x86. -->
+  <ItemGroup>
+    <Compile Include="..\Shell\Audio\VstHost.cs" Link="Shared\VstHost.cs" />
+    <Compile Include="..\Shell\Audio\HostStub.cs" Link="Shared\HostStub.cs" />
+    <Compile Include="..\Shell\Audio\Log.cs" Link="Shared\Log.cs" />
+    <Compile Include="..\Shell\VstEditorWindow.cs" Link="Shared\VstEditorWindow.cs" />
+  </ItemGroup>
+
+</Project>

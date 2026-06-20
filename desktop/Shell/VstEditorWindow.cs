@@ -12,10 +12,15 @@ namespace FreakyLoops.Shell;
 internal sealed class VstEditorWindow : Form
 {
     private const int HeaderH = 26;
+    private const int EdgeT = 6;    // px border strip the form owns, for edge-resize
     private const int WS_EX_NOACTIVATE = 0x08000000;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WM_MOUSEACTIVATE = 0x0021;
     private const int MA_NOACTIVATE = 3;
+
+    private const int WM_NCHITTEST = 0x0084;
+    private const int HTLEFT = 10, HTRIGHT = 11, HTTOP = 12, HTTOPLEFT = 13,
+                      HTTOPRIGHT = 14, HTBOTTOM = 15, HTBOTTOMLEFT = 16, HTBOTTOMRIGHT = 17;
 
     private sealed class OwnerWindow : IWin32Window
     {
@@ -40,6 +45,10 @@ internal sealed class VstEditorWindow : Form
         StartPosition = FormStartPosition.Manual;
         AutoScaleMode = AutoScaleMode.None;     // plugin GUIs are pixel-exact
         BackColor = Color.FromArgb(18, 18, 24);
+        // The Padding strip is form background that docked children don't cover, so
+        // WM_NCHITTEST below can claim it for native edge-resize. Doubles as a frame.
+        Padding = new Padding(EdgeT);
+        MinimumSize = new Size(240, HeaderH + 2 * EdgeT + 80);
 
         Rectangle rect = _vst.GetEditorRect();
         int pw = Math.Max(220, rect.Width);
@@ -83,7 +92,7 @@ internal sealed class VstEditorWindow : Form
         _content = new Panel { Dock = DockStyle.Fill, BackColor = Color.Black };
         Controls.Add(_content);
         Controls.Add(header);
-        ClientSize = new Size(pw, ph + HeaderH);
+        ClientSize = new Size(pw + 2 * EdgeT, ph + HeaderH + 2 * EdgeT);
 
         _idle = new System.Windows.Forms.Timer { Interval = 30 };
         _idle.Tick += (_, _) => { try { _vst.EditorIdle(); } catch { /* ignore */ } };
@@ -107,6 +116,21 @@ internal sealed class VstEditorWindow : Form
     protected override void WndProc(ref Message m)
     {
         if (m.Msg == WM_MOUSEACTIVATE) { m.Result = (IntPtr)MA_NOACTIVATE; return; }
+
+        // Claim the padding strip at the window edges for native resize, so the
+        // borderless editor can be dragged larger/smaller by any edge or corner.
+        if (m.Msg == WM_NCHITTEST)
+        {
+            int lp = (int)m.LParam;
+            var screen = new Point(unchecked((short)(lp & 0xFFFF)), unchecked((short)((lp >> 16) & 0xFFFF)));
+            Point p = PointToClient(screen);
+            int w = ClientSize.Width, h = ClientSize.Height;
+            bool l = p.X <= EdgeT, r = p.X >= w - EdgeT, t = p.Y <= EdgeT, b = p.Y >= h - EdgeT;
+            int hit =
+                t && l ? HTTOPLEFT : t && r ? HTTOPRIGHT : b && l ? HTBOTTOMLEFT : b && r ? HTBOTTOMRIGHT :
+                l ? HTLEFT : r ? HTRIGHT : t ? HTTOP : b ? HTBOTTOM : 0;
+            if (hit != 0) { m.Result = (IntPtr)hit; return; }
+        }
         base.WndProc(ref m);
     }
 
@@ -122,7 +146,8 @@ internal sealed class VstEditorWindow : Form
             Rectangle r = _vst.GetEditorRect();
             Log.Write($"Editor shown: owner={ownerHwnd} at {screenX},{screenY} content={_content.Handle} rect={r.Width}x{r.Height}");
             if (r.Width > 0 && r.Height > 0)
-                ClientSize = new Size(Math.Max(220, r.Width), Math.Max(100, r.Height) + HeaderH);
+                ClientSize = new Size(Math.Max(220, r.Width) + 2 * EdgeT,
+                                      Math.Max(100, r.Height) + HeaderH + 2 * EdgeT);
             _idle.Start();
         }
         catch (Exception ex) { Log.Write("Editor open FAILED: " + ex); }

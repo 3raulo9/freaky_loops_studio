@@ -5028,10 +5028,10 @@ export function useStudio() {
     // VST2 instrument (native host): forward the note over IPC; audio comes from
     // the native engine, not the Web Audio graph.
     if (ch.type === 'vst') {
-      sendToHost('vstNoteOn', { pitch: p, velocity: 100 })
+      sendToHost('vstNoteOn', { id: ch.id, pitch: p, velocity: 100 })
       // One-shot audition (drawing a note): auto-release so it doesn't hang.
       // Held notes (sustain=true, live keyboard) are released by stopNote on key-up.
-      if (!sustain) setTimeout(() => sendToHost('vstNoteOff', { pitch: p }), 250)
+      if (!sustain) setTimeout(() => sendToHost('vstNoteOff', { id: ch.id, pitch: p }), 250)
       registerVoice(when, 0.2)
       return
     }
@@ -5127,7 +5127,7 @@ export function useStudio() {
     if (ch.type === 'audiofile' && ch.params?.arpEnabled) _liveArpNoteOff(ch, pitch)
     _releaseLiveVoice(ch.id + ':' + pitch, t)
     if (ch.type === 'vst') {
-      sendToHost('vstNoteOff', { pitch: pitch + masterPitchSemis.value })
+      sendToHost('vstNoteOff', { id: ch.id, pitch: pitch + masterPitchSemis.value })
     } else if (ch.type === 'wasm') {
       const node = wasmNodes.get(ch.id)
       if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
@@ -5544,11 +5544,12 @@ export function useStudio() {
     selectedChannelId.value = ch.id
   }
 
-  // ── VST2 plugin channel (native desktop host) ───────────────────────────────
-  //   The plugin lives in the C# host; this channel's play fn forwards notes to
-  //   it over IPC. Audio comes out of the native engine, not the Web Audio graph,
-  //   so ctx/dest are ignored. One plugin is hosted at a time for now.
-  function makeVstPlayFn() {
+  // ── VST2 plugin channels (native desktop host) ──────────────────────────────
+  //   Each VST channel maps to ONE plugin instance in the C# host, keyed by the
+  //   channel id, so many plugins (mixed 32/64-bit) run at once. The play fn
+  //   forwards notes over IPC; audio comes from the native engine, not Web Audio,
+  //   so ctx/dest are ignored.
+  function makeVstPlayFn(channelId) {
     return function playVstNote(ctx, time, { pitch = 60, velocity = 1, gate = null } = {}, _dest) {
       const delayMs = Math.max(0, (time - ctx.currentTime) * 1000)
       const vel = Math.max(1, Math.min(127, Math.round((velocity ?? 1) * 127)))
@@ -5556,13 +5557,14 @@ export function useStudio() {
         const d = delayMs + offsetMs
         if (d <= 4) fn(); else setTimeout(fn, d)
       }
-      send(0, () => sendToHost('vstNoteOn', { pitch, velocity: vel }))
-      if (gate !== null) send(gate * 1000, () => sendToHost('vstNoteOff', { pitch }))
+      send(0, () => sendToHost('vstNoteOn', { id: channelId, pitch, velocity: vel }))
+      if (gate !== null) send(gate * 1000, () => sendToHost('vstNoteOff', { id: channelId, pitch }))
     }
   }
 
-  function addVstChannel(name = 'VST', path = '') {
+  function addVstChannel(name = 'VST', path = '', id = undefined) {
     const ch = makeChannel({
+      ...(id ? { id } : {}),     // adopt the host's id for console-driven loads
       name:    (name || 'VST').toUpperCase().slice(0, 14),
       color:   '#1abc9c',
       type:    'vst',
@@ -5570,31 +5572,47 @@ export function useStudio() {
       vstPath: path,
       knobs:   [],
       params:  {},
-      fn:      makeVstPlayFn(),
     })
+    ch.fn = makeVstPlayFn(ch.id)   // bind the play fn to the now-known channel id
     channels.push(ch)
     if (audioCtx) rebuildGains()
     selectedChannelId.value = ch.id
     return ch
   }
 
-  // Trigger the native "choose a .dll" dialog. The channel is created when the
-  // host replies with 'vstLoaded' (listener below). Desktop shell only.
+  // Create the VST channel immediately (so a slot appears), then ask the host to
+  // pick a .dll and load it INTO that channel id. Mixed bitness is fine: 64-bit
+  // loads in-process, 32-bit via the bridge — both keyed by this id.
   function addVstPlugin() {
     if (!isDesktop) return
-    sendToHost('pickVst')
+    const ch = addVstChannel('VST', '')
+    ch._vstLoading = true          // dropped again if the pick is cancelled / fails
+    sendToHost('pickVst', { id: ch.id })
   }
 
-  // Open the loaded plugin's own editor window (native host renders the VST GUI).
-  function openVstEditor() {
-    if (isDesktop) sendToHost('openVstEditor')
+  // Toggle a specific channel's plugin editor window (native host renders the GUI).
+  function openVstEditor(id) {
+    if (isDesktop && id) sendToHost('openVstEditor', { id })
   }
 
-  // When the native host finishes loading a plugin (picker or console), surface
-  // it as an instrument channel in the rack.
+  // Host → UI: a plugin finished loading, failed, or the picker was cancelled.
   if (isDesktop) {
     onHostMessage((msg) => {
-      if (msg.type === 'vstLoaded') addVstChannel(msg.payload?.name, msg.payload?.path)
+      const id = msg.payload?.id
+      if (msg.type === 'vstLoaded') {
+        const ch = id && channels.find(c => c.id === id)
+        if (ch) {
+          ch.name = (msg.payload.name || ch.name || 'VST').toUpperCase().slice(0, 14)
+          ch.vstPath = msg.payload.path || ch.vstPath
+          ch._vstLoading = false
+        } else {
+          addVstChannel(msg.payload?.name, msg.payload?.path, id)   // console-driven load
+        }
+      } else if (msg.type === 'vstError' || msg.type === 'vstCancelled') {
+        // Drop a placeholder channel that never managed to load a plugin.
+        const ch = id && channels.find(c => c.id === id)
+        if (ch && ch._vstLoading) removeChannel(ch.id)
+      }
     })
   }
 
@@ -5980,6 +5998,8 @@ export function useStudio() {
   function removeChannel(id) {
     const idx = channels.findIndex(c => c.id === id)
     if (idx < 0 || channels.length <= 1) return
+    // Free the native plugin instance (in-process host or 32-bit bridge process).
+    if (channels[idx]?.type === 'vst') sendToHost('vstUnload', { id })
     // Clean up Custom Synth node
     if (customSynthNodes.has(id)) {
       try { customSynthNodes.get(id).disconnect() } catch (_) {}
@@ -6305,6 +6325,7 @@ export function useStudio() {
         instrumentType: ch.instrumentType ?? '',
         sampleSpec:     ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
         sampleName:     ch.sampleName,
+        vstPath:        ch.vstPath,
       })),
       channelGroups: channelGroups.map(g => ({ ...g })),
       patterns:      patterns.map(p => ({ ...p })),
@@ -6424,21 +6445,32 @@ export function useStudio() {
       // it from the saved program number instead of the (meaningless) fnKey.
       fn:             ch.params?.gmProgram != null
                         ? makeGMPlayFn(ch.params.gmProgram)
-                        : ch.type === 'sample' && ch.sampleSpec
-                          ? makeSampleFn(ch.sampleSpec)
-                          : (ch.type === 'audiofile' || ch.type === 'chop' || ch.type === 'forge')
-                            ? () => {}  // buffers not serialized; user must reload
-                            : (FN_FROM_KEY[ch.fnKey] ?? playMelodicNote),
+                        : ch.type === 'vst'
+                          ? makeVstPlayFn(ch.id)
+                          : ch.type === 'sample' && ch.sampleSpec
+                            ? makeSampleFn(ch.sampleSpec)
+                            : (ch.type === 'audiofile' || ch.type === 'chop' || ch.type === 'forge')
+                              ? () => {}  // buffers not serialized; user must reload
+                              : (FN_FROM_KEY[ch.fnKey] ?? playMelodicNote),
       activeModules:    [...(ch.activeModules ?? [])],
       effects:          (ch.effects ?? []).map(e => ({ ...e })),
       instrumentType:   ch.instrumentType ?? '',
       sampleSpec:       ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
       sampleName:       ch.sampleName,
+      vstPath:          ch.vstPath,
       // Buffers are not serializable; mark missing so the UI can prompt reload.
       audioFileMissing: (ch.type === 'audiofile' || ch.type === 'chop') ? true : undefined,
       deckAMissing: ch.type === 'forge' && ch.params?.deckAName ? true : undefined,
       deckBMissing: ch.type === 'forge' && ch.params?.deckBName ? true : undefined,
     })))
+
+    // Desktop: re-instantiate each saved VST plugin into the native host by id,
+    // so multi-plugin projects come back with their instruments loaded.
+    if (isDesktop) {
+      for (const ch of channels) {
+        if (ch.type === 'vst' && ch.vstPath) sendToHost('loadVst', { id: ch.id, path: ch.vstPath })
+      }
+    }
 
     // Channel groups
     channelGroups.splice(0, channelGroups.length, ...(p.channelGroups ?? []).map(g => ({ ...g })))

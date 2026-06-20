@@ -51,27 +51,35 @@ export function testTone(on = true, freq = 440) {
   sendToHost('testTone', { on, freq })
 }
 
-/** Open the native file picker to choose a VST2 .dll, then load it. */
-export function pickVst() {
-  sendToHost('pickVst')
+// Every VST call carries the channel id so the native host can keep many plugin
+// instances (mixed 32/64-bit) alive at once, one per Channel Rack VST channel.
+
+/** Open the native file picker for channel `id`, then load the chosen .dll into it. */
+export function pickVst(id) {
+  sendToHost('pickVst', { id })
 }
 
-/** Load a VST2 .dll by absolute path into the native host. */
-export function loadVst(path) {
-  sendToHost('loadVst', { path })
+/** Load a VST2 .dll by absolute path into the plugin instance for channel `id`. */
+export function loadVst(id, path) {
+  sendToHost('loadVst', { id, path })
 }
 
-/** Play / release a note on the loaded VST instrument. */
-export function vstNoteOn(pitch = 60, velocity = 100) {
-  sendToHost('vstNoteOn', { pitch, velocity })
+/** Play / release a note on channel `id`'s plugin instance. */
+export function vstNoteOn(id, pitch = 60, velocity = 100) {
+  sendToHost('vstNoteOn', { id, pitch, velocity })
 }
-export function vstNoteOff(pitch = 60) {
-  sendToHost('vstNoteOff', { pitch })
+export function vstNoteOff(id, pitch = 60) {
+  sendToHost('vstNoteOff', { id, pitch })
 }
 
-/** Unload the current VST instrument. */
-export function unloadVst() {
-  sendToHost('vstUnload')
+/** Unload channel `id`'s plugin instance (frees the in-process host or bridge). */
+export function unloadVst(id) {
+  sendToHost('vstUnload', { id })
+}
+
+/** Toggle channel `id`'s plugin editor window. */
+export function openVstEditor(id) {
+  sendToHost('openVstEditor', { id })
 }
 
 // Debug handle exposed only inside the desktop shell, so you can poke the bridge
@@ -79,12 +87,12 @@ export function unloadVst() {
 // __desktop.loadVst('C:\\path\\to\\synth.dll') then __desktop.vstNoteOn(60).
 if (host) {
   onHostMessage((msg) => {
-    if (msg.type === 'vstLoaded') console.info('[vst] loaded:', msg.payload?.name, msg.payload)
-    if (msg.type === 'vstError') console.error('[vst] error:', msg.payload?.message)
-    if (msg.type === 'vstPeak') console.info('[vst] level:', msg.payload?.peak)
+    if (msg.type === 'vstLoaded') console.info('[vst] loaded:', msg.payload?.id, msg.payload?.name, msg.payload)
+    if (msg.type === 'vstError') console.error('[vst] error:', msg.payload?.id, msg.payload?.message)
+    if (msg.type === 'vstPeak') console.info('[vst] level:', msg.payload?.id, msg.payload?.peak)
   })
   window.__desktop = {
     sendToHost, onHostMessage, isDesktop, ping: pingHost,
-    testTone, pickVst, loadVst, vstNoteOn, vstNoteOff, unloadVst,
+    testTone, pickVst, loadVst, vstNoteOn, vstNoteOff, unloadVst, openVstEditor,
   }
 }

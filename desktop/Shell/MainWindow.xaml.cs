@@ -1,4 +1,5 @@
 using System.IO;
+using System.Linq;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Interop;
@@ -13,9 +14,23 @@ public partial class MainWindow : Window
 {
     private IpcBridge? _ipc;
     private readonly AudioEngine _audio = new();
-    private readonly VstHost _vst = new();
-    private DispatcherTimer? _vstMeter;
-    private VstEditorWindow? _editor;
+
+    // One entry per VST channel in the rack. 64-bit plugins are hosted in-process
+    // (InProc); 32-bit ones run in their own x86 bridge process (Bridge). Keyed by
+    // the Vue channel id so many plugins of mixed bitness coexist.
+    private readonly Dictionary<string, VstInstance> _vsts = new();
+    private int _editorCascade;   // offsets stacked editor windows so they don't overlap exactly
+
+    private sealed class VstInstance
+    {
+        public string Id = "";
+        public string Path = "";
+        public VstHost? InProc;          // 64-bit, in-process
+        public VstBridgeClient? Bridge;  // 32-bit, out-of-process helper
+        public VstEditorWindow? Editor;  // in-process editor window
+        public DispatcherTimer? Meter;   // in-process peak meter
+        public bool IsBridge => Bridge != null;
+    }
 
     public MainWindow()
     {
@@ -25,74 +40,137 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
-        CloseEditor();
-        _vstMeter?.Stop();
+        foreach (VstInstance inst in _vsts.Values.ToList()) TeardownInstance(inst);
+        _vsts.Clear();
         _audio.Dispose();
-        _vst.Dispose();
         base.OnClosed(e);
     }
 
-    // Tell the UI a plugin loaded, with the diagnostics we need to debug silence.
-    private void ReportVstLoaded(string name, string path)
+    // ── Per-instance plumbing ────────────────────────────────────────────────────
+
+    // Load a plugin into the channel `id`, routing by its real architecture:
+    // 64-bit → in-process; 32-bit → x86 bit-bridge. Any plugin already on this id
+    // is torn down first (replace-in-place).
+    private void LoadVstPath(string id, string path)
     {
-        EnsureMeter();
-        _ipc!.Send(new IpcMessage("vstLoaded", new
+        if (_vsts.Remove(id, out VstInstance? existing)) TeardownInstance(existing);
+
+        string arch = VstHost.PeArch(path);
+        Log.Write($"loadVst id={id} arch={arch} path={path}");
+        var inst = new VstInstance { Id = id, Path = path };
+
+        if (arch == "x86")
         {
-            name,
-            path,
-            inputs = _vst.AudioInputCount,
-            outputs = _vst.AudioOutputCount,
-            canReplacing = _vst.CanReplacing,
-            isSynth = _vst.IsSynth,
-        }));
+            var bridge = new VstBridgeClient();
+            bridge.Loaded += b => Dispatcher.Invoke(() =>
+                SendLoaded(id, b.Name, path, b.Inputs, b.Outputs, b.CanReplacing, b.IsSynth));
+            bridge.Error += m => Dispatcher.Invoke(() => SendVstError(id, m));
+            bridge.Peak += p => Dispatcher.Invoke(() => SendPeak(id, p));
+            inst.Bridge = bridge;
+            _vsts[id] = inst;
+            // Pass our window handle so the helper owns its editor to the app window.
+            bridge.Load(path, new WindowInteropHelper(this).Handle);
+            return;
+        }
+
+        try
+        {
+            var host = new VstHost();
+            string name = host.Load(path);
+            inst.InProc = host;
+            _vsts[id] = inst;
+            StartMeter(inst);
+            SendLoaded(id, name, path,
+                host.AudioInputCount, host.AudioOutputCount, host.CanReplacing, host.IsSynth);
+        }
+        catch (Exception ex)
+        {
+            Log.Write("VST load FAILED: " + ex);
+            Exception? inner = ex.InnerException;
+            string detail = inner != null
+                ? $"{ex.Message} ({inner.GetType().Name}: {inner.Message})"
+                : ex.Message;
+            SendVstError(id, $"{ex.GetType().Name}: {detail}");
+        }
     }
 
-    // Poll the plugin's output peak ~3x/sec and report it when there's signal,
-    // so we can see whether the plugin is actually producing audio.
-    private void EnsureMeter()
+    // Poll an in-process plugin's output peak ~3x/sec and report it (with id) when
+    // there's signal, so the UI meter for that channel lights up.
+    private void StartMeter(VstInstance inst)
     {
-        if (_vstMeter != null) return;
-        _vstMeter = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
-        _vstMeter.Tick += (_, _) =>
+        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
+        timer.Tick += (_, _) =>
         {
-            float peak = _vst.ReadPeakReset();
-            if (peak > 0.0001f)
-            {
-                Log.Write($"peak {peak:F4}");
-                _ipc?.Send(new IpcMessage("vstPeak", new { peak = Math.Round(peak, 4) }));
-            }
+            VstHost? host = inst.InProc;
+            if (host == null) return;
+            float peak = host.ReadPeakReset();
+            if (peak > 0.0001f) SendPeak(inst.Id, peak);
         };
-        _vstMeter.Start();
+        inst.Meter = timer;
+        timer.Start();
     }
 
-    // Toggle the loaded plugin's editor, embedded as a child of this window.
-    private void OpenVstEditor()
+    // Toggle a channel's plugin editor. Bridged plugins show their editor in the
+    // helper process; in-process plugins get an owned overlay over this window.
+    private void ToggleEditor(string id, VstInstance inst)
     {
-        if (_editor != null) { CloseEditor(); return; }   // clicking the name again closes it
-        Log.Write($"OpenVstEditor: plugin={_vst.PluginName ?? "<none>"} hasEditor={_vst.HasEditor}");
-        if (_vst.PluginName == null)
-        {
-            _ipc?.Send(new IpcMessage("vstError", new { message = "No plugin loaded." }));
-            return;
-        }
-        if (!_vst.HasEditor)
-        {
-            _ipc?.Send(new IpcMessage("vstError", new { message = $"{_vst.PluginName} has no custom UI." }));
-            return;
-        }
-        _editor = new VstEditorWindow(_vst);
-        _editor.RequestClose += CloseEditor;
-        System.Windows.Point origin = PointToScreen(new System.Windows.Point(120, 90));
-        _editor.ShowOver(new WindowInteropHelper(this).Handle, (int)origin.X, (int)origin.Y);
+        if (inst.IsBridge) { inst.Bridge!.OpenEditor(); return; }
+
+        if (inst.Editor != null) { CloseEditorInstance(inst); return; }   // re-click closes
+        VstHost? host = inst.InProc;
+        Log.Write($"ToggleEditor id={id} plugin={host?.PluginName ?? "<none>"} hasEditor={host?.HasEditor}");
+        if (host?.PluginName == null) { SendVstError(id, "No plugin loaded."); return; }
+        if (!host.HasEditor) { SendVstError(id, $"{host.PluginName} has no custom UI."); return; }
+
+        var ed = new VstEditorWindow(host);
+        ed.RequestClose += () => CloseEditorInstance(inst);
+        inst.Editor = ed;
+        int n = _editorCascade++ % 6;
+        System.Windows.Point origin = PointToScreen(new System.Windows.Point(120 + n * 28, 90 + n * 28));
+        ed.ShowOver(new WindowInteropHelper(this).Handle, (int)origin.X, (int)origin.Y);
     }
 
-    private void CloseEditor()
+    private static void CloseEditorInstance(VstInstance inst)
     {
-        if (_editor == null) return;
-        VstEditorWindow ed = _editor;
-        _editor = null;
+        if (inst.Editor == null) return;
+        VstEditorWindow ed = inst.Editor;
+        inst.Editor = null;
         try { ed.Teardown(); } catch { /* ignore */ }
     }
+
+    private static void TeardownInstance(VstInstance inst)
+    {
+        inst.Meter?.Stop();
+        inst.Meter = null;
+        CloseEditorInstance(inst);
+        try { inst.InProc?.Dispose(); } catch { /* ignore */ }
+        inst.InProc = null;
+        try { inst.Bridge?.Dispose(); } catch { /* ignore */ }
+        inst.Bridge = null;
+    }
+
+    private void SendLoaded(string id, string name, string path,
+        int inputs, int outputs, bool canReplacing, bool isSynth)
+        => _ipc?.Send(new IpcMessage("vstLoaded",
+            new { id, name, path, inputs, outputs, canReplacing, isSynth }));
+
+    private void SendVstError(string? id, string message)
+        => _ipc?.Send(new IpcMessage("vstError", new { id, message }));
+
+    private void SendPeak(string id, double peak)
+        => _ipc?.Send(new IpcMessage("vstPeak", new { id, peak = Math.Round(peak, 4) }));
+
+    private static string NewVstId() => "vst-" + Guid.NewGuid().ToString("N")[..8];
+
+    private static string? GetStr(JsonElement el, string name)
+        => el.TryGetProperty(name, out JsonElement p) && p.ValueKind == JsonValueKind.String
+            ? p.GetString() : null;
+
+    private static int GetInt(JsonElement el, string name, int dflt)
+        => el.TryGetProperty(name, out JsonElement p) && p.ValueKind == JsonValueKind.Number
+            ? p.GetInt32() : dflt;
+
+    // ── Navigation + IPC ─────────────────────────────────────────────────────────
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
@@ -114,8 +192,6 @@ public partial class MainWindow : Window
 #endif
     }
 
-    // Phase 0a proof-of-life: the Vue side sends {type:"ping"} on load; we reply
-    // with {type:"pong"} and flag success in the title bar so it's visible.
     private void OnIpcMessage(IpcMessage msg)
     {
         switch (msg.Type)
@@ -146,31 +222,20 @@ public partial class MainWindow : Window
 
             case "loadVst":
             {
-                string? path = msg.Payload is JsonElement le &&
-                               le.TryGetProperty("path", out var pPath) &&
-                               pPath.ValueKind == JsonValueKind.String
-                    ? pPath.GetString()
-                    : null;
+                if (msg.Payload is not JsonElement le) break;
+                string? path = GetStr(le, "path");
                 if (string.IsNullOrWhiteSpace(path))
                 {
-                    _ipc!.Send(new IpcMessage("vstError", new { message = "No plugin path provided." }));
+                    SendVstError(GetStr(le, "id"), "No plugin path provided.");
                     break;
                 }
-                try
-                {
-                    CloseEditor();
-                    string name = _vst.Load(path);
-                    ReportVstLoaded(name, path);
-                }
-                catch (Exception ex)
-                {
-                    _ipc!.Send(new IpcMessage("vstError", new { message = ex.Message }));
-                }
+                LoadVstPath(GetStr(le, "id") ?? NewVstId(), path);
                 break;
             }
 
             case "pickVst":
             {
+                string id = (msg.Payload is JsonElement pe ? GetStr(pe, "id") : null) ?? NewVstId();
                 var dlg = new Microsoft.Win32.OpenFileDialog
                 {
                     Title = "Select a VST2 plugin (.dll)",
@@ -178,52 +243,47 @@ public partial class MainWindow : Window
                     CheckFileExists = true,
                 };
                 if (dlg.ShowDialog(this) == true)
-                {
-                    try
-                    {
-                        CloseEditor();
-                        string name = _vst.Load(dlg.FileName);
-                        ReportVstLoaded(name, dlg.FileName);
-                    }
-                    catch (Exception ex)
-                    {
-                        _ipc!.Send(new IpcMessage("vstError", new { message = ex.Message }));
-                    }
-                }
+                    LoadVstPath(id, dlg.FileName);
+                else
+                    _ipc!.Send(new IpcMessage("vstCancelled", new { id }));   // free the placeholder channel
                 break;
             }
 
             case "vstNoteOn":
             {
-                int pitch = 60, velocity = 100;
-                if (msg.Payload is JsonElement ne)
-                {
-                    if (ne.TryGetProperty("pitch", out var pn) && pn.ValueKind == JsonValueKind.Number)
-                        pitch = pn.GetInt32();
-                    if (ne.TryGetProperty("velocity", out var vn) && vn.ValueKind == JsonValueKind.Number)
-                        velocity = vn.GetInt32();
-                }
-                _vst.NoteOn(pitch, velocity);
+                if (msg.Payload is not JsonElement ne) break;
+                string? id = GetStr(ne, "id");
+                if (id == null || !_vsts.TryGetValue(id, out VstInstance? inst)) break;
+                int pitch = GetInt(ne, "pitch", 60), velocity = GetInt(ne, "velocity", 100);
+                if (inst.IsBridge) inst.Bridge!.NoteOn(pitch, velocity);
+                else inst.InProc?.NoteOn(pitch, velocity);
                 break;
             }
 
             case "vstNoteOff":
             {
-                int pitch = 60;
-                if (msg.Payload is JsonElement fe &&
-                    fe.TryGetProperty("pitch", out var fp) && fp.ValueKind == JsonValueKind.Number)
-                    pitch = fp.GetInt32();
-                _vst.NoteOff(pitch);
+                if (msg.Payload is not JsonElement fe) break;
+                string? id = GetStr(fe, "id");
+                if (id == null || !_vsts.TryGetValue(id, out VstInstance? inst)) break;
+                int pitch = GetInt(fe, "pitch", 60);
+                if (inst.IsBridge) inst.Bridge!.NoteOff(pitch);
+                else inst.InProc?.NoteOff(pitch);
                 break;
             }
 
             case "vstUnload":
-                _vst.Unload();
+            {
+                string? id = msg.Payload is JsonElement ue ? GetStr(ue, "id") : null;
+                if (id != null && _vsts.Remove(id, out VstInstance? inst)) TeardownInstance(inst);
                 break;
+            }
 
             case "openVstEditor":
-                OpenVstEditor();
+            {
+                string? id = msg.Payload is JsonElement oe ? GetStr(oe, "id") : null;
+                if (id != null && _vsts.TryGetValue(id, out VstInstance? inst)) ToggleEditor(id, inst);
                 break;
+            }
         }
     }
 }

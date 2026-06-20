@@ -42,9 +42,14 @@ A self-contained build lives under `publish/` (zipped as `FreakyLoopsStudio.zip`
 Rebuild it with `npm run build` then `dotnet publish desktop/Shell -c Release`.
 
 ## Bitness
-Built **x86** to host 32-bit VST2 `.dll` plugins (e.g. Delay Lama) in-process. A
-process can only load plugins of its own bitness; switch to x64 (or add a
-bit-bridge helper process) for 64-bit plugins. VST.NET2-Host errors on AnyCPU.
+Built **x64** to host modern 64-bit VST2 `.dll` plugins in-process. A process can
+only load plugins of its own bitness, so 32-bit plugins are hosted out-of-process
+by the sibling **x86 `VstBridge`** helper: the app reads each plugin's PE header
+and, for a 32-bit `.dll`, spawns `bridge\FreakyLoopsVstBridge.exe` and drives it
+over stdin/stdout (notes + editor toggle in; load status + peak out). The helper
+plays the plugin's audio itself and is built + staged under `bin\…\bridge\`
+automatically by `Shell.csproj`. A crashing 32-bit plugin only takes down the
+helper, not the app. VST.NET2-Host errors on AnyCPU.
 
 ## Layout
 ```
@@ -60,7 +65,12 @@ Shell/
     VstHost.cs        VST2 .dll load + MIDI + audio pull
     HostStub.cs       VST.NET2 host command stub
     Log.cs            file logger → %TEMP%\freakyloops.log
+    VstBridgeClient.cs spawns + drives the x86 bridge for 32-bit plugins
 ```
+
+Sibling **`VstBridge/`** project = the x86 helper exe (`Program.cs` + a marshal
+window). It re-compiles `VstHost`/`HostStub`/`VstEditorWindow` as x86 and is
+spawned by the app to host 32-bit plugins. See **Bitness** above.
 
 On the Vue side the matching helper is `src/desktop/ipc.js`. In a plain browser
 (no WebView2) every bridge call is a safe no-op, so the web build is unaffected.

@@ -1205,7 +1205,7 @@ function applyGradient() {
 // ── Piano roll open/select ────────────────────────────────────────────────────
 function openOrSelectChannel(ch) {
   selectedChannelId.value = ch.id
-  if (ch.type === 'vst') { openVstEditor(); return }
+  if (ch.type === 'vst') { openVstEditor(ch.id); return }
   if (ch.mode === 'piano') pianoRollOpen.value = true
 }
 

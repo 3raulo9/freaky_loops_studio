@@ -10,12 +10,12 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>FreakyLoops.Shell</RootNamespace>
     <AssemblyName>FreakyLoopsStudio</AssemblyName>
-    <!-- Built x86 to host 32-bit VST2 .dll plugins (e.g. Delay Lama) in-process.
-         A 32-bit process can only load 32-bit plugins; switch to x64 (or add a
-         bit-bridge) to host 64-bit plugins. -->
-    <Platforms>x86</Platforms>
-    <Platform>x86</Platform>
-    <PlatformTarget>x86</PlatformTarget>
+    <!-- Built x64 to host modern 64-bit VST2 .dll plugins in-process. A 64-bit
+         process can only load 64-bit plugins; legacy 32-bit plugins are hosted
+         out-of-process by the x86 VstBridge helper (built + staged below). -->
+    <Platforms>x64</Platforms>
+    <Platform>x64</Platform>
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
   <ItemGroup>
@@ -36,5 +36,38 @@
              CopyToOutputDirectory="PreserveNewest"
              CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
+
+  <!-- Bit-bridge: build the x86 VstBridge helper (its own arch, regardless of
+       this x64 build) and stage its output under <out>\bridge so the app can
+       spawn it for 32-bit plugins. Same staging on build, publish, and run. -->
+  <PropertyGroup>
+    <VstBridgeProj>$(MSBuildProjectDirectory)\..\VstBridge\VstBridge.csproj</VstBridgeProj>
+    <VstBridgeOut>$(MSBuildProjectDirectory)\..\VstBridge\bin\x86\$(Configuration)\$(TargetFramework)\</VstBridgeOut>
+  </PropertyGroup>
+
+  <Target Name="BuildVstBridge" BeforeTargets="Build;Publish">
+    <MSBuild Projects="$(VstBridgeProj)" Targets="Restore"
+             Properties="Configuration=$(Configuration);Platform=x86" />
+    <MSBuild Projects="$(VstBridgeProj)" Targets="Build"
+             Properties="Configuration=$(Configuration);Platform=x86" />
+  </Target>
+
+  <Target Name="StageVstBridge" AfterTargets="Build" DependsOnTargets="BuildVstBridge">
+    <ItemGroup>
+      <_VstBridgeFiles Include="$(VstBridgeOut)**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_VstBridgeFiles)"
+          DestinationFiles="@(_VstBridgeFiles->'$(OutDir)bridge\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="StageVstBridgePublish" AfterTargets="Publish" DependsOnTargets="BuildVstBridge">
+    <ItemGroup>
+      <_VstBridgePubFiles Include="$(VstBridgeOut)**\*.*" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_VstBridgePubFiles)"
+          DestinationFiles="@(_VstBridgePubFiles->'$(PublishDir)bridge\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

@@ -138,9 +138,11 @@ into native code so it can host real VST plugins.
   out. Plugins with a custom UI open in a borderless owned overlay window
   (`VstEditorWindow.cs`) positioned over the app.
 
-> **Bitness:** the app is built **x86** so it can host 32-bit VST2 plugins (e.g.
-> Delay Lama) in-process. A process can only load plugins of its own bitness;
-> switch to x64 (or add a bit-bridge helper process) for 64-bit plugins.
+> **Bitness:** the app is built **x64** to host 64-bit VST2 plugins in-process.
+> Since a process can only load plugins of its own bitness, 32-bit plugins are
+> hosted out-of-process by the bundled **x86 bridge** (`VstBridge`) — spawned on
+> demand and driven over stdin/stdout, so they load transparently alongside
+> 64-bit ones.
 
 ### Current status
 - WPF + WebView2 shell builds and runs; IPC ping/pong handshake confirmed.
