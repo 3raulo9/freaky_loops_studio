@@ -4,7 +4,9 @@
         xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
         Title="Freaky Loops Studio"
         Height="900" Width="1440"
+        MinHeight="600" MinWidth="900"
         WindowStartupLocation="CenterScreen"
+        WindowState="Maximized"
         Background="#0b0b0f">
     <Grid>
         <wv2:WebView2 x:Name="WebView" />
