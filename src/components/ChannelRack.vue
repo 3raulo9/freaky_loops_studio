@@ -359,13 +359,15 @@
         <!-- ── Normal view ───────────────────────────────────────── -->
         <template v-else>
           <!-- Pan knob -->
-          <div class="rack-knob-wrap" :title="`Pan: ${Math.round(ch.pan * 100)}%`">
+          <div class="rack-knob-wrap" :title="`Pan: ${Math.round(ch.pan * 100)}% — right-click: create automation clip`"
+            @contextmenu.prevent.stop="createAutomationClipFor(ch.id, 'pan')">
             <Knob v-model="ch.pan" :min="-1" :max="1" :decimals="2"
               label="" :color="ch.color" :size="24" />
           </div>
 
           <!-- Vol knob -->
-          <div class="rack-knob-wrap" :title="`Volume: ${Math.round(ch.volume * 100)}%`">
+          <div class="rack-knob-wrap" :title="`Volume: ${Math.round(ch.volume * 100)}% — right-click: create automation clip`"
+            @contextmenu.prevent.stop="createAutomationClipFor(ch.id, 'volume')">
             <Knob v-model="ch.volume" :min="0" :max="1.25" :decimals="2"
               label="" :color="ch.color" :size="24" />
           </div>
@@ -772,7 +774,7 @@ const {
   addAudioFileChannel, loadAudioFileForChannel,
   addChopChannel, addForgeChannel,
   instrumentDrag, startInstrumentDrag,
-  pushUndo,
+  pushUndo, createAutomationClipFor,
 } = useStudio()
 
 // Local MIDI-tick constant (matches store's TICKS_PER_STEP = 120)

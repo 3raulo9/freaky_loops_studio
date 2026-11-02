@@ -1324,6 +1324,164 @@ export function useStudio() {
     clip.width = Math.max(1, Math.min(PLAYLIST_CELLS - clip.cell, newWidth))
   }
 
+
+  // ── Automation playback ────────────────────────────────────────────────────────
+  //   An automation clip holds a 0..1 curve; its target maps that onto a real
+  //   range. Targets: a channel's volume / pan / any instrument knob, a mixer
+  //   track's volume / pan, the master volume, or the song tempo.
+  //   targetChannelId: channel id | 'mx:<mixerTrackId>' | '__master' | '__tempo'
+  const TEMPO_MIN = 40, TEMPO_SPAN = 180
+
+  function _autoTarget(clip) {
+    const id = clip.targetChannelId, prm = clip.targetParam
+    if (id === '__tempo') {
+      return { label: 'TEMPO', get: () => (bpm.value - TEMPO_MIN) / TEMPO_SPAN, set: v => { bpm.value = Math.round((TEMPO_MIN + v * TEMPO_SPAN) * 10) / 10 } }
+    }
+    if (id === '__master') {
+      return { label: 'MASTER VOL', get: () => mixerTracks[0].volume / 1.25, set: v => setMixerTrackVolume(0, v * 1.25) }
+    }
+    if (id?.startsWith('mx:')) {
+      const idx = mixerTracks.findIndex(t => t.id === id.slice(3))
+      if (idx < 1) return null
+      const mt = mixerTracks[idx]
+      return prm === 'pan'
+        ? { label: mt.name + ' PAN', get: () => (mt.pan + 1) / 2, set: v => setMixerTrackPan(idx, v * 2 - 1) }
+        : { label: mt.name + ' VOL', get: () => mt.volume / 1.25, set: v => setMixerTrackVolume(idx, v * 1.25) }
+    }
+    const ch = channels.find(c => c.id === id)
+    if (!ch) return null
+    if (prm === 'volume') return { label: ch.name + ' VOL', get: () => ch.volume / 1.25, set: v => { ch.volume = v * 1.25 } }
+    if (prm === 'pan') return { label: ch.name + ' PAN', get: () => (ch.pan + 1) / 2, set: v => { ch.pan = v * 2 - 1 } }
+    const k = ch.knobs?.find(x => x.key === prm)
+    if (!k) return null
+    return {
+      label: ch.name + ' ' + (k.label || prm),
+      get: () => ((ch.params[prm] ?? k.min) - k.min) / ((k.max - k.min) || 1),
+      set: v => { ch.params[prm] = k.min + v * (k.max - k.min) },
+      param: prm, map: v => k.min + v * (k.max - k.min),
+    }
+  }
+
+  // Everything that can be automated, for the playlist's automation picker.
+  function automationTargets() {
+    const out = []
+    for (const ch of channels) {
+      out.push({ section: 'CHANNELS', key: ch.id + '_volume', label: ch.name + ' VOL', color: ch.color, channelId: ch.id, param: 'volume' })
+      out.push({ section: 'CHANNELS', key: ch.id + '_pan', label: ch.name + ' PAN', color: ch.color, channelId: ch.id, param: 'pan' })
+      for (const k of ch.knobs ?? []) {
+        out.push({ section: 'CHANNELS', key: ch.id + '_' + k.key, label: ch.name + ' ' + (k.label || k.key), color: ch.color, channelId: ch.id, param: k.key })
+      }
+    }
+    mixerTracks.slice(1).forEach(mt => {
+      out.push({ section: 'MIXER', key: 'mx:' + mt.id + '_volume', label: mt.name + ' VOL', color: mt.color, channelId: 'mx:' + mt.id, param: 'volume' })
+      out.push({ section: 'MIXER', key: 'mx:' + mt.id + '_pan', label: mt.name + ' PAN', color: mt.color, channelId: 'mx:' + mt.id, param: 'pan' })
+    })
+    out.push({ section: 'GLOBAL', key: '__master_volume', label: 'MASTER VOL', color: '#e74c3c', channelId: '__master', param: 'volume' })
+    out.push({ section: 'GLOBAL', key: '__tempo_bpm', label: 'TEMPO', color: '#f0a030', channelId: '__tempo', param: 'bpm' })
+    return out
+  }
+
+  function automationLabel(clip) { return _autoTarget(clip)?.label ?? clip.targetParam }
+
+  // Curve value at x (0..1 across the clip). A node's tension bends the segment
+  // that starts at it: > 0 eases in (slow start), < 0 eases out.
+  function automationValueAt(clip, x) {
+    const nodes = clip.nodes
+    if (!nodes?.length) return 0
+    if (x <= nodes[0].x) return nodes[0].y
+    for (let i = 0; i < nodes.length - 1; i++) {
+      const a = nodes[i], b = nodes[i + 1]
+      if (x <= b.x) {
+        let t = (x - a.x) / ((b.x - a.x) || 1)
+        const ten = a.tension ?? 0
+        if (ten > 0) t = Math.pow(t, 1 + ten * 3)
+        else if (ten < 0) t = 1 - Math.pow(1 - t, 1 - ten * 3)
+        return a.y + (b.y - a.y) * t
+      }
+    }
+    return nodes[nodes.length - 1].y
+  }
+
+  const _autoLast = new Map()   // clipId → last value applied (skip redundant writes)
+  function _applyAutomationAt(pos) {
+    const muted = new Set(playlistTracks.filter(t => t.muted).map(t => t.id))
+    for (const clip of automationClips) {
+      if (muted.has(clip.trackId)) continue
+      const w = clip.width || 1
+      if (pos < clip.cell || pos >= clip.cell + w) continue
+      const v = automationValueAt(clip, (pos - clip.cell) / w)
+      const last = _autoLast.get(clip.id)
+      if (last !== undefined && Math.abs(last - v) < 0.0005) continue
+      _autoLast.set(clip.id, v)
+      _autoTarget(clip)?.set(Math.max(0, Math.min(1, v)))
+    }
+  }
+
+  // Knob right-click → "Create automation clip": a flat clip at the current value
+  // on a new playlist track named after the target, spanning the song.
+  function createAutomationClipFor(targetChannelId, targetParam) {
+    pushUndo()
+    const probe = { targetChannelId, targetParam }
+    const tgt = _autoTarget(probe)
+    if (!tgt) return null
+    addPlaylistTrack()
+    const track = playlistTracks[playlistTracks.length - 1]
+    track.name = tgt.label
+    const songEnd = playlistClips.reduce((m, c) => Math.max(m, c.cell + (c.width || 1)), 0)
+    const width = Math.max(4, Math.min(PLAYLIST_CELLS, songEnd || 4))
+    addAutomationClip(track.id, 0, targetChannelId, targetParam)
+    const clip = automationClips[automationClips.length - 1]
+    clip.width = width
+    const y = Math.max(0, Math.min(1, tgt.get()))
+    clip.nodes = [{ x: 0, y, tension: 0 }, { x: 1, y, tension: 0 }]
+    clipFocusMode.value = 'automation'
+    mainView.value = 'playlist'
+    usePlaylist.value = true
+    return clip.id
+  }
+
+  // Offline render: write automation into the render graph / note params.
+  function _renderAutomation(events, nodes, { secPerStep, START, steps }) {
+    const muted = new Set(playlistTracks.filter(t => t.muted).map(t => t.id))
+    const rawChannels = toRaw(channels)
+    for (const clip of automationClips) {
+      if (muted.has(clip.trackId)) continue
+      const id = clip.targetChannelId, prm = clip.targetParam
+      const w = clip.width || 1
+      const totalSteps_ = w * steps
+      const at = s => automationValueAt(clip, s / totalSteps_)
+      const timeOf = s => START + (clip.cell * steps + s) * secPerStep
+      let param = null, map = v => v
+      if (id === '__master') { param = nodes.master.gain; map = v => v * 1.25 }
+      else if (id?.startsWith('mx:')) {
+        const n = nodes.inserts.find(x => x.id === id.slice(3))
+        if (n) { param = prm === 'pan' ? n.panner.pan : n.gain.gain; map = prm === 'pan' ? v => v * 2 - 1 : v => v * 1.25 }
+      } else {
+        const ci = rawChannels.findIndex(c => c.id === id)
+        if (ci >= 0 && prm === 'volume' && nodes.chGain[ci]) { param = nodes.chGain[ci].gain; map = v => v * 1.25 }
+        else if (ci >= 0 && prm === 'pan' && nodes.chPan[ci]) { param = nodes.chPan[ci].pan; map = v => v * 2 - 1 }
+        else if (ci >= 0) {
+          // Instrument knob: bake the value into each note this clip covers.
+          const tgt = _autoTarget(clip)
+          if (!tgt?.map) continue
+          for (const ev of events) {
+            if (ev.ci !== ci || ev.kind === 'cut') continue
+            const s = (ev.when - START) / secPerStep - clip.cell * steps
+            if (s < 0 || s >= totalSteps_) continue
+            const v = tgt.map(at(s))
+            if (ev.kind === 'arp') ev.baseParams = { ...ev.baseParams, [prm]: v }
+            else ev.params = { ...ev.params, [prm]: v }
+          }
+          continue
+        }
+      }
+      if (!param) continue
+      for (let s = 0; s <= totalSteps_; s++) {
+        try { param.setValueAtTime(map(at(Math.min(s, totalSteps_ - 0.001))), timeOf(s)) } catch (_) {}
+      }
+    }
+  }
+
   // ── Unused patterns helper ────────────────────────────────────────────────────
   function getUnusedPatternIds() {
     const used = new Set(playlistClips.map(c => c.patternId))
@@ -4364,6 +4522,9 @@ export function useStudio() {
   function getPatternsForCell(cell) { return getClipsForCell(cell).map(c => c.patternId) }
 
   function scheduleStep(step, baseWhen, cell) {
+    if (usePlaylist.value && !sessionActive.value && automationClips.length) {
+      _applyAutomationAt((cell % PLAYLIST_CELLS) + step / totalSteps.value)
+    }
     noteQueue.push({ step, time: baseWhen, cell: cell % PLAYLIST_CELLS, absCell: cell, isSong: usePlaylist.value && !sessionActive.value })
     syncVolumes()
     const secPerBeat = 60 / bpm.value
@@ -4753,6 +4914,7 @@ export function useStudio() {
 
   function stopPlay() {
     _resetSessionPlayback()
+    _autoLast.clear()
     finalizeRecordedNotes()
     isPlaying.value = false
     transportState.value = 'stopped'
@@ -5000,7 +5162,7 @@ export function useStudio() {
       })
       const phase = offCtx.createGain(); phase.gain.value = mt.phaseInvert ? -1 : 1
       tail.connect(phase); phase.connect(gain); gain.connect(panner)
-      return { id: mt.id, output: mt.output ?? null, eqLow, panner, sendGains: {} }
+      return { id: mt.id, output: mt.output ?? null, eqLow, gain, panner, sendGains: {} }
     })
     const insertById = id => inserts.find(n => n.id === id)
     // Post-fader send taps into the return buses.
@@ -5035,6 +5197,7 @@ export function useStudio() {
 
     // Per-channel routing: fn → [cut] → gain(vol) → pan → insert FX → mixer/master.
     const gainNode = new Array(rawChannels.length).fill(null)
+    const panNode  = new Array(rawChannels.length).fill(null)
     const cutNode  = new Array(rawChannels.length).fill(null)
     rawChannels.forEach((ch, ci) => {
       if (ch.muted || !_offlineRenderable(ch) || _isVst(ch)) return
@@ -5049,8 +5212,15 @@ export function useStudio() {
       })
       tail.connect(insertDest(ch.mixerTrack || 0))
       gainNode[ci] = g
+      panNode[ci]  = p
       if (ch.cutSelf) { const cg = offCtx.createGain(); cg.gain.value = 1; cg.connect(g); cutNode[ci] = cg }
     })
+
+    // Song automation (tempo excepted: renders run at a constant tempo).
+    if (mode === 'song' && automationClips.length) {
+      _renderAutomation(events, { master: masterGainOff, inserts, chGain: gainNode, chPan: panNode },
+        { secPerStep, START, steps: stepsPerCell })
+    }
 
     // Dispatch the schedule into the offline graph.
     for (const ev of events) {
@@ -7258,6 +7428,7 @@ export function useStudio() {
     playlists, currentPlaylistId, switchPlaylist, clonePlaylist, addPlaylist, renamePlaylist, deletePlaylist, mergePlaylist,
     // Automation
     automationClips, addAutomationClip, removeAutomationClip,
+    automationTargets, automationLabel, automationValueAt, createAutomationClipFor,
     addAutoNode, removeAutoNode, resizeAutomationClip,
     // Utilities
     getUnusedPatternIds, transposePatternNotes, selectSourcePattern, muteAllClipsOnTrack,

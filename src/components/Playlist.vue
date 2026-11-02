@@ -178,16 +178,17 @@
 
         <!-- Automation params tab -->
         <div v-else class="picker-list">
-          <div class="picker-section">CHANNEL PARAMS</div>
-          <div
-            v-for="entry in autoParamOptions" :key="entry.key"
-            class="picker-item"
-            :class="{ selected: pickerAutoParam === entry.key }"
-            @click="pickerAutoParam = entry.key"
-          >
-            <span class="picker-dot" :style="{ background: entry.color }" />
-            <span class="picker-name">{{ entry.label }}</span>
-          </div>
+          <template v-for="(entry, ei) in autoParamOptions" :key="entry.key">
+            <div v-if="ei === 0 || autoParamOptions[ei - 1].section !== entry.section" class="picker-section">{{ entry.section }}</div>
+            <div
+              class="picker-item"
+              :class="{ selected: pickerAutoParam === entry.key }"
+              @click="pickerAutoParam = entry.key"
+            >
+              <span class="picker-dot" :style="{ background: entry.color }" />
+              <span class="picker-name">{{ entry.label }}</span>
+            </div>
+          </template>
         </div>
 
         <div class="picker-actions">
@@ -395,9 +396,9 @@
                   :style="autoClipStyle(auto)"
                   @mousedown.stop="onAutoClipMouseDown($event, auto, track)"
                   @contextmenu.prevent.stop="removeAutomationClip(auto.id)"
-                  :title="auto.targetParam + ' automation — right-click to remove'"
+                  :title="automationLabel(auto) + ' automation — wheel over a point bends the curve, right-click removes the clip'"
                 >
-                  <span class="auto-label">{{ auto.targetParam }}</span>
+                  <span class="auto-label">{{ automationLabel(auto) }}</span>
                   <svg
                     class="auto-graph"
                     :viewBox="`0 0 ${(auto.width || 1) * cellWidth} ${getTrackH(track) - 18}`"
@@ -412,6 +413,7 @@
                       r="5"
                       class="auto-node"
                       @mousedown.stop="onNodeDragStart($event, auto, ni)"
+                      @wheel.prevent.stop="onNodeWheel($event, node)"
                       @contextmenu.prevent.stop="removeAutoNode(auto.id, ni)"
                     />
                   </svg>
@@ -788,6 +790,7 @@ const {
   insertTime, deleteTime, beatSliceClip, duplicateClips,
   playlists, currentPlaylistId, switchPlaylist, clonePlaylist, addPlaylist, renamePlaylist, deletePlaylist, mergePlaylist,
   addAutomationClip, removeAutomationClip, addAutoNode, removeAutoNode, resizeAutomationClip,
+  automationTargets, automationLabel, automationValueAt,
   getUnusedPatternIds, getPatternLengthTicks,
   transposePatternNotes, selectSourcePattern, muteAllClipsOnTrack,
   addPattern, removePattern,
@@ -826,14 +829,8 @@ function highlightUnused() {
 }
 
 // Automation param options derived from channels
-const autoParamOptions = computed(() => {
-  const opts = []
-  channels.forEach(ch => {
-    opts.push({ key: ch.id + '_volume', label: ch.name + ' VOL', color: ch.color, channelId: ch.id, param: 'volume' })
-    opts.push({ key: ch.id + '_pan',    label: ch.name + ' PAN', color: ch.color, channelId: ch.id, param: 'pan'    })
-  })
-  return opts
-})
+// Channels (vol / pan / every knob), mixer tracks, master volume and tempo.
+const autoParamOptions = computed(() => automationTargets())
 
 // ── Computed visible tracks (respects group collapse) ─────────────────────────
 const visibleTracks = computed(() => {
@@ -1242,7 +1239,19 @@ watch(playlistClips,  redrawAllClipCanvases,   { deep: true })
 function autoPolyline(auto, track) {
   const W = (auto.width || 1) * cellWidth.value
   const H = getTrackH(track) - 18
-  return auto.nodes.map(n => `${n.x * W},${(1 - n.y) * H}`).join(' ')
+  const N = 96
+  const pts = []
+  for (let i = 0; i <= N; i++) {
+    const x = i / N
+    pts.push(`${x * W},${(1 - automationValueAt(auto, x)) * H}`)
+  }
+  return pts.join(' ')
+}
+
+// Mouse wheel over a point bends the segment that starts there.
+function onNodeWheel(e, node) {
+  const t = (node.tension ?? 0) + (e.deltaY < 0 ? 0.1 : -0.1)
+  node.tension = Math.max(-1, Math.min(1, Math.round(t * 10) / 10))
 }
 
 // ── Marker helpers ────────────────────────────────────────────────────────────

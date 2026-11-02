@@ -109,6 +109,8 @@
         <div class="props-knobs">
           <Knob
             v-for="knob in selectedChannel.knobs"
+            v-hint="'Right-click a knob to create an automation clip for it.'"
+            @contextmenu.prevent="createAutomationClipFor(selectedChannel.id, knob.key)"
             :key="knob.key"
             v-model="selectedChannel.params[knob.key]"
             :min="knob.min" :max="knob.max"
@@ -355,7 +357,7 @@ const {
   browserOpen, detachedWindows, redockWindow, extendedHudOpen, browserWidth,
   loadWasmForChannel,
   addChannelEffect, removeChannelEffect, reorderChannelEffects, updateChannelEffect,
-  instrumentDrag,
+  instrumentDrag, createAutomationClipFor,
 } = useStudio()
 
 // ── Detached main-view placeholder ────────────────────────────────────────────
