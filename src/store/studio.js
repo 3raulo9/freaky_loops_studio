@@ -3600,8 +3600,24 @@ export function useStudio() {
   }
 
   function buildMixerInserts() {
+    // Tear down a previous graph (project load) so stale nodes don't keep summing.
+    for (const n of mixerInsertNodes) {
+      for (const k of ['eqLow', 'eqMid', 'eqHigh', 'phaseGain', 'duckGain', 'gain', 'panner', 'analyser']) {
+        try { n[k].disconnect() } catch (_) {}
+      }
+      n.fxHandles.forEach(h => h?.dispose?.())
+    }
     mixerInsertNodes = []
-    mixerTracks.slice(1).forEach(mt => {
+    mixerTracks.slice(1).forEach(mt => mixerInsertNodes.push(_buildInsertNode(mt)))
+    // Second pass: post-fader send taps into the return buses + track outputs.
+    mixerTracks.slice(1).forEach((mt, i) => {
+      _wireMixerSends(mixerInsertNodes[i], mt)
+      _connectInsertOutput(mixerInsertNodes[i], mt)
+    })
+  }
+
+  // One insert's chain: EQ → FX → phase → sidechain duck → fader → pan → meter.
+  function _buildInsertNode(mt) {
       const eqLow     = audioCtx.createBiquadFilter()
       const eqMid     = audioCtx.createBiquadFilter()
       const eqHigh    = audioCtx.createBiquadFilter()
@@ -3611,23 +3627,109 @@ export function useStudio() {
       const panner    = audioCtx.createStereoPanner()
       const analyser  = audioCtx.createAnalyser()
       analyser.fftSize = 256
-      eqLow.type  = 'lowshelf';   eqLow.frequency.value  = 80;   eqLow.gain.value  = mt.eq.low
-      eqMid.type  = 'peaking';    eqMid.frequency.value  = 1000; eqMid.Q.value = 1; eqMid.gain.value = mt.eq.mid
-      eqHigh.type = 'highshelf';  eqHigh.frequency.value = 8000; eqHigh.gain.value = mt.eq.high
+      _applyEqParams({ eqLow, eqMid, eqHigh }, mt.eq)
       phaseGain.gain.value = mt.phaseInvert ? -1 : 1
       duckGain.gain.value  = 1
       gain.gain.value  = mt.muted ? 0 : mt.volume
       panner.pan.value = mt.pan
       eqLow.connect(eqMid); eqMid.connect(eqHigh)
       phaseGain.connect(duckGain); duckGain.connect(gain); gain.connect(panner)
-      panner.connect(analyser); analyser.connect(masterGain)
+      panner.connect(analyser)
       const node = { eqLow, eqMid, eqHigh, phaseGain, duckGain, gain, panner, analyser, fxHandles: [], sendGains: {} }
-      mixerInsertNodes.push(node)
       // Wire FX chain: eqHigh → [enabled fx slots] → phaseGain
       _wireMixerFxChain(node, mt)
-    })
-    // Second pass: post-fader send taps into the return buses.
-    mixerTracks.slice(1).forEach((mt, i) => _wireMixerSends(mixerInsertNodes[i], mt))
+      return node
+  }
+
+  // EQ band frequencies / Q are per track (parametric EQ); gains in dB.
+  function _applyEqParams(n, eq) {
+    n.eqLow.type  = 'lowshelf';  n.eqLow.frequency.value  = eq.lowFreq  ?? 80;   n.eqLow.gain.value  = eq.low ?? 0
+    n.eqMid.type  = 'peaking';   n.eqMid.frequency.value  = eq.midFreq  ?? 1000; n.eqMid.Q.value = eq.midQ ?? 1; n.eqMid.gain.value = eq.mid ?? 0
+    n.eqHigh.type = 'highshelf'; n.eqHigh.frequency.value = eq.highFreq ?? 8000; n.eqHigh.gain.value = eq.high ?? 0
+  }
+
+  // A track feeds the master, or another insert ("route to"), e.g. a drum bus.
+  function _connectInsertOutput(node, mt) {
+    if (!node) return
+    try { node.analyser.disconnect() } catch (_) {}
+    const tIdx = mt.output ? mixerTracks.findIndex(t => t.id === mt.output) : -1
+    const target = tIdx >= 1 ? mixerInsertNodes[tIdx - 1] : null
+    node.analyser.connect(target && target !== node ? target.eqLow : masterGain)
+  }
+
+  // Would routing track `fromId` into `toId` create a feedback loop?
+  function _routesInto(fromId, toId) {
+    const seen = new Set()
+    let cur = toId
+    while (cur && !seen.has(cur)) {
+      if (cur === fromId) return true
+      seen.add(cur)
+      cur = mixerTracks.find(t => t.id === cur)?.output ?? null
+    }
+    return false
+  }
+
+  // Route insert `trackIdx` to another insert/return by id (null = master).
+  function setMixerTrackOutput(trackIdx, targetId) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt || trackIdx === 0) return false
+    if (targetId && (targetId === mt.id || _routesInto(mt.id, targetId))) return false
+    pushUndo()
+    mt.output = targetId || null
+    if (audioCtx) _connectInsertOutput(mixerInsertNodes[trackIdx - 1], mt)
+    return true
+  }
+
+  // Number of insert tracks (they sit between the master and the return buses).
+  function _insertCount() {
+    const r = mixerTracks.findIndex(t => t.kind === 'return')
+    return (r < 0 ? mixerTracks.length : r) - 1
+  }
+
+  // Add an insert track just before the return buses. Everything that points at a
+  // track by index (channel routing, audio clips, sidechain keys) is shifted so it
+  // keeps pointing at the same track.
+  const MAX_MX_TRACKS = 1 + NUM_MX_RETURNS + 64
+  function addMixerInsert() {
+    if (mixerTracks.length >= MAX_MX_TRACKS) return -1
+    pushUndo()
+    const pos = _insertCount() + 1
+    const mt = {
+      id: 'mx' + Date.now().toString(36), name: 'MIX ' + pos, kind: 'insert',
+      color: COLORS[(pos - 1) % COLORS.length],
+      volume: 1.0, pan: 0, muted: false, _soloed: false,
+      eq: { low: 0, mid: 0, high: 0 }, fxSlots: [], phaseInvert: false, sends: {}, output: null,
+      sidechain: { source: null, amount: 0, attack: 0.01, release: 0.18 },
+    }
+    mixerTracks.splice(pos, 0, mt)
+    const bump = i => (i >= pos ? i + 1 : i)
+    channels.forEach(ch => { if (ch.mixerTrack) ch.mixerTrack = bump(ch.mixerTrack) })
+    playlistClips.forEach(c => { if (c.mixerTrack) c.mixerTrack = bump(c.mixerTrack) })
+    mixerTracks.forEach(t => { if (t.sidechain?.source > 0) t.sidechain.source = bump(t.sidechain.source) })
+    if (audioCtx) {
+      const node = _buildInsertNode(mixerTracks[pos])
+      mixerInsertNodes.splice(pos - 1, 0, node)
+      _connectInsertOutput(node, mixerTracks[pos])
+      rebuildGains()
+    }
+    return pos
+  }
+
+  // Parametric EQ band edit: { gain?, freq?, q? } for band 'low' | 'mid' | 'high'.
+  function setMixerEqBand(trackIdx, band, patch) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt || trackIdx === 0) return
+    if (patch.gain != null) mt.eq[band] = Math.max(-18, Math.min(18, patch.gain))
+    if (patch.freq != null) mt.eq[band + 'Freq'] = Math.max(20, Math.min(20000, patch.freq))
+    if (patch.q != null && band === 'mid') mt.eq.midQ = Math.max(0.1, Math.min(18, patch.q))
+    const node = mixerInsertNodes[trackIdx - 1]
+    if (node) _applyEqParams(node, mt.eq)
+  }
+
+  // Live EQ nodes of a track (the EQ graph reads their frequency response).
+  function getMixerEqNodes(trackIdx) {
+    const n = mixerInsertNodes[trackIdx - 1]
+    return n ? [n.eqLow, n.eqMid, n.eqHigh] : null
   }
 
   // (Re)build the post-fader send taps from one track into the return buses.
@@ -3929,7 +4031,7 @@ export function useStudio() {
 
   function assignChannelToMixerTrack(channelId, trackIdx) {
     const ch = channels.find(c => c.id === channelId); if (!ch) return
-    ch.mixerTrack = Math.max(0, Math.min(NUM_MX_INSERTS, trackIdx))
+    ch.mixerTrack = Math.max(0, Math.min(mixerTracks.length - 1, trackIdx))
     if (audioCtx) rebuildGains()
   }
 
@@ -3938,7 +4040,8 @@ export function useStudio() {
   // to the new positions and the routing graph rebuilt.
   function moveMixerTrack(idx, dir) {
     const a = idx, b = idx + dir
-    if (a < 1 || b < 1 || a > NUM_MX_INSERTS || b > NUM_MX_INSERTS) return false
+    const nIns = _insertCount()
+    if (a < 1 || b < 1 || a > nIns || b > nIns) return false
     const t = mixerTracks[a]; mixerTracks[a] = mixerTracks[b]; mixerTracks[b] = t   // swap descriptors
     // Channels routed to either lane follow their track to its new slot.
     channels.forEach(ch => { if (ch.mixerTrack === a) ch.mixerTrack = -b; else if (ch.mixerTrack === b) ch.mixerTrack = -a })
@@ -3949,12 +4052,12 @@ export function useStudio() {
       if (!n) return
       n.gain.gain.value   = mt.muted ? 0 : mt.volume
       n.panner.pan.value  = mt.pan
-      n.eqLow.gain.value  = mt.eq.low
-      n.eqMid.gain.value  = mt.eq.mid
-      n.eqHigh.gain.value = mt.eq.high
+      _applyEqParams(n, mt.eq)
       if (n.phaseGain) n.phaseGain.gain.value = mt.phaseInvert ? -1 : 1
       _wireMixerFxChain(n, mt)
     })
+    // Outputs follow track ids, so re-resolve every track's destination node.
+    mixerTracks.slice(1).forEach((mt, i) => _connectInsertOutput(mixerInsertNodes[i], mt))
     if (audioCtx) rebuildGains()
     markDirty()
     return true
@@ -4882,9 +4985,7 @@ export function useStudio() {
       const eqHigh = offCtx.createBiquadFilter()
       const gain   = offCtx.createGain()
       const panner = offCtx.createStereoPanner()
-      eqLow.type  = 'lowshelf';  eqLow.frequency.value  = 80;   eqLow.gain.value  = mt.eq.low
-      eqMid.type  = 'peaking';   eqMid.frequency.value  = 1000; eqMid.Q.value = 1; eqMid.gain.value = mt.eq.mid
-      eqHigh.type = 'highshelf'; eqHigh.frequency.value = 8000; eqHigh.gain.value = mt.eq.high
+      _applyEqParams({ eqLow, eqMid, eqHigh }, mt.eq)
       gain.gain.value  = mt.muted ? 0 : mt.volume
       panner.pan.value = mt.pan
       eqLow.connect(eqMid); eqMid.connect(eqHigh)
@@ -4896,8 +4997,7 @@ export function useStudio() {
       })
       const phase = offCtx.createGain(); phase.gain.value = mt.phaseInvert ? -1 : 1
       tail.connect(phase); phase.connect(gain); gain.connect(panner)
-      panner.connect(masterGainOff)
-      return { id: mt.id, eqLow, panner, sendGains: {} }
+      return { id: mt.id, output: mt.output ?? null, eqLow, panner, sendGains: {} }
     })
     const insertById = id => inserts.find(n => n.id === id)
     // Post-fader send taps into the return buses.
@@ -4914,6 +5014,11 @@ export function useStudio() {
         node.sendGains[rtnId] = sg
       }
     })
+    // Track outputs: the master, or another insert the track is routed into.
+    for (const node of inserts) {
+      const target = node.output ? insertById(node.output) : null
+      node.panner.connect(target && target !== node ? target.eqLow : masterGainOff)
+    }
     const insertDest = mtIdx => (mtIdx >= 1 && inserts[mtIdx - 1]) ? inserts[mtIdx - 1].eqLow : masterGainOff
 
     // Pre-decode GM soundfonts into THIS offline context.
@@ -6737,6 +6842,7 @@ export function useStudio() {
         fxSlots:     (mt.fxSlots ?? []).map(fx => fx ? { ...fx } : null),
         phaseInvert: mt.phaseInvert ?? false,
         sends:       { ...(mt.sends ?? {}) },
+        output:      mt.output ?? null,
         sidechain:   { ...(mt.sidechain ?? { source: null, amount: 0, attack: 0.01, release: 0.18 }) },
       })),
     }
@@ -7029,8 +7135,21 @@ export function useStudio() {
     })))
 
     // Mixer
-    ;(p.mixerTracks ?? []).forEach((mt, i) => {
-      if (!mixerTracks[i]) return
+    // Projects may carry extra insert tracks (or fewer than this session has).
+    const savedMx = p.mixerTracks ?? []
+    const baseMx  = 1 + NUM_MX_INSERTS + NUM_MX_RETURNS
+    if (mixerTracks.length > Math.max(baseMx, savedMx.length)) mixerTracks.splice(Math.max(baseMx, savedMx.length))
+    ;savedMx.forEach((mt, i) => {
+      if (!mixerTracks[i]) {
+        mixerTracks.push({
+          id: mt.id || 'mx' + i, name: mt.name, kind: mt.kind || 'insert', color: mt.color || COLORS[i % COLORS.length],
+          volume: 1, pan: 0, muted: false, _soloed: false, eq: { low: 0, mid: 0, high: 0 },
+          fxSlots: [], phaseInvert: false, sends: {}, output: null,
+          sidechain: { source: null, amount: 0, attack: 0.01, release: 0.18 },
+        })
+      }
+      if (mt.id) mixerTracks[i].id = mt.id
+      mixerTracks[i].output      = mt.output ?? null
       mixerTracks[i].name        = mt.name        ?? mixerTracks[i].name
       mixerTracks[i].color       = mt.color        ?? mixerTracks[i].color
       mixerTracks[i].volume      = mt.volume       ?? 1.0
@@ -7210,6 +7329,7 @@ export function useStudio() {
     addMixerTrackFx, removeMixerTrackFx, updateMixerTrackFxParam,
     toggleMixerTrackFxEnabled, moveMixerTrackFxSlot,
     setMixerSend, setMixerSidechain, NUM_MX_RETURNS, returnTrackIdxStart,
+    addMixerInsert, setMixerTrackOutput, setMixerEqBand, getMixerEqNodes,
     // Scale snap
     snapScale,
     // Pattern length (infinite canvas)
