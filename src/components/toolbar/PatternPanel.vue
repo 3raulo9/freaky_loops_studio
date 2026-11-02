@@ -199,7 +199,7 @@ onBeforeUnmount(() => {
   height: 22px; min-width: 18px;
   display: flex; align-items: center; justify-content: center;
   background: transparent; border: 1px solid var(--border-subtle); border-radius: 4px;
-  color: #50506e; font-family: 'Share Tech Mono', monospace; font-size: 13px;
+  color: var(--text-muted); font-family: 'Share Tech Mono', monospace; font-size: 13px;
   cursor: pointer; transition: all 0.1s; outline: none; padding: 0 4px;
 }
 .tb-pat-step:hover, .tb-pat-menu:hover { border-color: #404068; color: #9090c0; }
@@ -239,12 +239,12 @@ onBeforeUnmount(() => {
 }
 .pat-menu-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .pat-menu-item.danger:hover { background: #2a0e0e; color: #e74c3c; }
-.pat-menu-item.disabled { color: #34344a; cursor: not-allowed; }
-.pat-menu-item.disabled:hover { background: transparent; color: #34344a; }
+.pat-menu-item.disabled { color: var(--text-muted); cursor: not-allowed; }
+.pat-menu-item.disabled:hover { background: transparent; color: var(--text-muted); }
 .pat-menu-sep { height: 1px; background: var(--border-subtle); margin: 4px 2px; }
 .pat-menu-key {
   margin-left: auto; font-family: 'Share Tech Mono', monospace; font-size: 9px;
-  color: #3a3a5a; padding-left: 10px;
+  color: var(--text-muted); padding-left: 10px;
 }
 
 /* ── Name & color dialog ───────────────────────────────────────────────────── */
@@ -255,7 +255,7 @@ onBeforeUnmount(() => {
 }
 .pat-dialog-title {
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.18em; color: #5a5a80; margin-bottom: 6px;
+  letter-spacing: 0.18em; color: var(--text-muted); margin-bottom: 6px;
 }
 .pat-dialog-input {
   width: 100%; box-sizing: border-box;

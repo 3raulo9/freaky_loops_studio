@@ -2612,7 +2612,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .pl-cull-spacer { width: 100%; flex-shrink: 0; pointer-events: none; }
 .cull-stat {
-  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #50506e;
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted);
   padding: 0 8px; align-self: center; white-space: nowrap;
 }
 .playlist {
@@ -2629,7 +2629,7 @@ onBeforeUnmount(() => {
 .focus-btn {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   width: 38px; height: 32px; border-radius: 5px; border: 1px solid var(--border);
-  background: transparent; cursor: pointer; transition: all 0.1s; color: #404060; gap: 1px;
+  background: transparent; cursor: pointer; transition: all 0.1s; color: var(--text-muted); gap: 1px;
 }
 .focus-btn:hover  { border-color: #4a4a6a; color: #8080b0; }
 .focus-btn.active { border-color: #4ecdc4; background: #0a1a1a; color: #4ecdc4; }
@@ -2640,21 +2640,21 @@ onBeforeUnmount(() => {
   width: 28px; height: 28px; border-radius: 5px; border: 1px solid var(--border);
   background: transparent; cursor: pointer; font-size: 13px;
   display: flex; align-items: center; justify-content: center;
-  transition: all 0.1s; color: #50506a;
+  transition: all 0.1s; color: var(--text-muted);
 }
 .tool-btn:hover  { border-color: #4a4a6a; color: #9090b8; }
 .tool-btn.active { border-color: #e74c3c; background: #1a0808; color: #e74c3c; }
 .divider { width: 1px; height: 22px; background: var(--border-subtle); flex-shrink: 0; }
-.tb-label { font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700; letter-spacing: 0.15em; color: #404058; }
+.tb-label { font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700; letter-spacing: 0.15em; color: var(--text-muted); }
 .tb-select {
   background: var(--bg-control); border: 1px solid var(--border); color: var(--text-muted);
   padding: 3px 6px; border-radius: 4px; font-family: 'Rajdhani', sans-serif; font-size: 11px; cursor: pointer; outline: none;
 }
 .zoom-slider { width: 70px; accent-color: #e74c3c; cursor: pointer; }
-.tb-val { font-family: 'Share Tech Mono', monospace; font-size: 10px; color: #40405a; min-width: 30px; }
+.tb-val { font-family: 'Share Tech Mono', monospace; font-size: 10px; color: var(--text-muted); min-width: 30px; }
 .use-pl-toggle {
   display: flex; align-items: center; gap: 5px; cursor: pointer;
-  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.1em; color: #50506a;
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.1em; color: var(--text-muted);
 }
 .use-pl-toggle input { accent-color: #4ecdc4; cursor: pointer; }
 .tb-right { margin-left: auto; display: flex; gap: 5px; }
@@ -2701,19 +2701,19 @@ onBeforeUnmount(() => {
 .ptab {
   flex: 1; padding: 7px 4px; background: transparent; border: none;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.12em; color: #30304a; cursor: pointer; transition: all 0.1s;
+  letter-spacing: 0.12em; color: var(--text-muted); cursor: pointer; transition: all 0.1s;
   border-bottom: 2px solid transparent;
 }
 .ptab:hover { color: #6060a0; }
 .ptab.active { color: #4ecdc4; border-bottom-color: #4ecdc4; }
 .picker-sort-select {
   background: transparent; border: none; border-left: 1px solid var(--border-subtle);
-  color: #40405a; font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
+  color: var(--text-muted); font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
   cursor: pointer; padding: 0 4px; min-width: 0; outline: none;
 }
 .picker-sort-select:hover { color: #7070a0; }
 .picker-list { flex: 1; overflow-y: auto; }
-.picker-section { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #252535; padding: 6px 10px 3px; letter-spacing: 0.1em; }
+.picker-section { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--text-muted); padding: 6px 10px 3px; letter-spacing: 0.1em; }
 .picker-item {
   display: flex; flex-direction: column; gap: 3px;
   padding: 5px 8px 6px;
@@ -2763,7 +2763,7 @@ onBeforeUnmount(() => {
 .picker-action-btn {
   width: 100%; padding: 5px; background: transparent; border: 1px dashed var(--border);
   border-radius: 4px; font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.1em; color: #404058; cursor: pointer; transition: all 0.1s;
+  letter-spacing: 0.1em; color: var(--text-muted); cursor: pointer; transition: all 0.1s;
 }
 .picker-action-btn:hover { border-color: #f39c12; color: #f39c12; }
 .picker-hint { padding: 6px 10px 8px; font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted); line-height: 1.6; border-top: 1px solid var(--border-subtle); }
@@ -2777,7 +2777,7 @@ onBeforeUnmount(() => {
   width: 140px; min-width: 140px; position: sticky; left: 0; z-index: 11;
   background: var(--bg-deeper); border-right: 1px solid var(--border-subtle);
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.15em; color: #252540; display: flex; align-items: center; padding-left: 10px;
+  letter-spacing: 0.15em; color: var(--text-muted); display: flex; align-items: center; padding-left: 10px;
 }
 .ruler-cell {
   border-right: 1px solid var(--bg-base); flex-shrink: 0; position: relative;
@@ -2786,7 +2786,7 @@ onBeforeUnmount(() => {
 .ruler-cell:hover   { background: #0e0e20; }
 .ruler-cell.beat4   { border-left: 2px solid var(--border-subtle); }
 .ruler-cell.playing { background: rgba(255,255,255,0.06); }
-.ruler-num { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #35355a; }
+.ruler-num { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted); }
 .time-marker {
   position: absolute; top: 0; left: 0; right: 0;
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
@@ -2817,7 +2817,7 @@ onBeforeUnmount(() => {
 .track-indent { width: 12px; flex-shrink: 0; }
 .track-collapse-btn {
   width: 14px; height: 14px; flex-shrink: 0; background: transparent; border: none;
-  color: #505070; cursor: pointer; font-size: 8px; padding: 0; line-height: 1;
+  color: var(--text-muted); cursor: pointer; font-size: 8px; padding: 0; line-height: 1;
   display: flex; align-items: center; justify-content: center; border-radius: 2px; transition: color 0.1s;
 }
 .track-collapse-btn:hover { color: #9090c0; }
@@ -3001,7 +3001,7 @@ onBeforeUnmount(() => {
 .add-track-btn {
   width: 100%; height: 100%; background: transparent; border: none;
   font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
-  letter-spacing: 0.08em; color: #303048; cursor: pointer; transition: color 0.1s;
+  letter-spacing: 0.08em; color: var(--text-muted); cursor: pointer; transition: color 0.1s;
 }
 .add-track-btn:hover { color: #4ecdc4; }
 
@@ -3093,7 +3093,7 @@ onBeforeUnmount(() => {
 /* ── Quick zoom buttons ──────────────────────────────────────────────────────── */
 .zoom-quick-btns { display: flex; align-items: flex-end; gap: 2px; }
 .zoom-q {
-  background: transparent; border: none; color: #303050;
+  background: transparent; border: none; color: var(--text-muted);
   cursor: pointer; padding: 0 2px; font-size: 10px; transition: color 0.1s;
   line-height: 1; display: flex; align-items: flex-end;
 }
@@ -3108,7 +3108,7 @@ onBeforeUnmount(() => {
 .loop-btn {
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
   letter-spacing: 0.1em; padding: 4px 10px; border: 1px solid var(--border);
-  border-radius: 5px; background: transparent; color: #404058; cursor: pointer; transition: all 0.12s;
+  border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.12s;
 }
 .loop-btn:hover  { border-color: #27ae60; color: #27ae60; }
 .loop-btn.active { border-color: #27ae60; background: #0a1a0e; color: #27ae60; }

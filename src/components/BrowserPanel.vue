@@ -166,9 +166,9 @@ function wavePath(wave) {
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
   letter-spacing: 0.2em; color: #f1c40f;
 }
-.browser-count { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #34344a; margin-left: auto; }
+.browser-count { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--text-muted); margin-left: auto; }
 .browser-close {
-  background: none; border: none; color: #50506e; cursor: pointer;
+  background: none; border: none; color: var(--text-muted); cursor: pointer;
   font-size: 11px; line-height: 1; padding: 0 2px;
 }
 .browser-close:hover { color: #e74c3c; }
@@ -179,16 +179,16 @@ function wavePath(wave) {
   background: var(--bg-base); border: 1px solid var(--border-subtle); border-radius: 5px;
 }
 .browser-search:focus-within { border-color: #f1c40f88; }
-.browser-search-ico { color: #50506e; font-size: 12px; }
+.browser-search-ico { color: var(--text-muted); font-size: 12px; }
 .browser-search-input {
   flex: 1; min-width: 0; background: transparent; border: none; outline: none;
   color: var(--text-primary); font-family: 'Rajdhani', sans-serif; font-size: 12px;
 }
-.browser-search-clear { background: none; border: none; color: #50506e; cursor: pointer; font-size: 11px; }
+.browser-search-clear { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 11px; }
 .browser-search-clear:hover { color: #e74c3c; }
 .browser-results {
   padding: 0 12px 4px; flex-shrink: 0;
-  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #40405a;
+  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--text-muted);
 }
 
 .browser-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0; position: relative; }
@@ -206,8 +206,8 @@ function wavePath(wave) {
 .browser-row.draggable { cursor: grab; }
 .browser-row.draggable:active { cursor: grabbing; }
 
-.browser-caret { width: 10px; color: #50506e; flex-shrink: 0; }
-.browser-fcount { margin-left: auto; font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #34344a; }
+.browser-caret { width: 10px; color: var(--text-muted); flex-shrink: 0; }
+.browser-fcount { margin-left: auto; font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--text-muted); }
 .browser-swatch { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; }
 .browser-aico { width: 11px; font-size: 10px; flex-shrink: 0; text-align: center; }
 .cat-kick, .cat-bass { color: #e74c3c; }
@@ -220,7 +220,7 @@ function wavePath(wave) {
 .browser-name { overflow: hidden; text-overflow: ellipsis; }
 .browser-type {
   margin-left: auto; font-family: 'Share Tech Mono', monospace; font-size: 8px;
-  color: #34344a; text-transform: uppercase; flex-shrink: 0;
+  color: var(--text-muted); text-transform: uppercase; flex-shrink: 0;
 }
 .browser-wave { margin-left: auto; width: 46px; height: 14px; flex-shrink: 0; }
 .browser-wave path { fill: none; stroke: #2ecc71; stroke-width: 1; vector-effect: non-scaling-stroke; }

@@ -657,7 +657,7 @@ async function startRender() {
 .pill input[type="radio"] { display:none; }
 .pill:hover { border-color:#4a4a6a; color:#9090b8; }
 .pill.active { border-color:#e74c3c; color:#e74c3c; background:#1a0a0a; }
-.pill-sub { font-size:9px; color:#404058; margin-left:2px; }
+.pill-sub { font-size:9px; color:var(--text-muted); margin-left:2px; }
 .pill.active .pill-sub { color:#a03020; }
 
 /* ── Render mode extras ──────────────────────────────────────────── */

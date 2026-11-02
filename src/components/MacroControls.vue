@@ -119,7 +119,7 @@ defineEmits(['update'])
   font-size: 8px;
   font-weight: 600;
   text-transform: uppercase;
-  color: #555;
+  color: var(--text-muted);
   letter-spacing: 0.1em;
 }
 </style>

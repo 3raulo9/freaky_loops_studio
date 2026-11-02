@@ -1736,7 +1736,7 @@ function commitRename() {
 .op-section {
   padding: 6px 14px 3px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.18em; color: #303050; text-transform: uppercase;
+  letter-spacing: 0.18em; color: var(--text-muted); text-transform: uppercase;
 }
 .op-item {
   display: flex; align-items: center; gap: 8px;
@@ -1752,7 +1752,7 @@ function commitRename() {
 .op-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .op-kb {
   margin-left: auto; font-family: 'Share Tech Mono', monospace;
-  font-size: 9px; color: #353548; letter-spacing: 0;
+  font-size: 9px; color: var(--text-muted); letter-spacing: 0;
 }
 .op-sep { height: 1px; background: var(--border-subtle); margin: 3px 0; }
 
@@ -1788,7 +1788,7 @@ function commitRename() {
 .options-btn:hover { border-color: #4a4a6a; color: #b0b0d0; }
 .rack-title {
   font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
-  letter-spacing: 0.18em; color: #40405a; text-transform: uppercase;
+  letter-spacing: 0.18em; color: var(--text-muted); text-transform: uppercase;
   flex-shrink: 0;
 }
 
@@ -1816,10 +1816,10 @@ function commitRename() {
 }
 .df-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .df-item.active { color: #c0c0ee; }
-.df-item.df-group { padding-left: 20px; color: #5a5a80; }
+.df-item.df-group { padding-left: 20px; color: var(--text-muted); }
 .df-item.df-group:hover { color: #d0d0ee; }
 .df-item.df-group.active { color: #4ecdc4; }
-.df-item.df-add { color: #3a3a5a; }
+.df-item.df-add { color: var(--text-muted); }
 .df-item.df-add:hover { color: #4ecdc4; }
 .df-sep { height: 1px; background: var(--border-subtle); margin: 2px 0; }
 
@@ -1835,7 +1835,7 @@ function commitRename() {
 
 .rack-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .kb-badge {
-  font-family: 'Share Tech Mono', monospace; font-size: 10px; color: #30304a;
+  font-family: 'Share Tech Mono', monospace; font-size: 10px; color: var(--text-muted);
 }
 .add-synth-wrap { position: relative; }
 .add-ch-btn {
@@ -1882,7 +1882,7 @@ function commitRename() {
 .synth-pick-hint {
   padding: 3px 10px 6px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 500;
-  letter-spacing: 0.06em; color: #44445a; line-height: 1.4;
+  letter-spacing: 0.06em; color: var(--text-muted); line-height: 1.4;
 }
 .synth-picker {
   position: fixed; z-index: 100000;
@@ -1894,7 +1894,7 @@ function commitRename() {
 .synth-pick-section {
   padding: 5px 14px 3px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.18em; color: #303048; text-transform: uppercase;
+  letter-spacing: 0.18em; color: var(--text-muted); text-transform: uppercase;
 }
 .synth-pick-item {
   display: flex; align-items: center; gap: 8px; padding: 6px 14px;
@@ -1921,12 +1921,12 @@ function commitRename() {
 }
 .col-headers > div {
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.15em; color: #252540; text-transform: uppercase;
+  letter-spacing: 0.15em; color: var(--text-muted); text-transform: uppercase;
   display: flex; align-items: center; justify-content: center;
 }
 .col-name { justify-content: flex-start; padding-left: 6px; }
 .col-seq  { justify-content: flex-start; padding-left: 8px; }
-.steps-label { color: #303050; font-weight: 400; margin-left: 4px; }
+.steps-label { color: var(--text-muted); font-weight: 400; margin-left: 4px; }
 
 /* ── Channel list ────────────────────────────────────────────────── */
 .channel-list { flex: 1; overflow-y: auto; }
@@ -1988,7 +1988,7 @@ function commitRename() {
 .zip-ch-btn:hover { filter: brightness(1.12); }
 .unzip-btn {
   width: 16px; height: 16px; border-radius: 3px; border: 1px solid var(--border);
-  background: transparent; color: #404058; font-size: 8px;
+  background: transparent; color: var(--text-muted); font-size: 8px;
   cursor: pointer; display: flex; align-items: center; justify-content: center;
   flex-shrink: 0; transition: all 0.1s;
 }
@@ -2124,9 +2124,9 @@ function commitRename() {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.15em; color: #252540; pointer-events: none;
+  letter-spacing: 0.15em; color: var(--text-muted); pointer-events: none;
 }
-.mini-pr:hover .mini-pr-hint { color: #4a4a6a; }
+.mini-pr:hover .mini-pr-hint { color: var(--text-muted); }
 
 /* ── Multi-bar panoramic mini-pr ─────────────────────────────── */
 .mini-pr-wide {
@@ -2183,7 +2183,7 @@ function commitRename() {
 .ge-tab.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .ge-tabs-right { margin-left: auto; }
 .ge-hint {
-  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #252540; letter-spacing: 0;
+  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--text-muted); letter-spacing: 0;
 }
 
 .ge-chart {
@@ -2223,7 +2223,7 @@ function commitRename() {
 /* ── Empty state ─────────────────────────────────────────────────── */
 .empty-state {
   padding: 20px; text-align: center;
-  font-family: 'Rajdhani', sans-serif; font-size: 12px; color: #303048;
+  font-family: 'Rajdhani', sans-serif; font-size: 12px; color: var(--text-muted);
 }
 
 /* ── Context menu ────────────────────────────────────────────────── */
@@ -2315,7 +2315,7 @@ function commitRename() {
 .ctx-section-label {
   padding: 4px 14px 2px;
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
-  letter-spacing: 0.14em; color: #555575; text-transform: uppercase;
+  letter-spacing: 0.14em; color: var(--text-muted); text-transform: uppercase;
   pointer-events: none;
 }
 

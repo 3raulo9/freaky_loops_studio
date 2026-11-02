@@ -1,5 +1,24 @@
 export const THEMES = [
   {
+    id: 'studio',
+    name: 'STUDIO',
+    desc: 'Slate grey workstation (default)',
+    preview: '#2f363b',
+    vars: {
+      '--bg-deeper':    '#1c2124',
+      '--bg-base':      '#2a3035',
+      '--bg-header':    '#353d43',
+      '--bg-panel':     '#313940',
+      '--bg-track':     '#3a434a',
+      '--bg-control':   '#23292d',
+      '--bg-hover':     '#465259',
+      '--border-subtle':'#20262a',
+      '--border':       '#4f5b62',
+      '--text-primary': '#d8dfe3',
+      '--text-muted':   '#8b989f',
+    },
+  },
+  {
     id: 'white',
     name: 'WHITE',
     desc: 'Clean light studio',

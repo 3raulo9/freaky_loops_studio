@@ -308,7 +308,7 @@ function onGlobalDown(e) {
 .topbar--bottom .tb-line--secondary { background: linear-gradient(0deg, var(--bg-deeper) 0%, var(--bg-base) 100%); }
 .tb-line--edit { padding-top: 4px; padding-bottom: 4px; }
 .tb-line-empty {
-  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #3a3a55;
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted);
   padding: 6px 4px; pointer-events: none;
 }
 
@@ -393,12 +393,12 @@ function onGlobalDown(e) {
   letter-spacing: 0.2em; color: #7b4dd6;
 }
 .tb-editbar-hint {
-  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #3a3a55;
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted);
 }
 .tb-editbar-hidden { display: flex; align-items: center; gap: 5px; }
 .tb-editbar-lbl {
   font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
-  letter-spacing: 0.15em; color: #40405a;
+  letter-spacing: 0.15em; color: var(--text-muted);
 }
 .tb-editbar-spacer { flex: 1; }
 .tb-chip {

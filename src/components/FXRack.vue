@@ -165,11 +165,11 @@ function endDrag() { draggedIdx = null; dragOverIdx.value = null }
   letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-primary);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.fx-grip { color: #44445a; font-size: 11px; letter-spacing: -2px; cursor: grab; flex-shrink: 0; }
+.fx-grip { color: var(--text-muted); font-size: 11px; letter-spacing: -2px; cursor: grab; flex-shrink: 0; }
 .fx-grip:active { cursor: grabbing; color: var(--accent, #4ecdc4); }
 .fx-remove {
   width: 16px; height: 16px; padding: 0; flex-shrink: 0;
-  background: transparent; border: none; color: #50506a; cursor: pointer;
+  background: transparent; border: none; color: var(--text-muted); cursor: pointer;
   font-size: 11px; line-height: 1;
 }
 .fx-remove:hover { color: #e74c3c; }

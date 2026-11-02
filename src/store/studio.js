@@ -1361,7 +1361,7 @@ export function useStudio() {
   const renderModalOpen    = ref(false)
   const themeModalOpen     = ref(false)
   const midiRouterOpen     = ref(false)
-  const currentTheme       = ref(localStorage.getItem('fls-theme') ?? 'white')
+  const currentTheme       = ref(localStorage.getItem('fls-theme') ?? 'studio')
   applyTheme(currentTheme.value)
   const kbOctave           = ref(4)
   const gridSnap           = ref('1/4')
@@ -5349,6 +5349,8 @@ export function useStudio() {
     const _tag = e.target.tagName
     const _slider = _tag === 'INPUT' && e.target.type === 'range'
     if (!_slider && (_tag === 'INPUT' || _tag === 'SELECT' || _tag === 'TEXTAREA')) return
+    // Space = play / stop, from anywhere (and never "clicks" a focused button).
+    if (e.code === 'Space') { e.preventDefault(); togglePlay(); return }
     // Octave shift moved off [ and ] (now note keys) to - and =
     if (e.code === 'Minus')  { kbOctave.value = Math.max(0, kbOctave.value - 1); return }
     if (e.code === 'Equal')  { kbOctave.value = Math.min(8, kbOctave.value + 1); return }
@@ -6415,18 +6417,21 @@ export function useStudio() {
     for (const key of Object.keys(mod.params)) delete ch.params[key]
   }
 
-  async function saveProject(name = 'project') {
-    // Desktop: snapshot each plugin's sound (its state chunk) so reopening the
-    // project brings the same patch back, not just the same plugin.
+  // Desktop: snapshot each plugin's sound (its state chunk) so reopening the
+  // project brings the same patch back, not just the same plugin.
+  async function _collectVstStates() {
     const vstStates = {}
     if (isDesktop) {
       for (const ch of channels) {
         if (ch.type === 'vst' && ch.vstPath) vstStates[ch.id] = (await getVstState(ch.id)) ?? ch.vstState
       }
     }
-    projectName.value = name
-    projectDirty.value = false   // saved → clean
-    const project = {
+    return vstStates
+  }
+
+  // Plain-JSON snapshot of the whole project (audio buffers excluded).
+  function _serializeProject(vstStates = {}) {
+    return {
       version: 1,
       bpm:        bpm.value,
       totalSteps: totalSteps.value,
@@ -6504,6 +6509,13 @@ export function useStudio() {
         sidechain:   { ...(mt.sidechain ?? { source: null, amount: 0, attack: 0.01, release: 0.18 }) },
       })),
     }
+  }
+
+  async function saveProject(name = 'project') {
+    const vstStates = await _collectVstStates()
+    projectName.value = name
+    projectDirty.value = false   // saved → clean
+    const project = _serializeProject(vstStates)
 
     const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' })
     const url  = URL.createObjectURL(blob)
@@ -6528,6 +6540,121 @@ export function useStudio() {
       }
     }
     reader.readAsText(file)
+  }
+
+  // ── Autosave + recovery ────────────────────────────────────────────────────────
+  //   While the project has unsaved edits it's snapshotted to localStorage every
+  //   minute and when the window closes, so a crash or an accidental reload never
+  //   loses work: File → Recover last autosave brings it back.
+  const AUTOSAVE_KEY = 'fls-autosave'
+  function _readAutosaveMeta() {
+    try { return JSON.parse(localStorage.getItem(AUTOSAVE_KEY + '-meta') || 'null') } catch (_) { return null }
+  }
+  const autosaveInfo = ref(_readAutosaveMeta())
+  function autosaveNow() {
+    try {
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(_serializeProject()))
+      const meta = { time: Date.now(), name: projectName.value }
+      localStorage.setItem(AUTOSAVE_KEY + '-meta', JSON.stringify(meta))
+      autosaveInfo.value = meta
+    } catch (_) { /* quota or private mode — autosave is best effort */ }
+  }
+  setInterval(() => { if (projectDirty.value) autosaveNow() }, 60_000)
+  window.addEventListener('beforeunload', () => { if (projectDirty.value) autosaveNow() })
+
+  function recoverAutosave() {
+    let raw = null
+    try { raw = localStorage.getItem(AUTOSAVE_KEY) } catch (_) {}
+    if (!raw) return false
+    try {
+      _applyProject(JSON.parse(raw))
+      projectName.value  = (autosaveInfo.value?.name || 'Untitled') + ' (recovered)'
+      projectDirty.value = true
+      return true
+    } catch (err) {
+      console.error('[FreakyLoops] Autosave recovery failed:', err)
+      return false
+    }
+  }
+
+  // Fresh session. The current state is autosaved first, so this is undoable
+  // through File → Recover last autosave.
+  function newProject() {
+    if (projectDirty.value && !confirm('Start a new project? Unsaved changes are kept in the autosave.')) return
+    if (projectDirty.value) autosaveNow()
+    projectDirty.value = false
+    location.reload()
+  }
+
+  // ── MIDI file export ───────────────────────────────────────────────────────────
+  //   Standard MIDI File (type 1, 480 PPQ): a tempo/meter track plus one track per
+  //   channel with notes. Built from the render schedule, so the file matches what
+  //   plays — song arrangement or current pattern, swing included. Drum channels
+  //   go to MIDI channel 10 on their General MIDI notes.
+  const GM_DRUM_NOTE = { kick: 36, snare: 38, hihat: 42, clash: 49 }
+  function exportMidi({ mode = usePlaylist.value ? 'song' : 'pattern', bars = 1 } = {}) {
+    const PPQ = 480
+    const { events, START } = _compileRenderSchedule({ mode, bars })
+    const ticksPerSec = PPQ * bpm.value / 60
+    const toTick = sec => Math.max(0, Math.round((sec - START) * ticksPerSec))
+    const rawChannels = toRaw(channels)
+    const defaultGate = (60 / bpm.value) / 4 * 0.9
+
+    const perChannel = new Map()   // ci → [{ on, off, pitch, vel }]
+    for (const ev of events) {
+      if (ev.kind === 'cut') continue
+      const ch = rawChannels[ev.ci]
+      if (!ch) continue
+      const isDrum = ch.type === 'drum'
+      const vel = Math.max(1, Math.min(127, Math.round(((ev.kind === 'arp' ? ev.baseParams?.velocity : ev.params?.velocity) ?? 1) * 127)))
+      const pitches = isDrum ? [GM_DRUM_NOTE[ch.instrumentType] ?? 38] : (ev.kind === 'arp' ? ev.pitches : [ev.params?.pitch ?? 60])
+      const gate = ev.kind === 'arp' ? ev.span : (ev.params?.gate ?? defaultGate)
+      const on = toTick(ev.when), off = Math.max(on + 1, toTick(ev.when + gate))
+      if (!perChannel.has(ev.ci)) perChannel.set(ev.ci, [])
+      for (const p of pitches) perChannel.get(ev.ci).push({ on, off, pitch: Math.max(0, Math.min(127, Math.round(p))), vel })
+    }
+
+    const vlq = n => { const b = [n & 0x7f]; while ((n >>= 7)) b.unshift((n & 0x7f) | 0x80); return b }
+    const text = (type, str) => { const bytes = [...new TextEncoder().encode(str)]; return [0xff, type, ...vlq(bytes.length), ...bytes] }
+    const chunk = (id, data) => [...new TextEncoder().encode(id), (data.length >>> 24) & 255, (data.length >>> 16) & 255, (data.length >>> 8) & 255, data.length & 255, ...data]
+
+    const usPerQuarter = Math.round(60_000_000 / bpm.value)
+    const tracks = [[
+      0, ...text(0x03, projectName.value || 'Freaky Loops'),
+      0, 0xff, 0x51, 0x03, (usPerQuarter >> 16) & 255, (usPerQuarter >> 8) & 255, usPerQuarter & 255,
+      0, 0xff, 0x58, 0x04, 4, 2, 24, 8,
+      0, 0xff, 0x2f, 0x00,
+    ]]
+    let nextMidiCh = 0
+    for (const [ci, notes] of perChannel) {
+      const ch = rawChannels[ci]
+      let midiCh = 9
+      if (ch.type !== 'drum') { if (nextMidiCh === 9) nextMidiCh++; midiCh = nextMidiCh++ % 16 }
+      const evs = []
+      for (const n of notes) {
+        evs.push({ t: n.on, d: [0x90 | midiCh, n.pitch, n.vel] })
+        evs.push({ t: n.off, d: [0x80 | midiCh, n.pitch, 0] })
+      }
+      evs.sort((a, b) => a.t - b.t || (a.d[0] & 0xf0) - (b.d[0] & 0xf0))   // offs before ons
+      const data = [0, ...text(0x03, ch.name || 'Channel')]
+      let last = 0
+      for (const e of evs) { data.push(...vlq(e.t - last), ...e.d); last = e.t }
+      data.push(0, 0xff, 0x2f, 0x00)
+      tracks.push(data)
+    }
+
+    const bytes = [
+      ...chunk('MThd', [0, 1, 0, tracks.length, (PPQ >> 8) & 255, PPQ & 255]),
+      ...tracks.flatMap(t => chunk('MTrk', t)),
+    ]
+    const blob = new Blob([new Uint8Array(bytes)], { type: 'audio/midi' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = (projectName.value || 'project') + '.mid'
+    a.click()
+    URL.revokeObjectURL(url)
+    return { tracks: tracks.length - 1, notes: [...perChannel.values()].reduce((n, l) => n + l.length, 0) }
   }
 
   function _applyProject(p) {
@@ -6849,8 +6976,8 @@ export function useStudio() {
     getPatternLengthTicks, setPatternLengthOverride, clearPatternLengthOverride,
     // Loop region (red ruler selection — temporary playback override)
     loopRegion, setLoopRegion, clearLoopRegion,
-    // Project save / load
-    saveProject, loadProjectFile,
+    // Project save / load / autosave / MIDI export
+    saveProject, loadProjectFile, newProject, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
     // Render / export: faithful offline render (+ real-time capture for plugins,
     // + native bounce for VST instrument channels)
     renderProjectToBuffer,

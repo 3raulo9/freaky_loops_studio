@@ -168,7 +168,7 @@ onBeforeUnmount(() => window.removeEventListener('pointerdown', onGlobalDown, tr
 }
 .add-menu-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .add-menu-sub-trigger { justify-content: flex-start; }
-.add-arrow { margin-left: auto; font-size: 9px; color: #3a3a5a; }
+.add-arrow { margin-left: auto; font-size: 9px; color: var(--text-muted); }
 .add-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .add-menu-sep { height: 1px; background: var(--border-subtle); margin: 4px 2px; }
 

@@ -65,6 +65,6 @@ const steps = computed(() => getSteps(props.ch.id))
 }
 .ruler-cell.active { background: rgba(255,255,255,0.7); box-shadow: 0 0 4px rgba(255,255,255,0.5); }
 .ruler-cell.beat   { border-left: 1px solid #252535; }
-.ruler-num { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #44446a; pointer-events: none; }
+.ruler-num { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--text-muted); pointer-events: none; }
 .ruler-cell.active .ruler-num { color: #0a0a12; }
 </style>

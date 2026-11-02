@@ -548,7 +548,7 @@ function stopResize() {
 .detached-placeholder {
   flex: 1;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 12px; color: #3a3a55;
+  gap: 12px; color: var(--text-muted);
 }
 .dp-icon { font-size: 40px; color: #1abc9c88; }
 .dp-text {
@@ -585,7 +585,7 @@ function stopResize() {
   letter-spacing: 0.12em; display: block;
 }
 .props-type {
-  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #303048;
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted);
   text-transform: uppercase;
 }
 
@@ -594,7 +594,7 @@ function stopResize() {
 }
 .props-label {
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 600;
-  letter-spacing: 0.15em; color: #40405a; text-transform: uppercase;
+  letter-spacing: 0.15em; color: var(--text-muted); text-transform: uppercase;
 }
 .props-select {
   background: var(--bg-control); border: 1px solid var(--border); color: var(--text-primary);
@@ -611,7 +611,7 @@ function stopResize() {
 
 .props-kb-hint {
   margin: auto 0 0; padding: 10px 10px 0;
-  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #25253a;
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted);
   line-height: 1.7;
 }
 .kb-row { white-space: nowrap; }
@@ -663,10 +663,10 @@ function stopResize() {
 }
 .wasm-hint-title {
   font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
-  color: #40405a; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 2px;
+  color: var(--text-muted); letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 2px;
 }
 .wasm-api-hint code {
-  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #5a5a80;
+  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--text-muted);
   background: var(--bg-base); padding: 1px 3px; border-radius: 2px;
 }
 .wasm-compat-note {
@@ -675,7 +675,7 @@ function stopResize() {
 }
 .wasm-examples-title {
   font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
-  letter-spacing: 0.15em; color: #40405a; text-transform: uppercase;
+  letter-spacing: 0.15em; color: var(--text-muted); text-transform: uppercase;
   margin-top: 2px;
 }
 .wasm-examples {
@@ -713,7 +713,7 @@ function stopResize() {
   background: var(--bg-deeper);
   border: 1px solid var(--border);
   border-radius: 4px;
-  color: #4a4a6a;
+  color: var(--text-muted);
   font-family: 'Rajdhani', sans-serif;
   font-size: 10px;
   font-weight: 700;
@@ -727,7 +727,7 @@ function stopResize() {
 .mod-tab-x {
   font-size: 12px;
   line-height: 1;
-  color: #30304a;
+  color: var(--text-muted);
   cursor: pointer;
   margin-left: 2px;
   transition: color 0.1s;
@@ -768,8 +768,8 @@ function stopResize() {
   transition: background 0.1s, color 0.1s;
 }
 .mod-picker-item:hover       { background: var(--bg-hover); color: var(--text-primary); }
-.mod-picker-item.taken       { color: #3a3a55; cursor: default; }
-.mod-picker-item.taken:hover { background: transparent; color: #3a3a55; }
+.mod-picker-item.taken       { color: var(--text-muted); cursor: default; }
+.mod-picker-item.taken:hover { background: transparent; color: var(--text-muted); }
 .mod-picker-check            { color: #4ecdc4; font-size: 11px; }
 
 .module-knobs {
@@ -795,7 +795,7 @@ function stopResize() {
 }
 .fx-section-title {
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.18em; color: #40405a; text-transform: uppercase;
+  letter-spacing: 0.18em; color: var(--text-muted); text-transform: uppercase;
 }
 .fx-add-wrap { position: relative; }
 .fx-add-btn {
@@ -826,7 +826,7 @@ function stopResize() {
 .fx-picker-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .fx-empty {
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 500;
-  letter-spacing: 0.04em; color: #3a3a52; text-align: center; padding: 8px 4px;
+  letter-spacing: 0.04em; color: var(--text-muted); text-align: center; padding: 8px 4px;
 }
 
 /* ── Instrument drag ghost (teleported to <body>, follows the cursor) ── */
@@ -873,7 +873,7 @@ function stopResize() {
 }
 .pr-panel-title {
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
-  letter-spacing: 0.2em; color: #30304a; text-transform: uppercase;
+  letter-spacing: 0.2em; color: var(--text-muted); text-transform: uppercase;
 }
 .pr-panel-ch {
   font-family: 'Rajdhani', sans-serif; font-size: 13px; font-weight: 700;
@@ -885,13 +885,13 @@ function stopResize() {
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
   letter-spacing: 0.08em; padding: 3px 8px;
   border: 1px solid var(--border); border-radius: 3px;
-  background: transparent; color: #404058; cursor: pointer; transition: all 0.1s;
+  background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.1s;
 }
 .prm-btn.active { border-color: var(--accent); color: var(--accent); }
 .prm-btn:hover:not(.active) { border-color: #4a4a6a; color: #7070a0; }
 
 .pr-close {
-  margin-left: auto; background: transparent; border: none; color: #404058;
+  margin-left: auto; background: transparent; border: none; color: var(--text-muted);
   font-size: 14px; cursor: pointer; padding: 2px 6px; border-radius: 3px;
   transition: color 0.1s;
 }

@@ -6,6 +6,7 @@
 //  container (TopBar.vue) owns *where* they sit and *whether* they're mounted.
 // ──────────────────────────────────────────────────────────────────────────
 import AddPanel       from './AddPanel.vue'
+import MenuPanel      from './MenuPanel.vue'
 import LogoPanel      from './LogoPanel.vue'
 import HintBarPanel   from './HintBarPanel.vue'
 import TransportPanel from './TransportPanel.vue'
@@ -28,6 +29,7 @@ import WindowsPanel   from './WindowsPanel.vue'
 export const SPACER_ID = 'spacer'
 
 export const PANELS = {
+  menu:      { label: 'Main Menu',   component: MenuPanel      },
   logo:      { label: 'Logo',        component: LogoPanel      },
   add:       { label: 'Add Channel', component: AddPanel       },
   hint:      { label: 'Hint Bar',    component: HintBarPanel, grow: true },
@@ -69,6 +71,7 @@ export const DEFAULT_LAYOUT = [
   { id: 'tools',     visible: true, row: 0 },
   { id: 'windows',   visible: true, row: 0 },
   // ── Secondary row ──────────────────────────────────────────────────────────
+  { id: 'menu',      visible: true, row: 1 },
   { id: 'hint',      visible: true, row: 1 },
   { id: 'pattern',   visible: true, row: 1 },
   { id: 'midi',      visible: true, row: 1 },

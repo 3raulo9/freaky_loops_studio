@@ -147,7 +147,7 @@ onBeforeUnmount(() => {
   font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
   letter-spacing: 0.12em; padding: 1px 8px;
   border: 1px solid var(--border-subtle); border-radius: 3px;
-  background: transparent; color: #50506e; cursor: pointer; transition: all 0.12s;
+  background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.12s;
 }
 .tb-tap:hover  { border-color: #e74c3c; color: #e74c3c; }
 .tb-tap:active { background: #1a0808; }
@@ -161,7 +161,7 @@ onBeforeUnmount(() => {
 .bpm-menu-title {
   padding: 4px 9px 4px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.16em; color: #5a5a80;
+  letter-spacing: 0.16em; color: var(--text-muted);
 }
 .bpm-menu-item {
   display: flex; align-items: center; gap: 7px; padding: 5px 10px;

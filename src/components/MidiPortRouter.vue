@@ -470,7 +470,7 @@ function truncate(str, max) {
 }
 .mpr-sub {
   font-size: 9px;
-  color: #383852;
+  color: var(--text-muted);
   letter-spacing: 0.1em;
 }
 .mpr-header-actions { margin-left: auto; display: flex; gap: 6px; }
@@ -507,8 +507,8 @@ function truncate(str, max) {
   transition: background 0.15s, border-color 0.15s;
 }
 .mpr-dropzone--active { background: #0c0c20; border-color: #4ecdc460; }
-.mpr-drop-icon  { font-size: 18px; color: #2a2a3a; }
-.mpr-drop-text  { font-size: 11px; color: #383852; letter-spacing: 0.06em; }
+.mpr-drop-icon  { font-size: 18px; color: var(--text-muted); }
+.mpr-drop-text  { font-size: 11px; color: var(--text-muted); letter-spacing: 0.06em; }
 .mpr-file-name  { font-size: 11px; color: #c0c0d8; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mpr-file-dur   { font-size: 10px; color: #4ecdc4; white-space: nowrap; }
 .mpr-browse-btn {
@@ -591,7 +591,7 @@ function truncate(str, max) {
 .mpr-col {
   font-size: 8px;
   letter-spacing: 0.12em;
-  color: #333348;
+  color: var(--text-muted);
   text-transform: uppercase;
 }
 .mpr-col--ch    { width: 36px;  flex-shrink: 0; }
@@ -629,7 +629,7 @@ function truncate(str, max) {
   align-items: center;
   gap: 5px;
   font-size: 10px;
-  color: #555570;
+  color: var(--text-muted);
 }
 .mpr-led {
   width: 6px;
@@ -726,7 +726,7 @@ function truncate(str, max) {
   cursor: pointer;
   border: 1px solid #1e1e30;
   background: #0c0c16;
-  color: #383852;
+  color: var(--text-muted);
   padding: 0;
   line-height: 1;
   transition: background 0.1s, color 0.1s, border-color 0.1s;
