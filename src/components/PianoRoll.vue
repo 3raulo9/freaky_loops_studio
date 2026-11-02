@@ -72,6 +72,18 @@
 
       <div class="pr-sep" />
 
+      <!-- Stamp: drawing a note places a whole chord -->
+      <select class="pr-sel pr-stamp" :class="{ on: stamp !== 'off' }" v-model="stamp"
+        v-hint="'Stamp: each note you draw becomes this chord. In-scale chords follow the piano roll scale (or C major).'">
+        <option value="off">STAMP: off</option>
+        <optgroup label="In scale">
+          <option v-for="(d, k) in DIATONIC_CHORDS" :key="k" :value="k">{{ d.label }}</option>
+        </optgroup>
+        <optgroup label="Fixed">
+          <option v-for="(c, k) in CHORD_TYPES" :key="k" :value="k">{{ c.label }}</option>
+        </optgroup>
+      </select>
+
       <!-- Batch tools (act on the selection, or every note when none is selected) -->
       <div class="pr-tools-menu" @click.stop>
         <button class="pr-tools-btn" :class="{ open: toolsMenuOpen }"
@@ -510,6 +522,7 @@ import {
   SCALE_DEFS, NOTE_NAMES,
 } from '../store/studio.js'
 import { TOOL_DEFS, runTool } from './pianoRollTools.js'
+import { CHORD_TYPES, DIATONIC_CHORDS, chordOffsets } from '../noteFx.js'
 
 const props = defineProps({ ch: { type: Object, required: true } })
 
@@ -586,6 +599,7 @@ const clipboardNotes = ref([])
 const copyHint    = ref('')            // transient "Copied N notes" confirmation
 const sliceLine   = ref(null)          // { x } while slice drag active
 const toolsMenuOpen = ref(false)
+const stamp       = ref('off')         // chord stamp for the draw tool
 const toolDialog  = ref(null)          // { def, opts } while a tool's dialog is open
 const GRID_OPTIONS = [
   { v: 30, l: '1/64' }, { v: 60, l: '1/32' }, { v: 80, l: '1/16 T' }, { v: 120, l: '1/16' },
@@ -1386,8 +1400,20 @@ function onGridDown(e) {
   if (noteColorGroup.value > 0) newNote.colorGroup = noteColorGroup.value
   notes.push(newNote)
   playNote(targetCh.value, pitch, false)
+  // Stamp: add the rest of the chord on top of the drawn note.
+  const chordIdx = []
+  if (stamp.value !== 'off') {
+    const intervals = snapScale.enabled ? scaleIntervals.value : SCALE_DEFS.major
+    const root = snapScale.enabled ? snapScale.tonic : 0
+    for (const off of chordOffsets(stamp.value, pitch, { root, intervals }).slice(1)) {
+      if (pitch + off > 127) continue
+      notes.push({ ...newNote, pitch: pitch + off })
+      chordIdx.push(notes.length - 1)
+      playNote(targetCh.value, pitch + off, false)
+    }
+  }
   drag = {
-    type: 'create', noteIdx: notes.length - 1,
+    type: 'create', noteIdx: notes.length - 1 - chordIdx.length, chordIdx,
     startClientX: e.clientX, origDurationTicks: snapTicks.value,
   }
 }
@@ -1530,6 +1556,8 @@ function onWindowMouseMove(e) {
     note.durationTicks = alt
       ? Math.max(1, drag.origDurationTicks + dTicks)
       : Math.max(snapTicks.value, snapTick(drag.origDurationTicks + dTicks))
+    // Stamped chord tones stretch with the note being drawn.
+    for (const i of drag.chordIdx ?? []) if (notes[i]) notes[i].durationTicks = note.durationTicks
     return
   }
 
@@ -2346,6 +2374,8 @@ onUnmounted(() => {
 
 /* ── Tools menu + dialog ─────────────────────────────────────────────────── */
 .pr-tools-menu { position: relative; }
+.pr-stamp { max-width: 118px; }
+.pr-stamp.on { border-color: #f0a030; color: #f0a030; }
 .pr-tools-btn {
   height: 22px; padding: 0 8px; border-radius: 3px; cursor: pointer;
   background: var(--bg-control); border: 1px solid var(--border-subtle); color: var(--text-primary);
