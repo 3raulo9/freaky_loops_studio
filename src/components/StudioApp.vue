@@ -117,6 +117,9 @@
           />
         </div>
 
+        <!-- Note FX: arp / chord / scale / transpose / velocity / chance -->
+        <NoteFxPanel :channel="selectedChannel" />
+
         <!-- ── Module tabs ───────────────────────────────────────────── -->
         <div class="module-section">
 
@@ -328,6 +331,7 @@ import ChannelRack from './ChannelRack.vue'
 import Playlist    from './Playlist.vue'
 import Mixer       from './Mixer.vue'
 import SessionView from './SessionView.vue'
+import NoteFxPanel from './NoteFxPanel.vue'
 import PianoRoll   from './PianoRoll.vue'
 import StepGrid    from './StepGrid.vue'
 import Knob        from './Knob.vue'

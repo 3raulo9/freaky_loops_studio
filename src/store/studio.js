@@ -1,5 +1,6 @@
 import { ref, reactive, computed, watch, toRaw } from 'vue'
 import { applyTheme } from '../themes.js'
+import { applyNoteFx, hasNoteFx } from '../noteFx.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
 import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport } from '../desktop/ipc.js'
@@ -4281,6 +4282,8 @@ export function useStudio() {
           if (d.steps[s]) {
             const vel      = d.stepVelocities?.[s] ?? 0.8
             const pitchOff = d.stepPitches?.[s]    ?? 0
+            const fxNotes  = applyNoteFx(ch.params, (ch.params.pitch ?? 60) + pitchOff, vel, SCALE_DEFS)
+            if (!fxNotes.length) return   // dropped by the channel's chance
             // Cut-self: a 2 ms fade-out/in de-clicks the choke.
             if (cutGains[ci]) {
               const cg = cutGains[ci].gain
@@ -4289,12 +4292,11 @@ export function useStudio() {
               cg.linearRampToValueAtTime(0.0001, when + 0.002)
               cg.linearRampToValueAtTime(1.0,    when + 0.004)
             }
-            const basePitch = (ch.params.pitch ?? 60) + pitchOff
-            if (ch.params.arpEnabled && ch.type === 'audiofile') {
+            if (ch.params.arpEnabled) {
               // Per-step ratchet/arp: the arp fills one step (lower the rate for rolls).
-              _scheduleArp(audioCtx, ch, [basePitch], when, secPerStep, cutDest, { ...ch.params, velocity: vel })
+              _scheduleArp(audioCtx, ch, fxNotes.map(n => n.pitch), when, secPerStep, cutDest, { ...ch.params, velocity: fxNotes[0].velocity })
             } else {
-              ch.fn(audioCtx, when, { ...ch.params, pitch: basePitch, velocity: vel }, cutDest)
+              for (const n of fxNotes) ch.fn(audioCtx, when, { ...ch.params, pitch: n.pitch, velocity: n.velocity }, cutDest)
               registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
             }
           }
@@ -4315,7 +4317,7 @@ export function useStudio() {
           const _stepNotes = _byStep?.get(patternStep)
           if (_stepNotes) {
             const rawParams = toRaw(ch.params)
-            const arpOn = ch.params.arpEnabled && ch.type === 'audiofile'
+            const arpOn = !!ch.params.arpEnabled
             // Arp: group notes that start on the same tick into a chord, then
             // arpeggiate each chord across its (longest) note length.
             const arpGroups = arpOn ? new Map() : null
@@ -4329,13 +4331,15 @@ export function useStudio() {
               const gate = ticksToEnd > 0
                 ? Math.min(nominalGate, Math.max(0.01, ticksToEnd * secPerTick - 0.005))
                 : nominalGate
+              const fxNotes = applyNoteFx(rawParams, note.pitch + masterPitchSemis.value, note.velocity ?? 1, SCALE_DEFS)
+              if (!fxNotes.length) continue
               if (arpOn) {
                 let g = arpGroups.get(note.startTick)
-                if (!g) { g = { when: noteWhen, span: 0, pitches: [], vel: note.velocity ?? 1 }; arpGroups.set(note.startTick, g) }
-                g.pitches.push(note.pitch + masterPitchSemis.value)
+                if (!g) { g = { when: noteWhen, span: 0, pitches: [], vel: fxNotes[0].velocity }; arpGroups.set(note.startTick, g) }
+                for (const n of fxNotes) g.pitches.push(n.pitch)
                 if (gate > g.span) g.span = gate
               } else {
-                ch.fn(audioCtx, noteWhen, { ...rawParams, pitch: note.pitch + masterPitchSemis.value, velocity: note.velocity ?? 1, gate }, dest)
+                for (const n of fxNotes) ch.fn(audioCtx, noteWhen, { ...rawParams, pitch: n.pitch, velocity: n.velocity, gate }, dest)
                 registerVoice(noteWhen, gate + 0.12)
               }
             }
@@ -4757,12 +4761,13 @@ export function useStudio() {
             if (!d.steps[s]) return
             const vel      = d.stepVelocities?.[s] ?? 0.8
             const pitchOff = d.stepPitches?.[s]    ?? 0
+            const fxNotes  = applyNoteFx(ch.params, (ch.params.pitch ?? 60) + pitchOff, vel, SCALE_DEFS)
+            if (!fxNotes.length) return
             if (ch.cutSelf) events.push({ kind: 'cut', ci, when })
-            const basePitch = (ch.params.pitch ?? 60) + pitchOff
-            if (ch.params.arpEnabled && ch.type === 'audiofile') {
-              events.push({ kind: 'arp', ci, cut: true, when, span: secPerStep, pitches: [basePitch], baseParams: { ...ch.params, velocity: vel } })
+            if (ch.params.arpEnabled) {
+              events.push({ kind: 'arp', ci, cut: true, when, span: secPerStep, pitches: fxNotes.map(n => n.pitch), baseParams: { ...ch.params, velocity: fxNotes[0].velocity } })
             } else {
-              events.push({ kind: 'note', ci, cut: true, when, params: { ...ch.params, pitch: basePitch, velocity: vel } })
+              for (const n of fxNotes) events.push({ kind: 'note', ci, cut: true, when, params: { ...ch.params, pitch: n.pitch, velocity: n.velocity } })
             }
           } else {
             const patternStep = clipOffset * stepsPerCell + step + slipOffset
@@ -4772,7 +4777,7 @@ export function useStudio() {
             const byStep    = offByStep(patternId, ch.id)
             const stepNotes = byStep?.get(patternStep)
             if (!stepNotes) return
-            const arpOn = ch.params.arpEnabled && ch.type === 'audiofile'
+            const arpOn = !!ch.params.arpEnabled
             const arpGroups = arpOn ? new Map() : null
             for (const note of stepNotes) {
               if (note.muted) continue
@@ -4781,13 +4786,15 @@ export function useStudio() {
               const nominalGate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
               const ticksToEnd  = clipEndTick - note.startTick
               const gate = ticksToEnd > 0 ? Math.min(nominalGate, Math.max(0.01, ticksToEnd * secPerTick - 0.005)) : nominalGate
+              const fxNotes = applyNoteFx(ch.params, note.pitch + masterPitch, note.velocity ?? 1, SCALE_DEFS)
+              if (!fxNotes.length) continue
               if (arpOn) {
                 let g = arpGroups.get(note.startTick)
-                if (!g) { g = { when: noteWhen, span: 0, pitches: [], vel: note.velocity ?? 1 }; arpGroups.set(note.startTick, g) }
-                g.pitches.push(note.pitch + masterPitch)
+                if (!g) { g = { when: noteWhen, span: 0, pitches: [], vel: fxNotes[0].velocity }; arpGroups.set(note.startTick, g) }
+                for (const n of fxNotes) g.pitches.push(n.pitch)
                 if (gate > g.span) g.span = gate
               } else {
-                events.push({ kind: 'note', ci, cut: false, when: noteWhen, params: { ...ch.params, pitch: note.pitch + masterPitch, velocity: note.velocity ?? 1, gate } })
+                for (const n of fxNotes) events.push({ kind: 'note', ci, cut: false, when: noteWhen, params: { ...ch.params, pitch: n.pitch, velocity: n.velocity, gate } })
               }
             }
             if (arpGroups) for (const g of arpGroups.values())
@@ -5330,7 +5337,33 @@ export function useStudio() {
   // sustain=true → held voice that lasts until stopNote (live keyboard / piano keys).
   // sustain=false → brief one-shot audition (note drawing) with the instrument's
   // own natural decay; never leaves a voice open.
+  // Live notes that note FX expanded (chords): source key → pitches played.
+  const _liveFxNotes = new Map()
+
   function playNote(ch, pitch, sustain = true) {
+    if (ch && hasNoteFx(ch.params)) {
+      const key = ch.id + ':' + pitch
+      for (const p of _liveFxNotes.get(key) ?? []) _stopNoteRaw(ch, p)
+      const notes = applyNoteFx(ch.params, pitch, 1, SCALE_DEFS)
+      _liveFxNotes.set(key, notes.map(n => n.pitch))
+      for (const n of notes) _playNoteRaw(ch, n.pitch, sustain, n.velocity)
+      return
+    }
+    _playNoteRaw(ch, pitch, sustain, 1)
+  }
+
+  function stopNote(ch, pitch) {
+    const key = ch && (ch.id + ':' + pitch)
+    const derived = key && _liveFxNotes.get(key)
+    if (derived) {
+      _liveFxNotes.delete(key)
+      for (const p of derived) _stopNoteRaw(ch, p)
+      return
+    }
+    _stopNoteRaw(ch, pitch)
+  }
+
+  function _playNoteRaw(ch, pitch, sustain = true, velocity = 1) {
     if (!audioCtx) initAudio()
     const ci   = channels.indexOf(ch)
     const dest = (ci >= 0 && trackGains[ci]) ? trackGains[ci] : audioCtx.destination
@@ -5344,7 +5377,7 @@ export function useStudio() {
     // VST2 instrument (native host): forward the note over IPC; audio comes from
     // the native engine, not the Web Audio graph.
     if (ch.type === 'vst') {
-      sendToHost('vstNoteOn', { id: ch.id, pitch: p, velocity: 100 })
+      sendToHost('vstNoteOn', { id: ch.id, pitch: p, velocity: Math.max(1, Math.round(velocity * 127)) })
       // One-shot audition (drawing a note): auto-release so it doesn't hang.
       // Held notes (sustain=true, live keyboard) are released by stopNote on key-up.
       if (!sustain) setTimeout(() => sendToHost('vstNoteOff', { id: ch.id, pitch: p }), 250)
@@ -5359,7 +5392,7 @@ export function useStudio() {
       const relGain = audioCtx.createGain()
       relGain.gain.value = 1
       relGain.connect(dest)
-      ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1, gate: HOLD_MAX, hold: true }, relGain)
+      ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity, gate: HOLD_MAX, hold: true }, relGain)
       const relTime = Math.max(0.06, Math.min(2.5, ch.params.release ?? ch.params.decay ?? 0.4))
       liveVoices.set(key, {
         release(t) {
@@ -5379,7 +5412,7 @@ export function useStudio() {
     // Continuous GM voices: loop-sustain the sample until note-off (node.stop runs
     // the ADSR release).
     if (sustain && ch.sustains && ch.type === 'gm') {
-      const node = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1, hold: true }, dest)
+      const node = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity, hold: true }, dest)
       if (node) {
         liveVoices.set(key, {
           release(t) {
@@ -5392,8 +5425,8 @@ export function useStudio() {
       return
     }
 
-    // Arp-enabled sampler: feed the live arp clock instead of one held voice.
-    if (ch.type === 'audiofile' && ch.params?.arpEnabled) {
+    // Arp-enabled channel: feed the live arp clock instead of one held voice.
+    if (ch.params?.arpEnabled) {
       _liveArpNoteOn(ch, pitch)
       registerVoice(when, 0.2)
       return
@@ -5403,7 +5436,7 @@ export function useStudio() {
     // be released on note-off (a looping sample would otherwise ring forever). This
     // is what lets the live keyboard audition the sampler with its current settings.
     if (ch.type === 'audiofile') {
-      const voice = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1 }, dest)
+      const voice = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity }, dest)
       if (voice && voice.src) {
         const entry = {
           release(t) {
@@ -5430,17 +5463,17 @@ export function useStudio() {
     }
 
     // Plucked / percussive / one-shot voices: fire-and-forget, natural decay.
-    ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1 }, dest)
+    ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity }, dest)
     registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.35) + 0.15)
   }
 
   // Stop an active note. Continuous built-in synths (sawtooth/FM/GM) release their
   // held voice here; plugin channels (WASM/JS/Custom/SUBTERRA) get a noteOff message.
   // Plucked/percussive Web-Audio voices self-stop, so this is a no-op for them.
-  function stopNote(ch, pitch) {
+  function _stopNoteRaw(ch, pitch) {
     if (!ch || !audioCtx) return
     const t = audioCtx.currentTime + 0.005
-    if (ch.type === 'audiofile' && ch.params?.arpEnabled) _liveArpNoteOff(ch, pitch)
+    if (ch.params?.arpEnabled) _liveArpNoteOff(ch, pitch)
     _releaseLiveVoice(ch.id + ':' + pitch, t)
     if (ch.type === 'vst') {
       sendToHost('vstNoteOff', { id: ch.id, pitch: pitch + masterPitchSemis.value })

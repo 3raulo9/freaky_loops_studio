@@ -3,6 +3,8 @@
 // about and test. Tools either edit the given notes in place, or return
 // { remove, add } when they replace notes (arpeggiate, chop, chordify).
 
+import { CHORD_TYPES } from '../noteFx.js'
+
 const MIN_LEN = 10
 
 const len = n => n.durationTicks ?? 120
@@ -123,20 +125,7 @@ export function fitToScale(notes, tonic = 0, intervals = [0, 2, 4, 5, 7, 9, 11])
   }
 }
 
-export const CHORD_TYPES = {
-  major:  { label: 'Major',      steps: [0, 4, 7] },
-  minor:  { label: 'Minor',      steps: [0, 3, 7] },
-  dim:    { label: 'Diminished', steps: [0, 3, 6] },
-  aug:    { label: 'Augmented',  steps: [0, 4, 8] },
-  sus2:   { label: 'Sus 2',      steps: [0, 2, 7] },
-  sus4:   { label: 'Sus 4',      steps: [0, 5, 7] },
-  maj7:   { label: 'Major 7',    steps: [0, 4, 7, 11] },
-  min7:   { label: 'Minor 7',    steps: [0, 3, 7, 10] },
-  dom7:   { label: 'Dominant 7', steps: [0, 4, 7, 10] },
-  add9:   { label: 'Add 9',      steps: [0, 4, 7, 14] },
-  min9:   { label: 'Minor 9',    steps: [0, 3, 7, 10, 14] },
-  power:  { label: 'Power (5)',  steps: [0, 7, 12] },
-}
+export { CHORD_TYPES }
 
 /** Build a chord on every note (it becomes the root), with optional inversion. */
 export function chordify(notes, { type = 'major', inversion = 0 } = {}) {
