@@ -27,10 +27,10 @@ pub fn locate_exe() -> Option<PathBuf> {
 impl BridgeClient {
     /// Spawn the helper for `plugin_path`. `on_line` receives each stdout line
     /// (on a reader thread) and `None` once the process has exited.
-    pub fn spawn(plugin_path: &str, owner_hwnd: isize, on_line: impl Fn(Option<String>) + Send + 'static) -> Result<BridgeClient, String> {
+    pub fn spawn(plugin_path: &str, owner_hwnd: isize, device: Option<String>, on_line: impl Fn(Option<String>) + Send + 'static) -> Result<BridgeClient, String> {
         let exe = locate_exe().ok_or("32-bit bridge helper not found — build it with `npm run desktop:build`.")?;
         let mut cmd = Command::new(&exe);
-        cmd.arg(plugin_path).arg(owner_hwnd.to_string()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.arg(plugin_path).arg(owner_hwnd.to_string()).arg(device.unwrap_or_default()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

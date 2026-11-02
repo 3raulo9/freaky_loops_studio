@@ -134,6 +134,16 @@ export async function recentFilesNative() {
   return res?.files ?? []
 }
 
+/** Output devices of the native engine: { devices, current, sampleRate }. */
+export function listAudioDevices() {
+  return request('audioDevices', 'audioDevices', {})
+}
+
+/** Move the native engine to another output device (null = system default). */
+export function setAudioDevice(name) {
+  return request('setAudioDevice', 'audioDevices', { name }, 20000)
+}
+
 export function setWindowTitle(title) {
   sendToHost('setTitle', { title })
 }

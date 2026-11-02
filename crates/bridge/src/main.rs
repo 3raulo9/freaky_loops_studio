@@ -26,6 +26,7 @@ enum UiCmd {
     CloseEditor,
     GetState(String),
     SetState(Vec<u8>),
+    Device(Option<String>),
     Quit,
 }
 
@@ -54,13 +55,16 @@ fn main() {
         std::process::exit(2);
     };
     let owner: isize = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let device: Option<String> = args.next().filter(|s| !s.is_empty());
     let ui_tid = unsafe { GetCurrentThreadId() };
 
     // Make sure this thread has a message queue before anyone posts to it.
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE) };
 
-    let engine = Engine::start();
+    let mut engine = Engine::start_on(device.as_deref());
+    // Live sample rate, shared with the control thread (it restores it after bounces).
+    let live_rate = Arc::new(std::sync::atomic::AtomicU32::new(engine.sample_rate()));
     let plugin = match Plugin::load(&path, engine.sample_rate() as f32) {
         Ok(p) => p,
         Err(e) => {
@@ -93,7 +97,7 @@ fn main() {
     // anything touching windows is marshalled to the UI thread.
     {
         let plugin = plugin.clone();
-        let live_rate = engine.sample_rate() as f32;
+        let live_rate = live_rate.clone();
         std::thread::spawn(move || {
             for line in std::io::stdin().lock().lines() {
                 let Ok(line) = line else { break };
@@ -117,12 +121,13 @@ fn main() {
                         let notes = fls_native::bounce::parse_notes(m.get("notes").unwrap_or(&Value::Null));
                         let sr = int("sr", 44100) as f32;
                         let frames = int("frames", 0).max(0) as usize;
-                        let pcm = plugin.render_offline(&notes, sr, frames, live_rate);
+                        let pcm = plugin.render_offline(&notes, sr, frames, live_rate.load(std::sync::atomic::Ordering::Relaxed) as f32);
                         match fls_native::bounce::write_pcm("bridge", &pcm) {
                             Ok(file) => send(json!({ "t": "renderResult", "file": file, "frames": frames })),
                             Err(e) => send(json!({ "t": "renderError", "message": format!("Write bounce failed: {e}") })),
                         }
                     }
+                    "device" => post(ui_tid, UiCmd::Device(m.get("name").and_then(Value::as_str).map(str::to_string))),
                     "getState" => post(ui_tid, UiCmd::GetState(m.get("reqId").and_then(Value::as_str).unwrap_or("").to_string())),
                     "setState" => {
                         if let Some(Ok(bytes)) = m.get("data").and_then(Value::as_str).map(|s| base64::engine::general_purpose::STANDARD.decode(s)) {
@@ -168,6 +173,11 @@ fn main() {
                     if let Some(state) = PluginState::from_bytes(&bytes) {
                         plugin.load_state(&state);
                     }
+                }
+                UiCmd::Device(name) => {
+                    let rate = engine.switch_device(name.as_deref());
+                    live_rate.store(rate, std::sync::atomic::Ordering::Relaxed);
+                    plugin.set_live_sample_rate(rate as f32);
                 }
                 UiCmd::Quit => break,
             }

@@ -109,3 +109,24 @@ pub fn open(window: &tao::window::Window, p: &Value) -> Value {
         Err(e) => json!({ "reqId": req_id, "error": format!("Could not read {}: {e}", path.display()) }),
     }
 }
+
+// ── App settings (%APPDATA%\FreakyLoopsStudio\settings.json) ──────────────────
+
+fn settings_path() -> PathBuf {
+    config_dir().join("settings.json")
+}
+
+pub fn setting(key: &str) -> Option<Value> {
+    let s = std::fs::read_to_string(settings_path()).ok()?;
+    serde_json::from_str::<Value>(&s).ok()?.get(key).cloned()
+}
+
+pub fn set_setting(key: &str, value: Value) {
+    let mut all = std::fs::read_to_string(settings_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    all[key] = value;
+    let _ = std::fs::write(settings_path(), serde_json::to_string_pretty(&all).unwrap_or_default());
+}

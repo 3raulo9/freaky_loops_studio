@@ -10,5 +10,5 @@ pub mod log;
 pub mod pe;
 pub mod plugin;
 
-pub use engine::{AudioSource, Engine};
+pub use engine::{output_devices, AudioSource, Engine};
 pub use plugin::{Plugin, PluginInfo, PluginState, RenderNote};

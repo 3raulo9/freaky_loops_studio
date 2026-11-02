@@ -217,6 +217,29 @@ impl App {
                 let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
                 self.send("recentFiles", json!({ "reqId": req_id, "files": files::recent() }));
             }
+            "audioDevices" => {
+                let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
+                self.send("audioDevices", json!({
+                    "reqId": req_id, "devices": fls_native::output_devices(),
+                    "current": self.engine.device_name(), "sampleRate": self.engine.sample_rate(),
+                }));
+            }
+            "setAudioDevice" => {
+                let name = str_of(&p, "name").map(str::to_string);
+                let rate = self.engine.switch_device(name.as_deref()) as f32;
+                for inst in self.instances.values() {
+                    match &inst.kind {
+                        Kind::InProc { plugin, .. } => plugin.set_live_sample_rate(rate),
+                        Kind::Bridge(b) => b.send(json!({ "t": "device", "name": name })),
+                    }
+                }
+                files::set_setting("audioDevice", json!(name));
+                let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
+                self.send("audioDevices", json!({
+                    "reqId": req_id, "devices": fls_native::output_devices(),
+                    "current": self.engine.device_name(), "sampleRate": self.engine.sample_rate(),
+                }));
+            }
             "setTitle" => {
                 if let Some(t) = str_of(&p, "title") {
                     self.window.set_title(t);
@@ -243,7 +266,8 @@ impl App {
             let on_line = move |line| {
                 let _ = proxy.send_event(UserEvent::Bridge { id: cid.clone(), gen, line });
             };
-            match BridgeClient::spawn(path, self.window.hwnd(), on_line) {
+            let device = self.engine.device_name().map(str::to_string);
+            match BridgeClient::spawn(path, self.window.hwnd(), device, on_line) {
                 Ok(b) => {
                     if let Some(bytes) = state {
                         b.send(json!({ "t": "setState", "data": base64::engine::general_purpose::STANDARD.encode(bytes) }));
@@ -495,7 +519,8 @@ fn main() {
         }
     });
 
-    let mut app = App { window, engine: Engine::start(), proxy, instances: HashMap::new(), outbox: Vec::new(), next_gen: 0, cascade: 0 };
+    let device = files::setting("audioDevice").and_then(|v| v.as_str().map(str::to_string));
+    let mut app = App { window, engine: Engine::start_on(device.as_deref()), proxy, instances: HashMap::new(), outbox: Vec::new(), next_gen: 0, cascade: 0 };
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
