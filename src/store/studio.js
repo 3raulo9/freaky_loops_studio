@@ -1,6 +1,7 @@
 import { ref, reactive, computed, watch, toRaw } from 'vue'
 import { applyTheme } from '../themes.js'
 import { applyNoteFx, hasNoteFx } from '../noteFx.js'
+import { grooveAt } from '../grooves.js'
 import { dspReady, wasmTranscribe } from '../audio/dsp.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
@@ -4685,24 +4686,27 @@ export function useStudio() {
             ? ch.loopLength : null
           const s = loopLen !== null ? step % loopLen : step
           if (d.steps[s]) {
-            const vel      = d.stepVelocities?.[s] ?? 0.8
+            // Groove pool: per-step timing + velocity feel.
+            const gr       = grooveAt(ch.params, s * TICKS_PER_STEP)
+            const t        = Math.max(audioCtx.currentTime, when + gr.dt * secPerStep)
+            const vel      = (d.stepVelocities?.[s] ?? 0.8) * gr.vel
             const pitchOff = d.stepPitches?.[s]    ?? 0
             const fxNotes  = applyNoteFx(ch.params, (ch.params.pitch ?? 60) + pitchOff, vel, SCALE_DEFS)
             if (!fxNotes.length) return   // dropped by the channel's chance
             // Cut-self: a 2 ms fade-out/in de-clicks the choke.
             if (cutGains[ci]) {
               const cg = cutGains[ci].gain
-              cg.cancelScheduledValues(when)
-              cg.setValueAtTime(cg.value, when)
-              cg.linearRampToValueAtTime(0.0001, when + 0.002)
-              cg.linearRampToValueAtTime(1.0,    when + 0.004)
+              cg.cancelScheduledValues(t)
+              cg.setValueAtTime(cg.value, t)
+              cg.linearRampToValueAtTime(0.0001, t + 0.002)
+              cg.linearRampToValueAtTime(1.0,    t + 0.004)
             }
             if (ch.params.arpEnabled) {
               // Per-step ratchet/arp: the arp fills one step (lower the rate for rolls).
-              _scheduleArp(audioCtx, ch, fxNotes.map(n => n.pitch), when, secPerStep, cutDest, { ...ch.params, velocity: fxNotes[0].velocity })
+              _scheduleArp(audioCtx, ch, fxNotes.map(n => n.pitch), t, secPerStep, cutDest, { ...ch.params, velocity: fxNotes[0].velocity })
             } else {
-              for (const n of fxNotes) ch.fn(audioCtx, when, { ...ch.params, pitch: n.pitch, velocity: n.velocity }, cutDest)
-              registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
+              for (const n of fxNotes) ch.fn(audioCtx, t, { ...ch.params, pitch: n.pitch, velocity: n.velocity }, cutDest)
+              registerVoice(t, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
             }
           }
         } else {
@@ -4730,13 +4734,14 @@ export function useStudio() {
               if (note.muted) continue
               // Per-note chance: a note with chance < 1 plays only that often.
               if (note.chance != null && note.chance < 1 && Math.random() >= note.chance) continue
-              const noteWhen    = when + (note.startTick - stepStartTick) * secPerTick
+              const gr          = grooveAt(rawParams, note.startTick)
+              const noteWhen    = Math.max(audioCtx.currentTime, when + (note.startTick - stepStartTick) * secPerTick + gr.dt * (60 / bpm.value) / 4)
               const nominalGate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
               const ticksToEnd  = clipEndTick - note.startTick
               const gate = ticksToEnd > 0
                 ? Math.min(nominalGate, Math.max(0.01, ticksToEnd * secPerTick - 0.005))
                 : nominalGate
-              const fxNotes = applyNoteFx(rawParams, note.pitch + masterPitchSemis.value, note.velocity ?? 1, SCALE_DEFS)
+              const fxNotes = applyNoteFx(rawParams, note.pitch + masterPitchSemis.value, (note.velocity ?? 1) * gr.vel, SCALE_DEFS)
               if (!fxNotes.length) continue
               if (arpOn) {
                 let g = arpGroups.get(note.startTick)
@@ -5165,15 +5170,17 @@ export function useStudio() {
             const loopLen = ch.loopEnabled && ch.loopLength > 0 && ch.loopLength < stepsPerCell ? ch.loopLength : null
             const s = loopLen !== null ? step % loopLen : step
             if (!d.steps[s]) return
-            const vel      = d.stepVelocities?.[s] ?? 0.8
+            const gr       = grooveAt(ch.params, s * TICKS_PER_STEP)
+            const t        = Math.max(START, when + gr.dt * secPerStep)
+            const vel      = (d.stepVelocities?.[s] ?? 0.8) * gr.vel
             const pitchOff = d.stepPitches?.[s]    ?? 0
             const fxNotes  = applyNoteFx(ch.params, (ch.params.pitch ?? 60) + pitchOff, vel, SCALE_DEFS)
             if (!fxNotes.length) return
-            if (ch.cutSelf) events.push({ kind: 'cut', ci, when })
+            if (ch.cutSelf) events.push({ kind: 'cut', ci, when: t })
             if (ch.params.arpEnabled) {
-              events.push({ kind: 'arp', ci, cut: true, when, span: secPerStep, pitches: fxNotes.map(n => n.pitch), baseParams: { ...ch.params, velocity: fxNotes[0].velocity } })
+              events.push({ kind: 'arp', ci, cut: true, when: t, span: secPerStep, pitches: fxNotes.map(n => n.pitch), baseParams: { ...ch.params, velocity: fxNotes[0].velocity } })
             } else {
-              for (const n of fxNotes) events.push({ kind: 'note', ci, cut: true, when, params: { ...ch.params, pitch: n.pitch, velocity: n.velocity } })
+              for (const n of fxNotes) events.push({ kind: 'note', ci, cut: true, when: t, params: { ...ch.params, pitch: n.pitch, velocity: n.velocity } })
             }
           } else {
             const patternStep = clipOffset * stepsPerCell + step + slipOffset
@@ -5188,11 +5195,12 @@ export function useStudio() {
             for (const note of stepNotes) {
               if (note.muted) continue
               if (note.chance != null && note.chance < 1 && Math.random() >= note.chance) continue
-              const noteWhen    = when + (note.startTick - stepStartTick) * secPerTick
+              const gr          = grooveAt(ch.params, note.startTick)
+              const noteWhen    = Math.max(START, when + (note.startTick - stepStartTick) * secPerTick + gr.dt * secPerStep)
               const nominalGate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
               const ticksToEnd  = clipEndTick - note.startTick
               const gate = ticksToEnd > 0 ? Math.min(nominalGate, Math.max(0.01, ticksToEnd * secPerTick - 0.005)) : nominalGate
-              const fxNotes = applyNoteFx(ch.params, note.pitch + masterPitch, note.velocity ?? 1, SCALE_DEFS)
+              const fxNotes = applyNoteFx(ch.params, note.pitch + masterPitch, (note.velocity ?? 1) * gr.vel, SCALE_DEFS)
               if (!fxNotes.length) continue
               if (arpOn) {
                 let g = arpGroups.get(note.startTick)

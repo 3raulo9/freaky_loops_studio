@@ -68,6 +68,19 @@
         </div>
       </template>
 
+      <!-- Groove pool -->
+      <div class="nfx-row">
+        <label class="nfx-lbl" v-hint="'Groove: shift timing and accents to a feel — swing, shuffle, laid back, push. Amount blends it in.'">GROOVE</label>
+        <select class="nfx-sel" :value="p.groove ?? 'none'" @change="set('groove', $event.target.value)">
+          <option v-for="(g, k) in GROOVES" :key="k" :value="k">{{ g.label }}</option>
+        </select>
+        <input type="range" min="0" max="1" step="0.01" :value="p.grooveAmount ?? 1"
+          :disabled="!p.groove || p.groove === 'none'" @input="set('grooveAmount', +$event.target.value)"
+          v-hint="'Groove amount'" />
+      </div>
+      <button v-if="p.groove && p.groove !== 'none'" class="nfx-reset" @click="applyGrooveToAll"
+        v-hint="'Give every channel this groove so the whole beat sits in the same pocket.'">USE ON ALL CHANNELS</button>
+
       <!-- Velocity -->
       <div class="nfx-row">
         <label class="nfx-lbl" v-hint="'Velocity: force every note to one level, or scale what was played.'">VEL</label>
@@ -101,9 +114,18 @@
 import { ref, computed } from 'vue'
 import { SCALE_DEFS, NOTE_NAMES, useStudio } from '../store/studio.js'
 import { CHORD_TYPES, DIATONIC_CHORDS } from '../noteFx.js'
+import { GROOVES } from '../grooves.js'
 
 const props = defineProps({ channel: { type: Object, required: true } })
-const { pushUndo } = useStudio()
+const { pushUndo, channels } = useStudio()
+
+function applyGrooveToAll() {
+  pushUndo()
+  for (const ch of channels) {
+    ch.params.groove = p.value.groove
+    ch.params.grooveAmount = p.value.grooveAmount ?? 1
+  }
+}
 
 const ARP_RATES = ['1/4', '1/4T', '1/8', '1/8T', '1/16', '1/16T', '1/32']
 const open = ref(true)
@@ -120,7 +142,7 @@ function set(key, value) {
 function reset() {
   pushUndo()
   lastUndoKey = ''
-  for (const k of ['arpEnabled', 'fxChord', 'fxChordInv', 'fxScale', 'fxTranspose', 'fxVelMode', 'fxVel', 'fxVelRandom', 'fxChance']) {
+  for (const k of ['arpEnabled', 'fxChord', 'fxChordInv', 'fxScale', 'fxTranspose', 'fxVelMode', 'fxVel', 'fxVelRandom', 'fxChance', 'groove', 'grooveAmount']) {
     delete props.channel.params[k]
   }
 }
@@ -134,6 +156,7 @@ const summary = computed(() => {
   if (x.fxVelMode && x.fxVelMode !== 'off') out.push('vel')
   if (x.fxVelRandom) out.push('rand')
   if (x.fxChance != null && x.fxChance < 1) out.push(Math.round(x.fxChance * 100) + '%')
+  if (x.groove && x.groove !== 'none') out.push(GROOVES[x.groove]?.label.toLowerCase())
   return out.join(' · ')
 })
 </script>
