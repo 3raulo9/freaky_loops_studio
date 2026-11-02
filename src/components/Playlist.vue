@@ -1372,7 +1372,7 @@ function updateHoverFromPickerDrag(e) {
 
   const patId = pickerDrag.value.patId
   const w     = patternWidthCells(patId)
-  const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor((relX / cellWidth.value) / w) * w))
+  const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS.value - w, Math.floor((relX / cellWidth.value) / w) * w))
   hoverGhost.value = { trackId: track.id, cell: snappedCell, width: w, color: patternColor(patId) }
 }
 
@@ -1417,7 +1417,7 @@ function onCellsMouseDown(e, track) {
   if (e.button !== 0) return
   const rect    = e.currentTarget.getBoundingClientRect()
   const rawCell = cellFromX(e.clientX - rect.left)
-  const cell    = Math.max(0, Math.min(PLAYLIST_CELLS - 1, Math.floor(rawCell)))
+  const cell    = Math.max(0, Math.min(PLAYLIST_CELLS.value - 1, Math.floor(rawCell)))
   const tool    = playlistTool.value
 
   // Select tool: start drag box on empty area
@@ -1467,7 +1467,7 @@ function onCellsMouseDown(e, track) {
     if (clip) { removeClip(clip.id); return }
     // Place at the snapped cell for pattern-width alignment
     const w = patternWidthCells(pickerPatternId.value)
-    const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell / w) * w))
+    const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS.value - w, Math.floor(rawCell / w) * w))
     placeClip(track.id, snappedCell, pickerPatternId.value)
     return
   }
@@ -1476,7 +1476,7 @@ function onCellsMouseDown(e, track) {
     hoverGhost.value = null
     // Snap first paint stroke to pattern-width grid (Step 15)
     const w = patternWidthCells(pickerPatternId.value)
-    const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell / w) * w))
+    const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS.value - w, Math.floor(rawCell / w) * w))
     placeClip(track.id, snappedCell, pickerPatternId.value)
     window.addEventListener('mouseup', stopPainting, { once: true })
   }
@@ -1535,7 +1535,7 @@ function onCellsMouseMove(e, track) {
   // Hover ghost: show exact pattern footprint while hovering with draw tool (Step 3)
   if (tool === 'draw' && clipFocusMode.value === 'pattern' && !isPainting) {
     const w    = patternWidthCells(pickerPatternId.value)
-    const cell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell)))
+    const cell = Math.max(0, Math.min(PLAYLIST_CELLS.value - w, Math.floor(rawCell)))
     hoverGhost.value = { trackId: track.id, cell, width: w, color: patternColor(pickerPatternId.value) }
   } else {
     hoverGhost.value = null
@@ -1545,7 +1545,7 @@ function onCellsMouseMove(e, track) {
   if (track.locked) return
   // Brush: snap to pattern-width multiples so clips chain without gaps (Step 15)
   const w         = patternWidthCells(pickerPatternId.value)
-  const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell / w) * w))
+  const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS.value - w, Math.floor(rawCell / w) * w))
   placeClip(track.id, snappedCell, pickerPatternId.value)
 }
 
@@ -1555,7 +1555,7 @@ function stopPainting()   { isPainting = false }
 function onCellsRightClick(e, track) {
   if (clipFocusMode.value === 'automation') return
   const rect = e.currentTarget.getBoundingClientRect()
-  const cell = Math.max(0, Math.min(PLAYLIST_CELLS - 1, Math.floor(cellFromX(e.clientX - rect.left))))
+  const cell = Math.max(0, Math.min(PLAYLIST_CELLS.value - 1, Math.floor(cellFromX(e.clientX - rect.left))))
   const clip = playlistClips.find(c => c.trackId === track.id && cell >= c.cell && cell < c.cell + (c.width || 1))
   if (clip) removeClip(clip.id)
 }
@@ -1644,7 +1644,7 @@ function onDragMove(e) {
   const track  = trackAtRelY(relY)
   if (!track) return
   const relX = e.clientX - tlRect.left + tl.scrollLeft - 140
-  const cell = Math.max(0, Math.min(PLAYLIST_CELLS - (draggingClip.value.width || 1), Math.floor(cellFromX(relX))))
+  const cell = Math.max(0, Math.min(PLAYLIST_CELLS.value - (draggingClip.value.width || 1), Math.floor(cellFromX(relX))))
   dragGhost.value = { trackId: track.id, cell, width: draggingClip.value.width || 1, color: clipColor(draggingClip.value) }
 }
 
@@ -2168,7 +2168,7 @@ function onMarkerMouseDown(e, marker) {
   const onMove = (me) => {
     if (!timelineRef.value) return
     const dx       = me.clientX - startX
-    const newCell  = Math.max(0, Math.min(PLAYLIST_CELLS - 1, origCell + Math.round(dx / cellWidth.value)))
+    const newCell  = Math.max(0, Math.min(PLAYLIST_CELLS.value - 1, origCell + Math.round(dx / cellWidth.value)))
     marker.cell    = newCell
   }
   window.addEventListener('mousemove', onMove)
@@ -2284,7 +2284,7 @@ function onRulerMouseDown(e, cell) {
       if (!timelineRef.value) return
       const tl  = timelineRef.value
       const relX = me.clientX - tl.getBoundingClientRect().left + tl.scrollLeft - HEADER_W
-      const c2   = Math.max(0, Math.min(PLAYLIST_CELLS, Math.floor(relX / cellWidth.value)))
+      const c2   = Math.max(0, Math.min(PLAYLIST_CELLS.value, Math.floor(relX / cellWidth.value)))
       const s = Math.min(loopDragStart, c2), end = Math.max(loopDragStart + 1, c2 + 1)
       setLoopRegion(s * TICKS, end * TICKS)
     }
@@ -2299,7 +2299,7 @@ function onRulerMouseDown(e, cell) {
 }
 
 function setPlayheadCell(cell) {
-  const c = Math.max(0, Math.min(PLAYLIST_CELLS - 1, cell))
+  const c = Math.max(0, Math.min(PLAYLIST_CELLS.value - 1, cell))
   if (isPlaying.value) {
     seekTo(c)   // live scrub: flushes scheduler and resumes from new position
   } else {
@@ -2421,14 +2421,14 @@ const renderedClipCount = computed(() => {
   return n
 })
 
-const totalTimelineWidth = computed(() => PLAYLIST_CELLS * cellWidth.value)
+const totalTimelineWidth = computed(() => PLAYLIST_CELLS.value * cellWidth.value)
 
 function minimapClipStyle(clip) {
   const total = playlistTracks.length || 1
   const tIdx  = playlistTracks.findIndex(t => t.id === clip.trackId)
   return {
-    left:       (clip.cell / PLAYLIST_CELLS * 100) + '%',
-    width:      ((clip.width || 1) / PLAYLIST_CELLS * 100) + '%',
+    left:       (clip.cell / PLAYLIST_CELLS.value * 100) + '%',
+    width:      ((clip.width || 1) / PLAYLIST_CELLS.value * 100) + '%',
     top:        (tIdx / total * 100) + '%',
     height:     (1 / total * 100) + '%',
     background: clipColor(clip),
@@ -2440,8 +2440,8 @@ function minimapAutoStyle(auto) {
   const total = playlistTracks.length || 1
   const tIdx  = playlistTracks.findIndex(t => t.id === auto.trackId)
   return {
-    left:    (auto.cell / PLAYLIST_CELLS * 100) + '%',
-    width:   ((auto.width || 1) / PLAYLIST_CELLS * 100) + '%',
+    left:    (auto.cell / PLAYLIST_CELLS.value * 100) + '%',
+    width:   ((auto.width || 1) / PLAYLIST_CELLS.value * 100) + '%',
     top:     (tIdx / total * 100) + '%',
     height:  (1 / total * 100) + '%',
     background: '#4ecdc4',

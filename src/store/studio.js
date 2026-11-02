@@ -989,13 +989,13 @@ export function useStudio() {
     )
     if (collision) return
     clip.trackId = newTrackId
-    clip.cell    = Math.max(0, Math.min(PLAYLIST_CELLS - w, newCell))
+    clip.cell    = Math.max(0, Math.min(playlistCells.value - w, newCell))
   }
 
   function resizeClip(clipId, newWidth) {
     const clip = playlistClips.find(c => c.id === clipId)
     if (!clip) return
-    clip.width      = Math.max(1, Math.min(PLAYLIST_CELLS - clip.cell, newWidth))
+    clip.width      = Math.max(1, Math.min(playlistCells.value - clip.cell, newWidth))
     clip._userWidth = clip.width   // mark manual override so auto-stretch won't shrink below this
   }
 
@@ -1289,6 +1289,16 @@ export function useStudio() {
 
   // ── Automation clips ───────────────────────────────────────────────────────────
   const automationClips = reactive([])
+
+  // Song length in bars: at least PLAYLIST_CELLS, growing past the last clip,
+  // automation clip or marker so long arrangements (imports included) fit.
+  const playlistCells = computed(() => {
+    let end = 0
+    for (const c of playlistClips) end = Math.max(end, (c.cell || 0) + (c.width || 1))
+    for (const a of automationClips) end = Math.max(end, (a.cell || 0) + (a.width || 1))
+    for (const m of timeMarkers) end = Math.max(end, (m.cell || 0) + 1)
+    return Math.max(PLAYLIST_CELLS, Math.ceil((end + 4) / 4) * 4)
+  })
   let _autoId = 0
 
   function addAutomationClip(trackId, cell, targetChannelId = null, targetParam = 'volume') {
@@ -1324,7 +1334,7 @@ export function useStudio() {
   function resizeAutomationClip(clipId, newWidth) {
     const clip = automationClips.find(a => a.id === clipId)
     if (!clip) return
-    clip.width = Math.max(1, Math.min(PLAYLIST_CELLS - clip.cell, newWidth))
+    clip.width = Math.max(1, Math.min(playlistCells.value - clip.cell, newWidth))
   }
 
 
@@ -1431,7 +1441,7 @@ export function useStudio() {
     const track = playlistTracks[playlistTracks.length - 1]
     track.name = tgt.label
     const songEnd = playlistClips.reduce((m, c) => Math.max(m, c.cell + (c.width || 1)), 0)
-    const width = Math.max(4, Math.min(PLAYLIST_CELLS, songEnd || 4))
+    const width = Math.max(4, Math.min(playlistCells.value, songEnd || 4))
     addAutomationClip(track.id, 0, targetChannelId, targetParam)
     const clip = automationClips[automationClips.length - 1]
     clip.width = width
@@ -4677,7 +4687,7 @@ export function useStudio() {
       return [{ patternId: currentPatternId.value, clipOffset: 0, clipWidth: 0x7FFFFFFF, slipOffset: 0 }]
     }
     const playingTrackIds = new Set(playlistTracks.filter(t => !t.muted).map(t => t.id))
-    const cellMod = cell % PLAYLIST_CELLS
+    const cellMod = cell % playlistCells.value
     return playlistClips
       .filter(c => {
         const w = c.width || 1
@@ -4698,9 +4708,9 @@ export function useStudio() {
 
   function scheduleStep(step, baseWhen, cell) {
     if (usePlaylist.value && !sessionActive.value && automationClips.length) {
-      _applyAutomationAt((cell % PLAYLIST_CELLS) + step / totalSteps.value)
+      _applyAutomationAt((cell % playlistCells.value) + step / totalSteps.value)
     }
-    noteQueue.push({ step, time: baseWhen, cell: cell % PLAYLIST_CELLS, absCell: cell, isSong: usePlaylist.value && !sessionActive.value })
+    noteQueue.push({ step, time: baseWhen, cell: cell % playlistCells.value, absCell: cell, isSong: usePlaylist.value && !sessionActive.value })
     syncVolumes()
     const secPerBeat = 60 / bpm.value
     const secPerStep = secPerBeat / 4                 // Δstep (a 16th note)
@@ -4981,7 +4991,7 @@ export function useStudio() {
   // No-op in PAT mode (the playlist playhead is frozen during pattern play).
   function seekTo(targetCell) {
     if (!usePlaylist.value) return
-    const cell = Math.max(0, Math.min(PLAYLIST_CELLS - 1, Math.floor(targetCell)))
+    const cell = Math.max(0, Math.min(playlistCells.value - 1, Math.floor(targetCell)))
     displayCell.value      = cell
     playbackStartCell.value = cell
     if (!isPlaying.value || !audioCtx) return
@@ -7652,7 +7662,7 @@ export function useStudio() {
     addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
     placeClip, removeClip, moveClip, resizeClip, splitClip, setSlipOffset, makeUniqueClip, consolidateTrack,
     addTimeMarker, removeTimeMarker,
-    PLAYLIST_CELLS,
+    PLAYLIST_CELLS: playlistCells, playlistCells,
     // Track groups/lock/ops
     groupTrackWithAbove, ungroupTrack, toggleTrackCollapse, setTrackLocked,
     clonePlaylistTrack, movePlaylistTrackUp, movePlaylistTrackDown, setTrackColor, autoNameTrack,
