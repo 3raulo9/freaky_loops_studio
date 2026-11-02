@@ -23,6 +23,7 @@ no-op, so the web build keeps working unchanged.
 │   ├── audio/           Web Audio synthesis, effects, export
 │   ├── components/      Channel Rack, Piano Roll, Playlist, Mixer, synth UIs
 │   ├── midi/            MIDI import/parse + look-ahead scheduler
+│   ├── import/          .flp project mapping + ZIP package reader
 │   ├── store/           studio.js — the project model / single source of truth
 │   ├── desktop/         ipc.js — bridge to the native host (no-op in browser)
 │   └── themes.js        UI color schemes
@@ -30,7 +31,8 @@ no-op, so the web build keeps working unchanged.
 │   ├── native/          VST2 hosting, plugin editor windows, audio engine
 │   ├── host/            the app: window + webview, IPC, plugin management
 │   ├── bridge/          32-bit helper process for 32-bit VST2 plugins
-│   └── dsp/             time-stretch + tempo detection → WebAssembly (src/wasm)
+│   ├── dsp/             time-stretch, tempo detection, WavPack → WebAssembly (src/wasm)
+│   └── projfile/        .flp pattern-project reader (compiled into the dsp module)
 ├── scripts/             packaging for the desktop app
 ├── public/              static assets
 ├── dist/                Vue build output (also bundled into the desktop app)
@@ -104,6 +106,34 @@ A theme picker modal switches the whole UI color scheme without reloading.
 **EXPORT WAV** renders the composition with `OfflineAudioContext` (faster than
 real time) and encodes 16-bit PCM WAV that matches exactly what you hear.
 
+### Opening .flp pattern projects
+**FILE → Open…** (or drag a file onto the window) accepts `.flp` projects
+from every version of the pattern-project format (tested from 11.x to 25.x),
+`.zip` packages that bundle a project with its samples, and whole folders.
+
+- The project is read by a Rust parser (`crates/projfile`) running as
+  WebAssembly — a large song parses in a few milliseconds — and mapped onto
+  this app's model: channels and their samples, hosted VSTs **with their saved
+  state**, patterns, the arrangement (pattern, audio and automation clips),
+  time markers, tempo, and the mixer inserts that are in use with their
+  routing. Effects are replaced by the closest built-in ones; generators that
+  only exist inside the original app get a stand-in instrument, or — on
+  desktop — a VST build of the same plugin when one is installed.
+- **Finding assets.** Projects often come from another machine. On desktop the
+  host looks for every sample and plugin in this order: the stored path, the
+  project's own folder, then a cached index of your home folders, program
+  folders and other drives, ranking candidates by how much of the stored path
+  they share (this also resolves paths written relative to an app's data
+  folder). The index is built in the background and kept in
+  `%APPDATA%\FreakyLoopsStudio\file-index.txt`, so lookups take milliseconds.
+  Anything still missing can be found later with **Look in a folder…** in the
+  import report; that folder is remembered. On the web, samples are matched
+  from the files dropped or zipped with the project.
+- Sample formats browsers can't play are decoded too: **WavPack** (`.wv`, a
+  Rust decoder, bit-exact) and **Ogg Vorbis wrapped in WAV**.
+- An import report lists what was loaded, replaced or missing, and how long
+  each step took.
+
 ### Keyboard shortcuts
 - **Z–M / Q–U** — play the selected melodic channel live
 - **`[` / `]`** — shift the live-play octave down/up
@@ -157,6 +187,8 @@ into native code so it can host real VST plugins.
 tempo detection — compiled to WebAssembly (`src/wasm/fls_dsp.wasm`, ~40 KB) and
 loaded by `src/audio/dsp.js`. Its output is bit-identical to the JavaScript
 reference in `src/audio/warp.js` (kept as the fallback) and 2–10× faster.
+The same module carries the `.flp` reader (`crates/projfile`) and a WavPack
+decoder (`crates/dsp/src/wavpack.rs`).
 Rebuild it with `npm run build:dsp` (needs `rustup target add wasm32-unknown-unknown`).
 
 ### Prerequisites
@@ -203,10 +235,13 @@ UI → host (`src/desktop/ipc.js`):
 | `transport` | `bpm, playing, num, den` | tempo/play state for synced plugins |
 | `renderVst` | `reqId, channelId, sampleRate, totalFrames, notes` | offline bounce for export |
 | `vstGetState` / `vstSetState` | `id, reqId` / `id, data` | snapshot / restore plugin state |
+| `fileOpen` / `fileSave` | `reqId, path?, filter, …` | native Open / Save dialogs (`.flp`/`.zip` are served from `/__file/`) |
+| `resolveAssets` | `reqId, project?, folders?, samples, plugins` | locate an imported project's samples and plugins |
+| `pickFolder` | `reqId, title?` | native folder picker |
 
 Host → UI: `pong`, `vstLoaded`, `vstError`, `vstCancelled`, `vstPeak`,
 `vstEditorClosed`, `vstState`, `vstRenderResult` (`url` of a one-shot PCM file
-served by the host) and `vstRenderError`.
+served by the host), `vstRenderError`, `assetsResolved` and `folderPicked`.
 
 ---
 
