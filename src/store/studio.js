@@ -4,7 +4,8 @@ import { applyNoteFx, hasNoteFx } from '../noteFx.js'
 import { dspReady, wasmTranscribe } from '../audio/dsp.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
-import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport } from '../desktop/ipc.js'
+import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport,
+         saveFileNative, openFileNative, setWindowTitle, bytesToBase64 } from '../desktop/ipc.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
 import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
@@ -7162,11 +7163,30 @@ export function useStudio() {
     }
   }
 
-  async function saveProject(name = 'project') {
+  // Where the open project lives on disk (desktop) — Save writes back there.
+  const projectPath = ref(null)
+  const PROJECT_FILTER = { name: 'Freaky Loops project', ext: ['freak'] }
+  const baseName = f => f.replace(/^.*[\\/]/, '').replace(/\.(freak|json)$/i, '')
+
+  async function saveProject(name = 'project', { saveAs = false } = {}) {
     const vstStates = await _collectVstStates()
+    const project = _serializeProject(vstStates)
+    if (isDesktop) {
+      const res = await saveFileNative({
+        path: saveAs ? null : projectPath.value,
+        suggestedName: (name || 'project') + '.freak',
+        data: JSON.stringify(project, null, 2),
+        filter: PROJECT_FILTER,
+      })
+      if (!res || res.cancelled) return false
+      if (res.error) { alert(res.error); return false }
+      projectPath.value  = res.path
+      projectName.value  = baseName(res.name)
+      projectDirty.value = false
+      return true
+    }
     projectName.value = name
     projectDirty.value = false   // saved → clean
-    const project = _serializeProject(vstStates)
 
     const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' })
     const url  = URL.createObjectURL(blob)
@@ -7175,6 +7195,29 @@ export function useStudio() {
     a.download = name + '.freak'
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  // Desktop: Open… through the native dialog (or a recent file's path).
+  async function openProjectNative(path = null) {
+    const res = await openFileNative({ path, filter: PROJECT_FILTER })
+    if (!res || res.cancelled) return false
+    if (res.error) { alert(res.error); return false }
+    try {
+      _applyProject(JSON.parse(res.data))
+    } catch (err) {
+      console.error('[FreakyLoops] Failed to load project:', err)
+      alert('Failed to load project. The file may be corrupted or in an unsupported format.')
+      return false
+    }
+    projectPath.value  = res.path
+    projectName.value  = baseName(res.name)
+    projectDirty.value = false
+    return true
+  }
+
+  // Desktop window title follows the project name and its unsaved state.
+  if (isDesktop) {
+    watch([projectName, projectDirty], ([n, dirty]) => setWindowTitle(`${n || 'Untitled'}${dirty ? ' *' : ''} — Freaky Loops Studio`), { immediate: true })
   }
 
   function loadProjectFile(file) {
@@ -7298,6 +7341,12 @@ export function useStudio() {
       ...chunk('MThd', [0, 1, 0, tracks.length, (PPQ >> 8) & 255, PPQ & 255]),
       ...tracks.flatMap(t => chunk('MTrk', t)),
     ]
+    const summary = { tracks: tracks.length - 1, notes: [...perChannel.values()].reduce((n, l) => n + l.length, 0) }
+    if (isDesktop) {
+      saveFileNative({ suggestedName: (projectName.value || 'project') + '.mid', base64: bytesToBase64(new Uint8Array(bytes)), filter: { name: 'MIDI file', ext: ['mid'] } })
+        .then(res => { if (res?.error) alert(res.error) })
+      return summary
+    }
     const blob = new Blob([new Uint8Array(bytes)], { type: 'audio/midi' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -7658,6 +7707,7 @@ export function useStudio() {
     sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist,
     // Project save / load / autosave / MIDI export
     saveProject, loadProjectFile, newProject, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
+    projectPath, openProjectNative,
     // Render / export: faithful offline render (+ real-time capture for plugins,
     // + native bounce for VST instrument channels)
     renderProjectToBuffer,

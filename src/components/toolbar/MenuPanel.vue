@@ -75,7 +75,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../../store/studio.js'
-import { isDesktop, sendToHost } from '../../desktop/ipc.js'
+import { isDesktop, sendToHost, recentFilesNative } from '../../desktop/ipc.js'
 
 const S = useStudio()
 const {
@@ -85,7 +85,13 @@ const {
   addPattern, duplicatePattern, removePattern, splitByChannel, findNextEmptyPattern, currentPatternId, patterns,
   addPlaylistTrack, activateWindow, renderModalOpen, themeModalOpen, midiRouterOpen,
   metronomeOn, recordCountIn, keyboardInputMode, autoScroll, usePlaylist, dumpScoreLog, projectName,
+  openProjectNative,
 } = S
+
+// Desktop: recent projects, refreshed whenever the File menu opens.
+const recent = ref([])
+async function refreshRecent() { if (isDesktop) recent.value = await recentFilesNative() }
+const fileOf = p => p.replace(/^.*[\\/]/, '')
 
 const openId = ref(null)
 const hoverArmed = ref(false)
@@ -103,9 +109,10 @@ const MENUS = [
     id: 'file', label: 'FILE', hint: 'Projects: new, open, save, recover, import and export',
     items: () => [
       { label: 'New project', key: 'Ctrl+N', action: newProject },
-      { label: 'Open…', key: 'Ctrl+O', action: () => projectInput.value?.click() },
+      { label: 'Open…', key: 'Ctrl+O', action: openProject },
       { label: 'Save', key: 'Ctrl+S', action: () => saveProject(projectName.value || 'project') },
       { label: 'Save as…', key: 'Ctrl+Shift+S', action: saveAs },
+      ...(recent.value.length ? [{ heading: 'RECENT' }, ...recent.value.slice(0, 6).map(p => ({ label: fileOf(p), action: () => openProjectNative(p) }))] : []),
       { label: autosaveInfo.value ? `Recover autosave (${fmtTime(autosaveInfo.value.time)})` : 'Recover autosave',
         action: () => { if (!recoverAutosave()) alert('No autosave found.') }, disabled: () => !autosaveInfo.value },
       { sep: true },
@@ -216,6 +223,7 @@ function place(e) {
 }
 function toggle(id, e) {
   if (openId.value === id) { openId.value = null; hoverArmed.value = false; return }
+  if (id === 'file') refreshRecent()
   place(e)
   openId.value = id
   hoverArmed.value = true
@@ -233,8 +241,13 @@ function run(item) {
 }
 
 function saveAs() {
+  if (isDesktop) { saveProject(projectName.value || 'project', { saveAs: true }); return }
   const name = prompt('Save project as:', projectName.value || 'project')
   if (name) saveProject(name.trim() || 'project')
+}
+function openProject() {
+  if (isDesktop) openProjectNative()
+  else projectInput.value?.click()
 }
 function onProjectFile(e) {
   const f = e.target.files?.[0]
@@ -262,7 +275,7 @@ function onKey(e) {
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return
   const k = e.key.toLowerCase()
   if (k === 's') { e.preventDefault(); if (e.shiftKey) saveAs(); else saveProject(projectName.value || 'project') }
-  else if (k === 'o') { e.preventDefault(); projectInput.value?.click() }
+  else if (k === 'o') { e.preventDefault(); openProject() }
   else if (k === 'n' && !e.shiftKey) { e.preventDefault(); newProject() }
   else if (k === 'r' && !e.shiftKey) { e.preventDefault(); renderModalOpen.value = true }
 }

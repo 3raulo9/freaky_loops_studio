@@ -114,6 +114,38 @@ function request(type, reply, payload, timeoutMs = 10000) {
   })
 }
 
+// ── Native files (desktop) ───────────────────────────────────────────────────
+// Dialogs block until the user answers, so these wait for as long as it takes.
+const DIALOG_MS = 60 * 60 * 1000
+
+/** Save text (`data`) or binary (`base64`) to `path`, or via the Save dialog when no path. */
+export function saveFileNative({ path = null, suggestedName, data, base64, filter }) {
+  return request('fileSave', 'fileSaved', { path, suggestedName, data, base64, filter }, DIALOG_MS)
+}
+
+/** Read a text file: from `path`, or one picked in the Open dialog. */
+export function openFileNative({ path = null, filter } = {}) {
+  return request('fileOpen', 'fileOpened', { path, filter }, DIALOG_MS)
+}
+
+/** Recently opened / saved projects (most recent first). */
+export async function recentFilesNative() {
+  const res = await request('recentFiles', 'recentFiles', {})
+  return res?.files ?? []
+}
+
+export function setWindowTitle(title) {
+  sendToHost('setTitle', { title })
+}
+
+/** Uint8Array / ArrayBuffer → base64 (chunked, safe for large files). */
+export function bytesToBase64(bytes) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+  let bin = ''
+  for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000))
+  return btoa(bin)
+}
+
 /** Snapshot channel `id`'s plugin state (base64), so a project can restore the sound. */
 export async function getVstState(id) {
   const res = await request('vstGetState', 'vstState', { id })

@@ -260,6 +260,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useStudio } from '../store/studio.js'
+import { saveFileNative, bytesToBase64 } from '../desktop/ipc.js'
 import {
   renderLoopToWav,
   renderLoopToMp3,
@@ -551,12 +552,22 @@ async function startRender() {
     progress.value      = 100
     progressLabel.value = 'Done! Saving…'
 
-    const url = URL.createObjectURL(result.blob)
-    const a   = document.createElement('a')
-    a.href     = url
-    a.download = (filename.value.trim() || 'freaky-loop') + '.' + result.ext
-    a.click()
-    URL.revokeObjectURL(url)
+    if (isDesktop) {
+      // Desktop: native Save dialog instead of a browser download.
+      const res = await saveFileNative({
+        suggestedName: (filename.value.trim() || 'freaky-loop') + '.' + result.ext,
+        base64: bytesToBase64(new Uint8Array(await result.blob.arrayBuffer())),
+        filter: { name: result.ext.toUpperCase() + ' audio', ext: [result.ext] },
+      })
+      if (res?.error) throw new Error(res.error)
+    } else {
+      const url = URL.createObjectURL(result.blob)
+      const a   = document.createElement('a')
+      a.href     = url
+      a.download = (filename.value.trim() || 'freaky-loop') + '.' + result.ext
+      a.click()
+      URL.revokeObjectURL(url)
+    }
 
     await new Promise(r => setTimeout(r, 700))
   } catch (err) {

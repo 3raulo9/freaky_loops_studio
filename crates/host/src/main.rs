@@ -9,6 +9,7 @@
 
 mod assets;
 mod bridge_client;
+mod files;
 
 use base64::Engine as _;
 use bridge_client::BridgeClient;
@@ -203,6 +204,23 @@ impl App {
             }
             "openLog" => {
                 let _ = std::process::Command::new("notepad.exe").arg(log::path()).spawn();
+            }
+            "fileSave" => {
+                let reply = files::save(&self.window, &p);
+                self.send("fileSaved", reply);
+            }
+            "fileOpen" => {
+                let reply = files::open(&self.window, &p);
+                self.send("fileOpened", reply);
+            }
+            "recentFiles" => {
+                let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
+                self.send("recentFiles", json!({ "reqId": req_id, "files": files::recent() }));
+            }
+            "setTitle" => {
+                if let Some(t) = str_of(&p, "title") {
+                    self.window.set_title(t);
+                }
             }
             other => log::write(&format!("unhandled ipc message: {other}")),
         }
