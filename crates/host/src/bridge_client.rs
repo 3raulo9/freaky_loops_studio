@@ -21,7 +21,8 @@ pub fn locate_exe() -> Option<PathBuf> {
         // Running straight from the cargo target tree.
         dir.join("..").join("i686-pc-windows-msvc").join(&profile).join("FreakyLoopsVstBridge.exe"),
     ];
-    candidates.into_iter().find(|p| p.exists())
+    // Must be the 32-bit build: a workspace build also leaves a 64-bit copy next to the app.
+    candidates.into_iter().find(|p| p.exists() && fls_native::pe::detect(&p.to_string_lossy()) == fls_native::pe::Arch::X86)
 }
 
 impl BridgeClient {
