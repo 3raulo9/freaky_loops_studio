@@ -225,6 +225,10 @@ impl App {
                     let _ = proxy.send_event(UserEvent::Reply { kind: "assetsResolved", payload: reply });
                 });
             }
+            "pickFolder" => {
+                let reply = files::pick_folder(&self.window, &p);
+                self.send("folderPicked", reply);
+            }
             "recentFiles" => {
                 let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
                 self.send("recentFiles", json!({ "reqId": req_id, "files": files::recent() }));

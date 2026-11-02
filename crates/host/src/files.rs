@@ -122,6 +122,16 @@ pub fn open(window: &tao::window::Window, p: &Value) -> Value {
     }
 }
 
+/// `pickFolder`: choose a folder (e.g. where an imported project's samples live).
+pub fn pick_folder(window: &tao::window::Window, p: &Value) -> Value {
+    let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
+    let title = p.get("title").and_then(Value::as_str).unwrap_or("Choose a folder");
+    match rfd::FileDialog::new().set_parent(window).set_title(title).pick_folder() {
+        Some(path) => json!({ "reqId": req_id, "path": path.to_string_lossy() }),
+        None => json!({ "reqId": req_id, "cancelled": true }),
+    }
+}
+
 // ── App settings (%APPDATA%\FreakyLoopsStudio\settings.json) ──────────────────
 
 fn settings_path() -> PathBuf {

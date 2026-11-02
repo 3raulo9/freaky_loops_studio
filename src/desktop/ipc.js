@@ -133,8 +133,14 @@ export function openFileNative({ path = null, filter } = {}) {
  * `{ samples: { stored: path|null }, plugins: [{ path, arch, how }|null] }`.
  * The first run may walk the disks, so allow it time.
  */
-export function resolveAssetsNative({ project = null, samples = [], plugins = [] }) {
-  return request('resolveAssets', 'assetsResolved', { project, samples, plugins }, 5 * 60 * 1000)
+export function resolveAssetsNative({ project = null, folders = [], samples = [], plugins = [] }) {
+  return request('resolveAssets', 'assetsResolved', { project, folders, samples, plugins }, 5 * 60 * 1000)
+}
+
+/** Choose a folder in the native dialog → path, or null when cancelled. */
+export async function pickFolderNative(title) {
+  const r = await request('pickFolder', 'folderPicked', { title }, DIALOG_MS)
+  return r && !r.cancelled ? r.path : null
 }
 
 /** URL the UI can fetch a host-approved local file from (opened or located). */

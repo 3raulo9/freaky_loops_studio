@@ -10,7 +10,7 @@ import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
 import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport,
          saveFileNative, openFileNative, setWindowTitle, bytesToBase64,
-         resolveAssetsNative, hostFileUrl } from '../desktop/ipc.js'
+         resolveAssetsNative, hostFileUrl, pickFolderNative } from '../desktop/ipc.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
 import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
@@ -7442,9 +7442,10 @@ export function useStudio() {
         return decoded.get(sp)
       }
       const missing = new Set()
+      _missingJobs = []
       await Promise.all(jobs.samples.map(async j => {
         const buf = await decode(j.path)
-        if (!buf) { missing.add(j.path); return }
+        if (!buf) { missing.add(j.path); _missingJobs.push(j); return }
         const fileName = resolved.get(j.path)?.name ?? importBaseName(j.path)
         if (j.kind === 'channel') _attachImportedSample(j.id, buf, fileName)
         else _attachImportedClip(j, buf, fileName)
@@ -7463,6 +7464,58 @@ export function useStudio() {
       importState.busy = false
       importState.stage = ''
     }
+  }
+
+  // Samples the last import couldn't find, kept so they can be located later.
+  let _missingJobs = []
+
+  /**
+   * Look for the last import's missing samples in a folder: on desktop one
+   * picked in the native dialog (and remembered for future imports), on the
+   * web the files of a folder the user chose ([{ path, name, file }]).
+   * Returns how many were found.
+   */
+  async function locateMissingSamples(files = null) {
+    if (!_missingJobs.length) return 0
+    const paths = [...new Set(_missingJobs.map(j => j.path))]
+    const hits = new Map()
+    if (files) {
+      const byName = new Map(files.map(f => [f.name.toLowerCase(), f]))
+      for (const sp of paths) { const f = byName.get(importBaseName(sp).toLowerCase()); if (f) hits.set(sp, { file: f.file, name: f.name }) }
+    } else if (isDesktop) {
+      const folder = await pickFolderNative('Where are the samples?')
+      if (!folder) return 0
+      importState.busy = true
+      importState.stage = 'Searching the folder…'
+      try {
+        const r = await resolveAssetsNative({ folders: [folder], samples: paths })
+        for (const [sp, hit] of Object.entries(r?.samples ?? {})) if (hit) hits.set(sp, { url: hostFileUrl(hit), name: importBaseName(hit) })
+      } finally { importState.busy = false; importState.stage = '' }
+    }
+    let found = 0
+    const still = []
+    await Promise.all(_missingJobs.map(async j => {
+      const src = hits.get(j.path)
+      let buf = null
+      if (src) {
+        try {
+          const ab = src.file ? await src.file.arrayBuffer() : await (await fetch(src.url)).arrayBuffer()
+          buf = await decodeSampleFile(audioCtx, ab)
+        } catch (err) { console.warn('[import] could not decode', j.path, err) }
+      }
+      if (!buf) { still.push(j); return }
+      found++
+      if (j.kind === 'channel') _attachImportedSample(j.id, buf, src.name)
+      else _attachImportedClip(j, buf, src.name)
+    }))
+    _missingJobs = still
+    const rep = importState.report
+    if (rep) {
+      const left = new Set(still.map(j => j.path))
+      rep.samplesMissing = rep.samplesMissing.filter(sp => left.has(sp))
+      rep.samplesFound = rep.samplesTotal - rep.samplesMissing.length
+    }
+    return found
   }
 
   /**
@@ -7960,7 +8013,7 @@ export function useStudio() {
     captureSessionScene, launchSessionSlot, launchSessionScene, stopSessionTrack, stopAllSessionClips,
     sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist, sessionFollow, cycleSceneLoops,
     // Project save / load / autosave / MIDI export
-    saveProject, loadProjectFile, newProject, importPatternProject, importProjectFiles, importState, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
+    saveProject, loadProjectFile, newProject, importPatternProject, importProjectFiles, importState, locateMissingSamples, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
     projectPath, openProjectNative,
     // Render / export: faithful offline render (+ real-time capture for plugins,
     // + native bounce for VST instrument channels)

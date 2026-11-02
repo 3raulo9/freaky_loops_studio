@@ -308,7 +308,18 @@ fn normalize_name(s: &str) -> String {
     s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
 }
 
-/// `resolveAssets` request: `{ project?, samples: [path], plugins: [{ name, path, vendor, native }] }`.
+/// Remember a folder the user pointed at, so later imports (and index
+/// rebuilds) search it too.
+fn remember_folder(dir: &Path) {
+    let mut list: Vec<Value> = crate::files::setting("searchFolders").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    let s = dir.to_string_lossy().to_string();
+    if !list.iter().any(|v| v.as_str().map_or(false, |x| x.eq_ignore_ascii_case(&s))) {
+        list.push(json!(s));
+        crate::files::set_setting("searchFolders", Value::Array(list));
+    }
+}
+
+/// `resolveAssets` request: `{ project?, folders?, samples: [path], plugins: [{ name, path, vendor }] }`.
 /// Reply: `{ samples: { stored: found|null }, plugins: [{ path, arch, how } | null], indexed }`.
 pub fn resolve(p: &Value) -> Value {
     let t = std::time::Instant::now();
@@ -317,7 +328,19 @@ pub fn resolve(p: &Value) -> Value {
     let plugins: Vec<Value> = p.get("plugins").and_then(Value::as_array).cloned().unwrap_or_default();
 
     let mut found: HashMap<String, Option<PathBuf>> = HashMap::new();
-    let proj_idx = project_dir.as_deref().map(project_index);
+    // The project's folder, plus any folders the user pointed at, are searched first.
+    let mut local = project_dir.as_deref().map(project_index).unwrap_or_default();
+    for f in p.get("folders").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        let dir = PathBuf::from(f);
+        if dir.is_dir() {
+            for (k, v) in project_index(&dir).by_name {
+                local.by_name.entry(k).or_default().extend(v);
+            }
+            remember_folder(&dir);
+        }
+    }
+    let pointed = p.get("folders").and_then(Value::as_array).map_or(false, |a| !a.is_empty());
+    let proj_idx = Some(local);
     for s in &samples {
         let direct = PathBuf::from(s.replace('/', "\\"));
         let hit = if !s.contains('%') && direct.is_file() {
@@ -358,7 +381,8 @@ pub fn resolve(p: &Value) -> Value {
                 *hit = find_plugin(&idx, q);
             }
             // Still missing with an older index → the files may be new: walk again once.
-            if fresh || !missing(&found, &plug_hits) || index_age() < Duration::from_secs(60) {
+            // (Not when the user pointed at a folder: that search is the answer.)
+            if fresh || pointed || !missing(&found, &plug_hits) || index_age() < Duration::from_secs(60) {
                 break;
             }
             idx = index(true).0;

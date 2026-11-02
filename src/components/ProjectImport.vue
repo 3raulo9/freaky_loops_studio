@@ -57,8 +57,11 @@
         <section v-if="rep.samplesMissing.length">
           <h4>MISSING SAMPLES</h4>
           <p class="pi-hint">
-            Drop the folder that holds them onto the window together with the project, or open the project's .zip package.
+            Point to the folder that holds them (sub-folders are searched too). It's remembered for future projects.
           </p>
+          <button class="pi-btn pi-btn--inline" :disabled="locating" @click="lookInFolder">LOOK IN A FOLDER…</button>
+          <span v-if="locateMsg" class="pi-note"> {{ locateMsg }}</span>
+          <input ref="folderPick" type="file" webkitdirectory style="display:none" @change="onFolderPicked" />
           <div v-for="(m, i) in rep.samplesMissing.slice(0, 40)" :key="'m' + i" class="pi-row">
             <span class="pi-dot miss" />
             <span class="pi-path">{{ m }}</span>
@@ -84,10 +87,31 @@
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../store/studio.js'
 
-const { importState, importProjectFiles } = useStudio()
+const { importState, importProjectFiles, locateMissingSamples } = useStudio()
+const isDesktop = !!window.__flsHost
+const folderPick = ref(null)
+const locating = ref(false)
+const locateMsg = ref('')
+
+async function runLocate(files) {
+  locating.value = true
+  try {
+    const n = await locateMissingSamples(files)
+    locateMsg.value = n ? `Found ${n}.` : 'None of them were in that folder.'
+  } finally { locating.value = false }
+}
+function lookInFolder() {
+  if (isDesktop) runLocate(null)
+  else folderPick.value?.click()
+}
+function onFolderPicked(e) {
+  const files = [...(e.target.files ?? [])].map(f => ({ path: f.webkitRelativePath || f.name, name: f.name, file: f }))
+  e.target.value = ''
+  if (files.length) runLocate(files)
+}
 const rep = ref(null)
 const open = ref(false)
-watch(() => importState.report, r => { rep.value = r; open.value = !!r })
+watch(() => importState.report, r => { rep.value = r; open.value = !!r; locateMsg.value = '' })
 
 const dragging = ref(false)
 let leaveTimer = null
@@ -212,4 +236,6 @@ h4 small { letter-spacing: 0; font-weight: 400; }
   padding: 4px 18px; font-family: inherit; font-weight: 700; letter-spacing: 0.1em; cursor: pointer;
 }
 .pi-btn:hover { background: var(--bg-hover); }
+.pi-btn--inline { padding: 3px 12px; font-size: 11px; margin: 2px 0 6px; }
+.pi-btn:disabled { opacity: 0.5; cursor: default; }
 </style>
