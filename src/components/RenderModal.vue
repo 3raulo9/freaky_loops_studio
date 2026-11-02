@@ -484,7 +484,7 @@ async function startRender() {
     // the export sounds like playback. Two kinds of channel can't render in the
     // OfflineAudioContext and are mixed in afterwards: live AudioWorklet plugins
     // (Custom Synth / SUBTERRA / WASM) are captured in real time; native VST
-    // instruments are bounced by the C# host. All three share one compiled
+    // instruments are bounced by the native host. All three share one compiled
     // schedule, so they line up sample-accurately.
     const vstActive = vstHasContent()
     let buffer, rtBuf = null, vstBuf = null

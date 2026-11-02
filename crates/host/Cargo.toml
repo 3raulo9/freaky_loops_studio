@@ -1,0 +1,19 @@
+[package]
+name = "fls-host"
+description = "Freaky Loops Studio desktop app: hosts the UI in a webview and runs the native audio engine + VST2 plugins."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "FreakyLoopsStudio"
+path = "src/main.rs"
+
+[dependencies]
+fls-native = { path = "../native" }
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+wry = { version = "0.57", features = ["devtools"] }
+tao = "0.37"
+rfd = "0.17"

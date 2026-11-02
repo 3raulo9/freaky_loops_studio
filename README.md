@@ -5,9 +5,10 @@ runs two ways from one codebase:
 
 - **Web app** — Vue 3 + the Web Audio API. Everything runs client-side in the
   browser; there's no backend.
-- **Native desktop app** *(Windows, in progress)* — a C#/.NET 10 WPF shell that
-  renders the same Vue UI inside WebView2 and adds a native audio engine with
-  **live VST2 plugin hosting**, which a browser sandbox can't do.
+- **Native desktop app** *(Windows)* — a Rust host that renders the same Vue UI
+  in a webview and adds a native audio engine with **live VST2 plugin hosting**
+  (64-bit in-process, 32-bit through a bridge process), which a browser sandbox
+  can't do.
 
 The Vue UI is shared between both. In the browser the desktop bridge is a safe
 no-op, so the web build keeps working unchanged.
@@ -25,8 +26,11 @@ no-op, so the web build keeps working unchanged.
 │   ├── store/           studio.js — the project model / single source of truth
 │   ├── desktop/         ipc.js — bridge to the native host (no-op in browser)
 │   └── themes.js        UI color schemes
-├── desktop/             .NET 10 WPF desktop shell
-│   └── Shell/           WebView2 host, IPC bridge, native audio + VST host
+├── crates/              Rust desktop app (Cargo workspace)
+│   ├── native/          VST2 hosting, plugin editor windows, audio engine
+│   ├── host/            the app: window + webview, IPC, plugin management
+│   └── bridge/          32-bit helper process for 32-bit VST2 plugins
+├── scripts/             packaging for the desktop app
 ├── public/              static assets
 ├── dist/                Vue build output (also bundled into the desktop app)
 └── index.html           Vite entry
@@ -119,97 +123,82 @@ The build in `dist/` opens straight from the file system — no server needed.
 
 ---
 
-## The .NET desktop app
+## The native desktop app (Rust)
 
-A native Windows shell that wraps the Vue UI and moves audio out of the browser
+A Windows app that wraps the Vue UI and moves plugin audio out of the browser
 into native code so it can host real VST plugins.
 
 ### Architecture
-- **Shell** — C#/.NET 10 WPF host (`desktop/Shell`) embedding **WebView2**, which
-  renders the existing Vue UI as a *control surface only*. The UI is reused, not
-  rewritten.
-- **IPC** — Vue and the host exchange JSON control messages over WebView2
-  `postMessage` (`IpcBridge.cs` ↔ `src/desktop/ipc.js`). **Audio never crosses
-  this bridge** — only control events (notes, load/unload, transport).
-- **Audio** — a native C# audio engine (NAudio, WaveOut/WASAPI today; ASIO with
-  the full engine) so there's one audio clock and one master bus.
-- **VST hosting** — VST2 `.dll` plugins via the pure-C# **VST.NET2-Host** package.
-  Load a `.dll`, route sequencer/keyboard notes to it as MIDI, and hear its audio
-  out. Plugins with a custom UI open in a borderless owned overlay window
-  (`VstEditorWindow.cs`) positioned over the app.
+- **Host** (`crates/host`) — a native window (`tao`) with a webview (`wry`,
+  WebView2 on Windows) that renders the existing Vue UI as the control surface.
+  The UI is reused, not rewritten.
+- **IPC** — Vue and the host exchange JSON control messages (`{type, payload}`)
+  through `window.__flsHost`, which the host injects before the page loads
+  (`src/desktop/ipc.js` is the JS end). **Audio never crosses this bridge.**
+- **Audio** (`crates/native/src/engine.rs`) — one `cpal` output stream (WASAPI)
+  mixing every loaded plugin at the device's sample rate.
+- **VST2 hosting** (`crates/native`) — a from-scratch VST2 host over the plugin
+  ABI: load a `.dll`, route notes to it as MIDI, pull its audio, answer its host
+  callbacks (tempo/transport for synced effects, editor resize), bounce it
+  offline for exports, and save/restore its state chunk with the project.
+- **Plugin editors** — each opens in a small tool window owned by the app
+  window. It takes mouse input without stealing keyboard focus, so QWERTY note
+  entry and shortcuts keep working while you tweak a plugin.
 
-> **Bitness:** the app is built **x64** to host 64-bit VST2 plugins in-process.
-> Since a process can only load plugins of its own bitness, 32-bit plugins are
-> hosted out-of-process by the bundled **x86 bridge** (`VstBridge`) — spawned on
-> demand and driven over stdin/stdout, so they load transparently alongside
-> 64-bit ones.
-
-### Current status
-- WPF + WebView2 shell builds and runs; IPC ping/pong handshake confirmed.
-- Native test-tone (sine) over the audio engine works.
-- VST2 hosting **confirmed with a real plugin**: load `.dll` → MIDI note on/off →
-  audio out, heard. Channel Rack has a desktop-only **"Add VST… (.dll)"** picker
-  that creates a `type:'vst'` channel; sequencer and keyboard notes forward to
-  the plugin over IPC.
-- The plugin editor opens as an owned overlay (WebView2 composites above embedded
-  child HWNDs, so reparenting into the app window won't paint).
-
-The native engine and the DSP port of the in-app synths are still in progress;
-today the web synths still run on Web Audio while VST audio runs natively.
+> **Bitness:** the app is 64-bit and hosts 64-bit plugins in-process. A
+> process can only load DLLs of its own bitness, so the host reads each
+> plugin's PE header and runs 32-bit plugins in the **32-bit bridge**
+> (`crates/bridge`), spawned on demand and driven over stdin/stdout JSON lines.
+> A crashing 32-bit plugin takes down only its bridge, not the app.
 
 ### Prerequisites
-- **.NET 10 SDK** — https://aka.ms/dotnet/download
+- **Rust** (stable, MSVC toolchain) — https://rustup.rs, plus the 32-bit
+  target: `rustup target add i686-pc-windows-msvc`
+- **Visual Studio Build Tools** (C++ workload) for the MSVC linker
 - **WebView2 Runtime** — ships with Windows 11
 
 ### Run — dev (hot reload)
-The DEBUG build points WebView2 at the Vite dev server.
+Debug builds load the Vite dev server when it's running, otherwise the built
+`dist/`.
 
 ```bash
-npm run dev                            # terminal 1: Vite at http://localhost:5173
-dotnet run --project desktop/Shell     # terminal 2: native shell
+npm run dev               # terminal 1: Vite at http://localhost:5173
+npm run desktop:bridge    # once: build the 32-bit bridge
+npm run desktop           # terminal 2: cargo run -p fls-host
 ```
 
-On a successful handshake the title bar shows **"… host connected ✓"** and the
-WebView DevTools console (right-click → Inspect) logs `[ipc] host round-trip OK`.
+Right-click → Inspect opens devtools; `__desktop` in the console exposes the
+bridge (e.g. `__desktop.testTone(true)`). A log is written to
+`%TEMP%reakyloops.log`.
 
-### Run — prod (bundled)
-The RELEASE build serves the built Vue app from a virtual host (`app.local`).
-MSBuild copies repo-root `/dist` into the app's `wwwroot` automatically, so build
-the Vue app first.
-
+### Package
 ```bash
-npm run build                                    # emit /dist
-dotnet run --project desktop/Shell -c Release
+npm run desktop:build     # vite build + release builds of host and bridge
 ```
-
-### Publish
-A self-contained build is bundled under `desktop/publish/` (and zipped as
-`FreakyLoopsStudio.zip`). Rebuild with:
-
-```bash
-npm run build
-dotnet publish desktop/Shell -c Release
-```
+Produces `release/FreakyLoopsStudio/` — `FreakyLoopsStudio.exe`,
+`bridge/FreakyLoopsVstBridge.exe` and `wwwroot/` (the UI). Copy the folder
+anywhere; no installer or runtime needed beyond WebView2.
 
 ### IPC message reference
-Control messages sent from Vue (`src/desktop/ipc.js`) and handled in
-`MainWindow.xaml.cs`:
+UI → host (`src/desktop/ipc.js`):
 
-| Type            | Direction   | Purpose                                  |
-|-----------------|-------------|------------------------------------------|
-| `ping` / `pong` | UI ↔ host   | startup handshake                        |
-| `testTone`      | UI → host   | start/stop a native sine tone            |
-| `pickVst`       | UI → host   | open native `.dll` file picker           |
-| `loadVst`       | UI → host   | load a VST2 `.dll` by absolute path      |
-| `vstNoteOn` / `vstNoteOff` | UI → host | play/release a note on the plugin |
-| `vstUnload`     | UI → host   | unload the current plugin                |
-| `openVstEditor` | UI → host   | toggle the plugin's editor window        |
-| `vstLoaded` / `vstError` / `vstPeak` | host → UI | load info, errors, output level |
+| Type | Payload | Purpose |
+|------|---------|---------|
+| `ping` | — | startup handshake (replies `pong` with engine info) |
+| `testTone` | `on, freq` | start/stop a native sine tone |
+| `pickVst` | `id` | native `.dll` picker, then load into channel `id` |
+| `loadVst` | `id, path, state?` | load a plugin (optionally restoring saved state) |
+| `vstNoteOn` / `vstNoteOff` | `id, pitch, velocity` | play/release a note |
+| `vstAllNotesOff` | `id?` | release everything (one plugin or all) |
+| `vstUnload` | `id` | unload a plugin |
+| `openVstEditor` | `id` | toggle the plugin's editor window |
+| `transport` | `bpm, playing, num, den` | tempo/play state for synced plugins |
+| `renderVst` | `reqId, channelId, sampleRate, totalFrames, notes` | offline bounce for export |
+| `vstGetState` / `vstSetState` | `id, reqId` / `id, data` | snapshot / restore plugin state |
 
-Inside the shell, `window.__desktop` exposes these for poking from the WebView
-DevTools console — e.g. `__desktop.testTone(true)` or
-`__desktop.loadVst('C:\\path\\to\\synth.dll')` then `__desktop.vstNoteOn(60)`.
-A file log is written to `%TEMP%\freakyloops.log`.
+Host → UI: `pong`, `vstLoaded`, `vstError`, `vstCancelled`, `vstPeak`,
+`vstEditorClosed`, `vstState`, `vstRenderResult` (`url` of a one-shot PCM file
+served by the host) and `vstRenderError`.
 
 ---
 
@@ -217,8 +206,7 @@ A file log is written to `%TEMP%\freakyloops.log`.
 
 - **Vue 3** (Composition API) + **Vite**
 - **Web Audio API** — all synthesis, scheduling, effects, and WAV rendering
-- **.NET 10 / WPF** + **WebView2** — native desktop shell
-- **NAudio** — native audio device I/O
-- **VST.NET2-Host** — pure-C# VST2 plugin hosting
+- **Rust** — native desktop app: `tao` + `wry` (window + WebView2), `cpal`
+  (audio I/O), and a from-scratch VST2 host
 
 No backend. No external audio libraries on the web side.

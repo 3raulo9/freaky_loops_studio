@@ -1,20 +1,19 @@
-// Bridge between the Vue UI and the native C# host (WebView2).
+// Bridge between the Vue UI and the native Rust host (crates/host).
 // CONTROL MESSAGES ONLY — audio lives in the native engine and never crosses here.
 //
-// In a plain browser (no WebView2) `host` is undefined and every call is a safe
-// no-op, so the existing web build keeps running unchanged.
+// The host injects `window.__flsHost` before the page loads. In a plain browser
+// it's undefined and every call is a safe no-op, so the web build keeps running
+// unchanged.
 
-const host = typeof window !== 'undefined' ? window.chrome?.webview : undefined
+const host = typeof window !== 'undefined' ? window.__flsHost : undefined
 
-/** True when running inside the native desktop shell. */
+/** True when running inside the native desktop app. */
 export const isDesktop = !!host
 
 const handlers = new Set()
 
 if (host) {
-  host.addEventListener('message', (event) => {
-    // C# uses PostWebMessageAsJson, so event.data is already a parsed object.
-    const msg = event.data
+  host.on((msg) => {
     if (!msg || typeof msg !== 'object') return
     for (const h of handlers) h(msg)
   })
@@ -23,7 +22,7 @@ if (host) {
 /** Send a typed control message to the host. No-op in the browser. */
 export function sendToHost(type, payload = null) {
   if (!host) return
-  host.postMessage({ type, payload })
+  host.post({ type, payload })
 }
 
 /** Subscribe to messages from the host. Returns an unsubscribe fn. */
@@ -32,7 +31,7 @@ export function onHostMessage(handler) {
   return () => handlers.delete(handler)
 }
 
-/** Phase 0a handshake: ping the host on startup and log the reply. */
+/** Startup handshake: ping the host and log the reply. */
 export function pingHost() {
   if (!host) {
     console.info('[ipc] running in browser — no native host')
@@ -46,7 +45,7 @@ export function pingHost() {
   sendToHost('ping', { from: 'vue', time: Date.now() })
 }
 
-/** Phase 0b: ask the native engine to start/stop a sine tone. */
+/** Ask the native engine to start/stop a diagnostic sine tone. */
 export function testTone(on = true, freq = 440) {
   sendToHost('testTone', { on, freq })
 }
@@ -59,9 +58,9 @@ export function pickVst(id) {
   sendToHost('pickVst', { id })
 }
 
-/** Load a VST2 .dll by absolute path into the plugin instance for channel `id`. */
-export function loadVst(id, path) {
-  sendToHost('loadVst', { id, path })
+/** Load a VST2 .dll by absolute path into channel `id` (optionally restoring a saved state). */
+export function loadVst(id, path, state = undefined) {
+  sendToHost('loadVst', { id, path, state })
 }
 
 /** Play / release a note on channel `id`'s plugin instance. */
@@ -72,7 +71,12 @@ export function vstNoteOff(id, pitch = 60) {
   sendToHost('vstNoteOff', { id, pitch })
 }
 
-/** Unload channel `id`'s plugin instance (frees the in-process host or bridge). */
+/** Release every sounding note on one plugin (or on all of them when `id` is omitted). */
+export function vstAllNotesOff(id = undefined) {
+  sendToHost('vstAllNotesOff', { id })
+}
+
+/** Unload channel `id`'s plugin instance (frees the in-process plugin or bridge). */
 export function unloadVst(id) {
   sendToHost('vstUnload', { id })
 }
@@ -82,17 +86,57 @@ export function openVstEditor(id) {
   sendToHost('openVstEditor', { id })
 }
 
-// Debug handle exposed only inside the desktop shell, so you can poke the bridge
-// from the WebView DevTools console — e.g. __desktop.testTone(true), or
-// __desktop.loadVst('C:\\path\\to\\synth.dll') then __desktop.vstNoteOn(60).
+/** Tell plugins the song tempo / meter / play state (for tempo-synced effects). */
+export function sendTransport(bpm, playing, num = 4, den = 4) {
+  sendToHost('transport', { bpm, playing, num, den })
+}
+
+// Request/response helpers keyed by reqId.
+const pending = new Map()
+let reqSeq = 0
+if (host) {
+  onHostMessage((msg) => {
+    const p = msg.payload?.reqId && pending.get(msg.payload.reqId)
+    if (p && msg.type === p.reply) {
+      pending.delete(msg.payload.reqId)
+      clearTimeout(p.timer)
+      p.resolve(msg.payload)
+    }
+  })
+}
+function request(type, reply, payload, timeoutMs = 10000) {
+  if (!host) return Promise.resolve(null)
+  const reqId = type + '-' + (++reqSeq)
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { pending.delete(reqId); resolve(null) }, timeoutMs)
+    pending.set(reqId, { resolve, reply, timer })
+    sendToHost(type, { ...payload, reqId })
+  })
+}
+
+/** Snapshot channel `id`'s plugin state (base64), so a project can restore the sound. */
+export async function getVstState(id) {
+  const res = await request('vstGetState', 'vstState', { id })
+  return res?.data ?? null
+}
+
+/** Restore a state snapshot taken with getVstState. */
+export function setVstState(id, data) {
+  if (data) sendToHost('vstSetState', { id, data })
+}
+
+// Debug handle exposed only inside the desktop app, so you can poke the bridge
+// from the devtools console — e.g. __desktop.testTone(true), or
+// __desktop.loadVst('ch1', 'C:\\path\\to\\synth.dll') then __desktop.vstNoteOn('ch1', 60).
 if (host) {
   onHostMessage((msg) => {
     if (msg.type === 'vstLoaded') console.info('[vst] loaded:', msg.payload?.id, msg.payload?.name, msg.payload)
     if (msg.type === 'vstError') console.error('[vst] error:', msg.payload?.id, msg.payload?.message)
-    if (msg.type === 'vstPeak') console.info('[vst] level:', msg.payload?.id, msg.payload?.peak)
   })
   window.__desktop = {
     sendToHost, onHostMessage, isDesktop, ping: pingHost,
-    testTone, pickVst, loadVst, vstNoteOn, vstNoteOff, unloadVst, openVstEditor,
+    testTone, pickVst, loadVst, vstNoteOn, vstNoteOff, vstAllNotesOff, unloadVst, openVstEditor,
+    sendTransport, getVstState, setVstState,
+    openLog: () => sendToHost('openLog'),
   }
 }

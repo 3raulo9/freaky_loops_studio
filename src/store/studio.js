@@ -2,7 +2,7 @@ import { ref, reactive, computed, watch, toRaw } from 'vue'
 import { applyTheme } from '../themes.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
-import { sendToHost, onHostMessage, isDesktop } from '../desktop/ipc.js'
+import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport } from '../desktop/ipc.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
 import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
@@ -1562,6 +1562,10 @@ export function useStudio() {
   // the position you were at in the other mode.
   const _savedPatCell  = ref(0)
   const _savedSongCell = ref(0)
+  // Desktop: plugins read tempo + play state from the host's transport clock
+  // (tempo-synced LFOs, delays, arps), so keep it in step with ours.
+  if (isDesktop) watch([bpm, isPlaying], ([b, playing]) => sendTransport(b, playing), { immediate: true })
+
   watch(usePlaylist, (nowSong) => {
     // Snapshot the outgoing mode's position before stopPlay() can clear it
     if (nowSong) _savedPatCell.value  = displayCell.value
@@ -4907,8 +4911,8 @@ export function useStudio() {
   // ── Native VST bounce (export) ─────────────────────────────────────────────────
   //   VST instrument channels make no sound in the Web-Audio graph, so their notes
   //   are bounced by the native host: we compile the same schedule, hand each VST
-  //   channel a frame-stamped note list to the C# host (`renderVst` IPC), and get
-  //   back interleaved-stereo float32 PCM (base64). Each channel's buffer is summed
+  //   channel a frame-stamped note list to the native host (`renderVst` IPC), and get
+  //   back interleaved-stereo float32 PCM. Each channel's buffer is summed
   //   at its volume/pan into one stereo buffer, which RenderModal mixes alongside
   //   the offline (Web-Audio) and realtime (worklet) renders — sample-aligned
   //   because all three share `_compileRenderSchedule`.
@@ -4936,12 +4940,22 @@ export function useStudio() {
     })
   }
 
-  // base64 interleaved-stereo float32 PCM → AudioBuffer, scaled by volume/pan.
-  function _pcmToBuffer(b64, sampleRate, volume, pan) {
-    const bin = atob(b64)
+  // Interleaved-stereo float32 PCM → AudioBuffer, scaled by volume/pan. The host
+  // hands bounces back as a one-shot file URL (`res.url`); `res.pcm` (base64) is
+  // the older inline form.
+  async function _fetchVstPcm(res) {
+    if (res?.url) {
+      const r = await fetch(res.url)
+      if (!r.ok) throw new Error('Bounce fetch failed: ' + r.status)
+      return new Float32Array(await r.arrayBuffer())
+    }
+    const bin = atob(res?.pcm || '')
     const bytes = new Uint8Array(bin.length)
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-    const f32 = new Float32Array(bytes.buffer)
+    return new Float32Array(bytes.buffer)
+  }
+
+  function _pcmToBuffer(f32, sampleRate, volume, pan) {
     const frames = Math.floor(f32.length / 2)
     if (frames <= 0) return null
     const buf = new AudioBuffer({ length: frames, numberOfChannels: 2, sampleRate })
@@ -4990,7 +5004,7 @@ export function useStudio() {
     for (const entry of byChannel.values()) {
       try {
         const res = await _requestVstRender(entry.channelId, sampleRate, totalFrames, entry.notes)
-        const buf = _pcmToBuffer(res.pcm, sampleRate, entry.volume, entry.pan)
+        const buf = _pcmToBuffer(await _fetchVstPcm(res), sampleRate, entry.volume, entry.pan)
         if (buf) buffers.push(buf)
       } catch (err) {
         console.error('[vst-render]', entry.channelId, err)
@@ -5284,6 +5298,7 @@ export function useStudio() {
     pressedKeys.clear()
     pressedKeyPitch.clear()
     _liveArp.clear()
+    if (isDesktop) sendToHost('vstAllNotesOff', {})
     if (!audioCtx) return
 
     const t = audioCtx.currentTime
@@ -5654,7 +5669,7 @@ export function useStudio() {
   }
 
   // ── VST2 plugin channels (native desktop host) ──────────────────────────────
-  //   Each VST channel maps to ONE plugin instance in the C# host, keyed by the
+  //   Each VST channel maps to ONE plugin instance in the native host, keyed by the
   //   channel id, so many plugins (mixed 32/64-bit) run at once. The play fn
   //   forwards notes over IPC; audio comes from the native engine, not Web Audio,
   //   so ctx/dest are ignored.
@@ -6400,7 +6415,15 @@ export function useStudio() {
     for (const key of Object.keys(mod.params)) delete ch.params[key]
   }
 
-  function saveProject(name = 'project') {
+  async function saveProject(name = 'project') {
+    // Desktop: snapshot each plugin's sound (its state chunk) so reopening the
+    // project brings the same patch back, not just the same plugin.
+    const vstStates = {}
+    if (isDesktop) {
+      for (const ch of channels) {
+        if (ch.type === 'vst' && ch.vstPath) vstStates[ch.id] = (await getVstState(ch.id)) ?? ch.vstState
+      }
+    }
     projectName.value = name
     projectDirty.value = false   // saved → clean
     const project = {
@@ -6435,6 +6458,7 @@ export function useStudio() {
         sampleSpec:     ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
         sampleName:     ch.sampleName,
         vstPath:        ch.vstPath,
+        vstState:       vstStates[ch.id] ?? ch.vstState,
       })),
       channelGroups: channelGroups.map(g => ({ ...g })),
       patterns:      patterns.map(p => ({ ...p })),
@@ -6567,6 +6591,7 @@ export function useStudio() {
       sampleSpec:       ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
       sampleName:       ch.sampleName,
       vstPath:          ch.vstPath,
+      vstState:         ch.vstState,
       // Buffers are not serializable; mark missing so the UI can prompt reload.
       audioFileMissing: (ch.type === 'audiofile' || ch.type === 'chop') ? true : undefined,
       deckAMissing: ch.type === 'forge' && ch.params?.deckAName ? true : undefined,
@@ -6577,7 +6602,7 @@ export function useStudio() {
     // so multi-plugin projects come back with their instruments loaded.
     if (isDesktop) {
       for (const ch of channels) {
-        if (ch.type === 'vst' && ch.vstPath) sendToHost('loadVst', { id: ch.id, path: ch.vstPath })
+        if (ch.type === 'vst' && ch.vstPath) sendToHost('loadVst', { id: ch.id, path: ch.vstPath, state: ch.vstState })
       }
     }
 

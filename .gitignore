@@ -1,0 +1,4 @@
+/target/
+/release/
+# Build output of the retired .NET desktop shell (kept locally, never committed)
+/desktop/

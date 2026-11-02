@@ -9,5 +9,5 @@ createApp(App)
   .directive('hint', vHint)
   .mount('#app')
 
-// Desktop (WebView2) bridge handshake; safe no-op in a plain browser.
+// Desktop (native host) bridge handshake; safe no-op in a plain browser.
 pingHost()
