@@ -561,6 +561,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "fls-dsp"
+version = "0.3.0"
+
+[[package]]
 name = "fls-host"
 version = "0.3.0"
 dependencies = [

@@ -29,7 +29,8 @@ no-op, so the web build keeps working unchanged.
 ├── crates/              Rust desktop app (Cargo workspace)
 │   ├── native/          VST2 hosting, plugin editor windows, audio engine
 │   ├── host/            the app: window + webview, IPC, plugin management
-│   └── bridge/          32-bit helper process for 32-bit VST2 plugins
+│   ├── bridge/          32-bit helper process for 32-bit VST2 plugins
+│   └── dsp/             time-stretch + tempo detection → WebAssembly (src/wasm)
 ├── scripts/             packaging for the desktop app
 ├── public/              static assets
 ├── dist/                Vue build output (also bundled into the desktop app)
@@ -150,6 +151,13 @@ into native code so it can host real VST plugins.
 > plugin's PE header and runs 32-bit plugins in the **32-bit bridge**
 > (`crates/bridge`), spawned on demand and driven over stdin/stdout JSON lines.
 > A crashing 32-bit plugin takes down only its bridge, not the app.
+
+### Rust DSP in the web app
+`crates/dsp` holds the heavy offline DSP — WSOLA / granular time-stretch and
+tempo detection — compiled to WebAssembly (`src/wasm/fls_dsp.wasm`, ~40 KB) and
+loaded by `src/audio/dsp.js`. Its output is bit-identical to the JavaScript
+reference in `src/audio/warp.js` (kept as the fallback) and 2–10× faster.
+Rebuild it with `npm run build:dsp` (needs `rustup target add wasm32-unknown-unknown`).
 
 ### Prerequisites
 - **Rust** (stable, MSVC toolchain) — https://rustup.rs, plus the 32-bit
