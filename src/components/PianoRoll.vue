@@ -3,7 +3,7 @@
     @mouseenter="prFocused = true"
     @mouseleave="prFocused = false"
     @wheel="onWheel"
-    @click="rulerCtx = null">
+    @click="rulerCtx = null; toolsMenuOpen = false">
 
     <!-- ── Channel selector title bar ─────────────────────────────────── -->
     <div class="pr-title-bar">
@@ -69,6 +69,21 @@
         title="Slide mode (S)" @click="toggleSlideMode('slide')">&#x27CB;</button>
       <button class="pr-tool" :class="{ active: slideMode === 'porta' }"
         title="Portamento mode (O)" @click="toggleSlideMode('porta')">&#x24C2;</button>
+
+      <div class="pr-sep" />
+
+      <!-- Batch tools (act on the selection, or every note when none is selected) -->
+      <div class="pr-tools-menu" @click.stop>
+        <button class="pr-tools-btn" :class="{ open: toolsMenuOpen }"
+          v-hint="'Note tools: quantize, humanize, strum, arpeggiate, chop, chords, chance, flip — on the selection or all notes'"
+          @click="toolsMenuOpen = !toolsMenuOpen">TOOLS ▾</button>
+        <div v-if="toolsMenuOpen" class="pr-tools-drop">
+          <template v-for="(t, i) in TOOL_DEFS" :key="i">
+            <div v-if="t.sep" class="pr-tools-sep" />
+            <div v-else class="pr-tools-item" @click="openTool(t)">{{ t.label }}</div>
+          </template>
+        </div>
+      </div>
 
       <div class="pr-sep" />
 
@@ -267,7 +282,7 @@
             <!-- Active channel notes -->
             <div v-for="{ note, idx } in visibleNotesWithIdx" :key="'n' + idx"
               class="pr-note"
-              :class="{ selected: selectedNotes.has(idx), muted: note.muted,
+              :class="{ selected: selectedNotes.has(idx), muted: note.muted, chance: note.chance < 1,
                         slide: note.slideType === 'slide', porta: note.slideType === 'porta' }"
               :style="noteStyle(note)"
               @mousedown.prevent.stop="onNoteDown($event, idx)"
@@ -357,6 +372,36 @@
       </div>
     </div>
 
+    <!-- ── Tool dialog ──────────────────────────────────────────────────── -->
+    <div v-if="toolDialog" class="pr-nprops-overlay" @click.self="toolDialog = null">
+      <div class="pr-nprops pr-tooldlg">
+        <div class="pr-nprops-hdr">
+          <span>{{ toolDialog.def.label.replace('…', '') }} — {{ selectedNotes.size || currentNotes.length }} notes</span>
+          <button class="pr-nprops-close" @click="toolDialog = null">×</button>
+        </div>
+        <div v-for="p in toolDialog.def.params" :key="p.key" class="pr-tool-row">
+          <label>{{ p.label }}</label>
+          <select v-if="p.type === 'grid'" v-model.number="toolDialog.opts[p.key]" class="pr-sel">
+            <option v-for="g in GRID_OPTIONS" :key="g.v" :value="g.v">{{ g.l }}</option>
+          </select>
+          <select v-else-if="p.type === 'select'" v-model="toolDialog.opts[p.key]" class="pr-sel">
+            <option v-for="(lbl, v) in p.options" :key="v" :value="v">{{ lbl }}</option>
+          </select>
+          <input v-else-if="p.type === 'bool'" type="checkbox" v-model="toolDialog.opts[p.key]" />
+          <template v-else>
+            <input type="range" class="pr-tool-range"
+              :min="p.type === 'pct' ? 0 : p.min" :max="p.type === 'pct' ? 1 : p.max" :step="p.type === 'pct' ? 0.01 : p.step"
+              v-model.number="toolDialog.opts[p.key]" />
+            <span class="pr-tool-val">{{ p.type === 'pct' ? Math.round(toolDialog.opts[p.key] * 100) + '%' : toolDialog.opts[p.key] }}</span>
+          </template>
+        </div>
+        <div class="pr-nprops-btns">
+          <button class="pr-nprops-btn" @click="toolDialog = null">Cancel</button>
+          <button class="pr-nprops-btn pr-nprops-accept" @click="applyTool(toolDialog.def, toolDialog.opts); toolDialog = null">Apply</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Note Properties Dialog ───────────────────────────────────────── -->
     <div v-if="notePropsDialog" class="pr-nprops-overlay" @click.self="notePropsDialog = null">
       <div class="pr-nprops">
@@ -374,6 +419,7 @@
             { key: 'modX',      label: 'MOD X', min: 0,  max: 1,   step: 0.01, fmt: v => Math.round(v * 100) },
             { key: 'modY',      label: 'MOD Y', min: 0,  max: 1,   step: 0.01, fmt: v => Math.round(v * 100) },
             { key: 'finePitch', label: 'PITCH', min: -100,max: 100,step: 1,    fmt: v => v },
+            { key: 'chance',    label: 'CHANCE', min: 0, max: 1,   step: 0.01, fmt: v => Math.round(v * 100) + '%' },
           ]" :key="k.key" class="pr-knob-col">
             <input type="range" :min="k.min" :max="k.max" :step="k.step"
               v-model.number="notePropsDialog.edit[k.key]" class="pr-knob-range" />
@@ -458,11 +504,12 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick, toRaw } from 'vue'
 import {
   useStudio, PIANO_KEYS, isBlackKey, midiToLabel,
   SCALE_DEFS, NOTE_NAMES,
 } from '../store/studio.js'
+import { TOOL_DEFS, runTool } from './pianoRollTools.js'
 
 const props = defineProps({ ch: { type: Object, required: true } })
 
@@ -508,6 +555,7 @@ const CTRL_OPTIONS = [
     { key: 'modX',      label: 'Note filter cutoff' },
     { key: 'modY',      label: 'Note filter resonance' },
     { key: 'finePitch', label: 'Note fine pitch' },
+    { key: 'chance',    label: 'Note chance' },
   ]},
   { group: 'Channel controls', items: [
     { key: 'ch-pan',   label: 'Channel panning' },
@@ -537,6 +585,12 @@ const timeMarkers = ref([])            // [{ id, tick, label }]
 const clipboardNotes = ref([])
 const copyHint    = ref('')            // transient "Copied N notes" confirmation
 const sliceLine   = ref(null)          // { x } while slice drag active
+const toolsMenuOpen = ref(false)
+const toolDialog  = ref(null)          // { def, opts } while a tool's dialog is open
+const GRID_OPTIONS = [
+  { v: 30, l: '1/64' }, { v: 60, l: '1/32' }, { v: 80, l: '1/16 T' }, { v: 120, l: '1/16' },
+  { v: 160, l: '1/8 T' }, { v: 240, l: '1/8' }, { v: 480, l: '1/4' }, { v: 960, l: '1/2' }, { v: 1920, l: '1 bar' },
+]
 
 let copyHintTimer = null
 function flashCopyHint(msg) {
@@ -761,6 +815,36 @@ function quickQuantize() {
   targets.forEach(n => { n.startTick = snapTick(n.startTick) })
 }
 
+// ── Batch tools (Tools menu) ───────────────────────────────────────────────────
+function openTool(def) {
+  toolsMenuOpen.value = false
+  if (!def.params?.length) { applyTool(def, {}); return }
+  const opts = {}
+  for (const p of def.params) opts[p.key] = p.type === 'grid' ? snapTicks.value : p.def
+  toolDialog.value = { def, opts }
+}
+
+// Runs a tool on the selection (or every note) as one undo step, then keeps
+// the result selected so tools can be chained.
+function applyTool(def, opts) {
+  const notes = getPatData(targetChId.value).pianoNotes
+  const targets = selectedNotes.value.size > 0
+    ? [...selectedNotes.value].map(i => notes[i]).filter(Boolean)
+    : [...notes]
+  if (!targets.length) return
+  pushUndo()
+  const scale = { tonic: snapScale.tonic ?? 0, intervals: scaleIntervals.value }
+  const { remove, add } = runTool(def.id, targets, { ...opts }, scale)
+  const gone = new Set(remove.map(n => toRaw(n)))
+  if (gone.size) notes.splice(0, notes.length, ...notes.filter(n => !gone.has(toRaw(n))))
+  notes.push(...add)
+  const result = new Set([...targets.map(n => toRaw(n)).filter(n => !gone.has(n)), ...add])
+  const sel = new Set()
+  notes.forEach((n, i) => { if (result.has(toRaw(n))) sel.add(i) })
+  selectedNotes.value = sel
+  flashCopyHint(`${def.label.replace('…', '')} → ${sel.size} notes`)
+}
+
 // ── Note Properties Dialog ─────────────────────────────────────────────────────
 function openNoteProps(idx) {
   const notes = currentNotes.value
@@ -773,6 +857,7 @@ function openNoteProps(idx) {
     modX:       note.modX       ?? 0.5,
     modY:       note.modY       ?? 0.5,
     finePitch:  note.finePitch  ?? 0,
+    chance:     note.chance     ?? 1,
     slideType:  note.slideType  ?? 'none',
     colorGroup: note.colorGroup ?? 0,
     startTick:  note.startTick,
@@ -795,6 +880,7 @@ function applyNoteProps() {
       modX:       dlg.edit.modX,
       modY:       dlg.edit.modY,
       finePitch:  dlg.edit.finePitch,
+      chance:     dlg.edit.chance < 1 ? dlg.edit.chance : undefined,
       slideType:  dlg.edit.slideType,
       colorGroup: dlg.edit.colorGroup,
     })
@@ -985,6 +1071,8 @@ function noteStyle(note) {
     height: (ROW_H - 1) + 'px',
     background: color,
     borderColor: note.muted ? '#333348' : `color-mix(in srgb, ${color} 55%, #000)`,
+    // Notes that only sometimes play fade with their chance.
+    ...(note.chance < 1 ? { opacity: 0.35 + 0.65 * note.chance } : {}),
   }
 }
 
@@ -1026,6 +1114,10 @@ function ctrlBarStyle(note) {
   if (ctrlTarget.value === 'modY') {
     const v = note.modY ?? 0.5
     return { ...base, bottom: 0, height: (v * 100) + '%', background: '#d148e8' }
+  }
+  if (ctrlTarget.value === 'chance') {
+    const v = note.chance ?? 1
+    return { ...base, bottom: 0, height: (v * 100) + '%', background: '#9ae83c' }
   }
   if (ctrlTarget.value === 'finePitch') {
     const p = (note.finePitch ?? 0) / 100
@@ -1546,6 +1638,11 @@ function applyCtrlEdit(e) {
   else if (ctrlTarget.value === 'modX')      notes[best].modX     = clamp01(relY)
   else if (ctrlTarget.value === 'modY')      notes[best].modY     = clamp01(relY)
   else if (ctrlTarget.value === 'finePitch') notes[best].finePitch = Math.round(clamp11((relY - 0.5) * 2) * 100)
+  else if (ctrlTarget.value === 'chance') {
+    const c = Math.round(Math.max(0, Math.min(1, relY)) * 100) / 100
+    if (c >= 0.99) delete notes[best].chance
+    else notes[best].chance = c
+  }
 }
 
 // ── Keyboard shortcuts ─────────────────────────────────────────────────────────
@@ -2246,4 +2343,35 @@ onUnmounted(() => {
 .pr-ctx-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; }
 .pr-ctx-check { display: inline-block; width: 14px; font-size: 9px; color: #4ecdc4; }
 .pr-ctx-cancel { color: var(--text-muted); }
+
+/* ── Tools menu + dialog ─────────────────────────────────────────────────── */
+.pr-tools-menu { position: relative; }
+.pr-tools-btn {
+  height: 22px; padding: 0 8px; border-radius: 3px; cursor: pointer;
+  background: var(--bg-control); border: 1px solid var(--border-subtle); color: var(--text-primary);
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+}
+.pr-tools-btn:hover, .pr-tools-btn.open { border-color: #f0a030; color: #f0a030; }
+.pr-tools-drop {
+  position: absolute; top: 26px; left: 0; z-index: 60; min-width: 170px; padding: 4px 0;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 4px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+.pr-tools-item {
+  padding: 4px 12px; cursor: pointer; white-space: nowrap;
+  font-family: 'Rajdhani', sans-serif; font-size: 13px; color: var(--text-primary);
+}
+.pr-tools-item:hover { background: var(--bg-hover); }
+.pr-tools-sep { height: 1px; margin: 4px 8px; background: var(--border-subtle); }
+.pr-tooldlg { min-width: 340px; }
+.pr-tool-row {
+  display: grid; grid-template-columns: 150px 1fr 44px; align-items: center; gap: 8px;
+  padding: 5px 14px; font-family: 'Rajdhani', sans-serif; font-size: 12px; color: var(--text-primary);
+}
+.pr-tool-row label { color: var(--text-muted); }
+.pr-tool-row select { grid-column: span 2; }
+.pr-tool-row input[type=checkbox] { justify-self: start; }
+.pr-tool-range { width: 100%; accent-color: #f0a030; }
+.pr-tool-val { font-family: 'Share Tech Mono', monospace; font-size: 11px; text-align: right; }
+.pr-note.chance { border-style: dashed; }
 </style>

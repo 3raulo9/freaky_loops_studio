@@ -4136,6 +4136,8 @@ export function useStudio() {
             const arpGroups = arpOn ? new Map() : null
             for (const note of _stepNotes) {
               if (note.muted) continue
+              // Per-note chance: a note with chance < 1 plays only that often.
+              if (note.chance != null && note.chance < 1 && Math.random() >= note.chance) continue
               const noteWhen    = when + (note.startTick - stepStartTick) * secPerTick
               const nominalGate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
               const ticksToEnd  = clipEndTick - note.startTick
@@ -4584,6 +4586,7 @@ export function useStudio() {
             const arpGroups = arpOn ? new Map() : null
             for (const note of stepNotes) {
               if (note.muted) continue
+              if (note.chance != null && note.chance < 1 && Math.random() >= note.chance) continue
               const noteWhen    = when + (note.startTick - stepStartTick) * secPerTick
               const nominalGate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
               const ticksToEnd  = clipEndTick - note.startTick
