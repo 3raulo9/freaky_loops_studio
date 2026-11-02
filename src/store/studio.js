@@ -1457,7 +1457,7 @@ export function useStudio() {
   const detachedWindows   = reactive({})   // id → { x, y, w, h, z }
   let   _winZ        = 200
   let   _prevMainView = 'sequencer'
-  const WINDOW_VIEW  = { rack: 'sequencer', playlist: 'playlist', mixer: 'mixer' }
+  const WINDOW_VIEW  = { rack: 'sequencer', playlist: 'playlist', mixer: 'mixer', session: 'session' }
 
   // Resolve a window's current lifecycle state for the shortcut LED.
   function windowState(id) {
@@ -4046,7 +4046,192 @@ export function useStudio() {
   // Each descriptor carries the offset into the clip so multi-bar patterns
   // play the correct bar, and the clip boundary so truncated clips are silent
   // beyond their visible end.  slipOffset (in steps) shifts the playback window.
+  // ── Session view (clip launcher) ────────────────────────────────────────────────
+  //   A grid of pattern slots: columns are the playlist tracks, rows are scenes.
+  //   Launching a slot (or a whole scene) queues it; the scheduler applies queued
+  //   launches on the next bar boundary (or every N bars with launch quantize), so
+  //   changes land in time. Each playing slot loops its pattern until stopped.
+  //   While anything is launched the transport runs in session mode: the clips that
+  //   play come from the launched slots instead of the arrangement or the rack.
+  const sessionScenes   = reactive(Array.from({ length: 8 }, (_, i) => ({ id: 'sc' + (i + 1), name: 'Scene ' + (i + 1) })))
+  const sessionSlots    = reactive({})   // `${trackId}:${sceneId}` → { patternId }
+  const sessionPlaying  = reactive({})   // trackId → { patternId, sceneId, startCell }
+  const sessionQueued   = reactive({})   // trackId → { patternId|null, sceneId }  (null = stop)
+  const sessionActive   = ref(false)
+  const sessionQuantize = ref(1)         // launch on every Nth bar
+  const sessionCell     = ref(0)         // un-wrapped bar counter for the UI (progress rings)
+  const sessionRecording = ref(false)    // capture launches into the arrangement
+  let _sessionOrigin = 0
+  let _sessionLog = []                   // [{ trackId, patternId|null, cell }] while recording
+  let _sceneSeq = sessionScenes.length
+
+  const slotKey = (trackId, sceneId) => trackId + ':' + sceneId
+  function getSessionSlot(trackId, sceneId) { return sessionSlots[slotKey(trackId, sceneId)] ?? null }
+  function setSessionSlot(trackId, sceneId, patternId) {
+    pushUndo()
+    if (patternId) sessionSlots[slotKey(trackId, sceneId)] = { patternId }
+    else delete sessionSlots[slotKey(trackId, sceneId)]
+  }
+  function moveSessionSlot(fromTrack, fromScene, toTrack, toScene, copy = false) {
+    const src = getSessionSlot(fromTrack, fromScene)
+    if (!src || (fromTrack === toTrack && fromScene === toScene)) return
+    pushUndo()
+    sessionSlots[slotKey(toTrack, toScene)] = { ...src }
+    if (!copy) delete sessionSlots[slotKey(fromTrack, fromScene)]
+  }
+  function addSessionScene() {
+    sessionScenes.push({ id: 'sc' + (++_sceneSeq), name: 'Scene ' + (sessionScenes.length + 1) })
+  }
+  function removeSessionScene(sceneId) {
+    if (sessionScenes.length <= 1) return
+    pushUndo()
+    const i = sessionScenes.findIndex(sc => sc.id === sceneId)
+    if (i < 0) return
+    sessionScenes.splice(i, 1)
+    for (const k of Object.keys(sessionSlots)) if (k.endsWith(':' + sceneId)) delete sessionSlots[k]
+  }
+  function renameSessionScene(sceneId, name) {
+    const sc = sessionScenes.find(x => x.id === sceneId)
+    if (sc && name) sc.name = name
+  }
+  // Capture whatever is playing right now as a new scene (Ableton-style).
+  function captureSessionScene() {
+    addSessionScene()
+    const sc = sessionScenes[sessionScenes.length - 1]
+    for (const [tid, pl] of Object.entries(sessionPlaying)) sessionSlots[slotKey(tid, sc.id)] = { patternId: pl.patternId }
+    return sc.id
+  }
+
+  function _patternCells(patternId) {
+    const bar = totalSteps.value * TICKS_PER_STEP
+    return Math.max(1, Math.ceil(getPatternLengthTicks(patternId) / bar))
+  }
+
+  // Queue a slot; starts the transport (in session mode) if it isn't running.
+  function launchSessionSlot(trackId, sceneId) {
+    const slot = getSessionSlot(trackId, sceneId)
+    sessionQueued[trackId] = { patternId: slot?.patternId ?? null, sceneId }
+    _ensureSessionTransport()
+  }
+  function stopSessionTrack(trackId) {
+    if (!sessionPlaying[trackId] && !sessionQueued[trackId]) return
+    sessionQueued[trackId] = { patternId: null, sceneId: null }
+  }
+  // Launch a whole row: tracks with an empty slot in this scene stop.
+  function launchSessionScene(sceneId) {
+    for (const t of playlistTracks) {
+      const slot = getSessionSlot(t.id, sceneId)
+      if (slot) sessionQueued[t.id] = { patternId: slot.patternId, sceneId }
+      else if (sessionPlaying[t.id]) sessionQueued[t.id] = { patternId: null, sceneId: null }
+    }
+    _ensureSessionTransport()
+  }
+  function stopAllSessionClips() {
+    for (const tid of Object.keys(sessionPlaying)) sessionQueued[tid] = { patternId: null, sceneId: null }
+  }
+  function _ensureSessionTransport() {
+    if (isPlaying.value || transportState.value === 'arming') return
+    playbackStartCell.value = 0
+    displayCell.value = 0
+    startPlay()
+  }
+
+  // Called by the scheduler at every bar boundary it reaches.
+  function _sessionBarBoundary(cell) {
+    if (!Object.keys(sessionQueued).length) return
+    const q = Math.max(1, sessionQuantize.value | 0)
+    if (sessionActive.value && q > 1 && (cell - _sessionOrigin) % q !== 0) return
+    if (!sessionActive.value) { sessionActive.value = true; _sessionOrigin = cell }
+    for (const [tid, item] of Object.entries(sessionQueued)) {
+      if (item.patternId) sessionPlaying[tid] = { patternId: item.patternId, sceneId: item.sceneId, startCell: cell }
+      else delete sessionPlaying[tid]
+      delete sessionQueued[tid]
+      if (sessionRecording.value) _sessionLog.push({ trackId: tid, patternId: item.patternId, cell })
+    }
+  }
+
+  function _sessionClipsForCell(cell) {
+    const out = []
+    const muted = new Set(playlistTracks.filter(t => t.muted).map(t => t.id))
+    for (const [tid, pl] of Object.entries(sessionPlaying)) {
+      if (muted.has(tid)) continue
+      const len = _patternCells(pl.patternId)
+      out.push({ patternId: pl.patternId, clipOffset: ((cell - pl.startCell) % len + len) % len, clipWidth: len, slipOffset: 0 })
+    }
+    return out
+  }
+
+  // Loop progress (0..1) of a playing slot, for the UI.
+  function sessionSlotProgress(trackId) {
+    const pl = sessionPlaying[trackId]
+    if (!pl || !isPlaying.value) return 0
+    const len = _patternCells(pl.patternId)
+    const bars = (((sessionCell.value - pl.startCell) % len) + len) % len
+    return (bars * totalSteps.value + Math.max(0, displayStep.value) + 1) / (len * totalSteps.value)
+  }
+
+  // Arm/disarm capture. Disarming writes the captured performance into the
+  // playlist: every launch becomes back-to-back pattern clips on its track,
+  // starting at bar 1.
+  function toggleSessionRecording() {
+    if (!sessionRecording.value) {
+      _sessionLog = Object.entries(sessionPlaying).map(([trackId, pl]) => ({ trackId, patternId: pl.patternId, cell: sessionCell.value }))
+      sessionRecording.value = true
+      return 0
+    }
+    sessionRecording.value = false
+    return _writeSessionLog(sessionCell.value + 1)
+  }
+  function _writeSessionLog(endCell) {
+    if (!_sessionLog.length) return 0
+    pushUndo()
+    const origin = Math.min(..._sessionLog.map(e => e.cell))
+    let placed = 0
+    const byTrack = new Map()
+    for (const e of _sessionLog) {
+      if (!byTrack.has(e.trackId)) byTrack.set(e.trackId, [])
+      byTrack.get(e.trackId).push(e)
+    }
+    for (const [trackId, evs] of byTrack) {
+      evs.sort((a, b) => a.cell - b.cell)
+      evs.forEach((e, i) => {
+        if (!e.patternId) return
+        const from = e.cell - origin
+        const to = (i + 1 < evs.length ? evs[i + 1].cell : endCell) - origin
+        const len = _patternCells(e.patternId)
+        for (let c = from; c < to; c += len) { placeClip(trackId, c, e.patternId, Math.min(len, to - c)); placed++ }
+      })
+    }
+    _sessionLog = []
+    return placed
+  }
+
+  // Lay the scenes end to end in the playlist (scene order = song order).
+  function sessionScenesToPlaylist() {
+    pushUndo()
+    let cell = 0
+    for (const sc of sessionScenes) {
+      const slots = playlistTracks.map(t => [t.id, getSessionSlot(t.id, sc.id)]).filter(([, sl]) => sl)
+      if (!slots.length) continue
+      const len = Math.max(...slots.map(([, sl]) => _patternCells(sl.patternId)))
+      for (const [tid, sl] of slots) {
+        const plen = _patternCells(sl.patternId)
+        for (let c = 0; c < len; c += plen) placeClip(tid, cell + c, sl.patternId, Math.min(plen, len - c))
+      }
+      cell += len
+    }
+    return cell
+  }
+
+  function _resetSessionPlayback() {
+    for (const k of Object.keys(sessionPlaying)) delete sessionPlaying[k]
+    for (const k of Object.keys(sessionQueued)) delete sessionQueued[k]
+    sessionActive.value = false
+    if (sessionRecording.value) { sessionRecording.value = false; _writeSessionLog(sessionCell.value + 1) }
+  }
+
   function getClipsForCell(cell) {
+    if (sessionActive.value) return _sessionClipsForCell(cell)
     if (!usePlaylist.value) {
       // Channel-rack mode: single "virtual" clip with no boundary
       return [{ patternId: currentPatternId.value, clipOffset: 0, clipWidth: 0x7FFFFFFF, slipOffset: 0 }]
@@ -4072,7 +4257,7 @@ export function useStudio() {
   function getPatternsForCell(cell) { return getClipsForCell(cell).map(c => c.patternId) }
 
   function scheduleStep(step, baseWhen, cell) {
-    noteQueue.push({ step, time: baseWhen, cell: cell % PLAYLIST_CELLS, isSong: usePlaylist.value })
+    noteQueue.push({ step, time: baseWhen, cell: cell % PLAYLIST_CELLS, absCell: cell, isSong: usePlaylist.value && !sessionActive.value })
     syncVolumes()
     const secPerBeat = 60 / bpm.value
     const secPerStep = secPerBeat / 4                 // Δstep (a 16th note)
@@ -4206,12 +4391,13 @@ export function useStudio() {
     // can capture a continuous take beyond the pattern boundary.
     const infiniteRecord = !loopRecord.value && recordArmed.value && !usePlaylist.value
     // Otherwise: loop region → pattern-length override → auto-length.
+    const barMode = usePlaylist.value || sessionActive.value
     const loopEndTick = infiniteRecord
       ? null
-      : (loopRegion.value?.endTick ?? (usePlaylist.value ? steps * TICKS_PER_STEP : getPatternLengthTicks(currentPatternId.value)))
+      : (loopRegion.value?.endTick ?? (barMode ? steps * TICKS_PER_STEP : getPatternLengthTicks(currentPatternId.value)))
     const effectiveSteps = infiniteRecord
       ? 0x3FFFFFFF   // ~1 billion — playhead never wraps during recording
-      : (usePlaylist.value ? steps : Math.max(steps, Math.ceil(loopEndTick / TICKS_PER_STEP)))
+      : (sessionActive.value ? steps : usePlaylist.value ? steps : Math.max(steps, Math.ceil(loopEndTick / TICKS_PER_STEP)))
     // Buffer-deadline miss: if the next event is already in the past, the
     // scheduler fell behind its window → register a dropout (underrun).
     if (nextNoteTime < audioCtx.currentTime - 0.001) audioUnderruns.value++
@@ -4230,15 +4416,17 @@ export function useStudio() {
     if (countInStepsLeft > 0) return   // still counting in — skip note scheduling
 
     while (nextNoteTime < audioCtx.currentTime + LOOK_AHEAD) {
+      // Session launches land on bar boundaries.
+      if (schedStep % steps === 0) _sessionBarBoundary(schedCell)
       // Pass base grid time — per-channel swing applied inside scheduleStep
-      scheduleStep(schedStep % effectiveSteps, nextNoteTime, schedCell)
+      scheduleStep(schedStep % (sessionActive.value ? steps : effectiveSteps), nextNoteTime, schedCell)
       // Metronome: one click per beat (4 steps/beat), accent on the downbeat (always at totalSteps boundary).
       if (metronomeOn.value && schedStep % 4 === 0) {
         scheduleMetroClick(nextNoteTime, metroAccent.value && schedStep % steps === 0)
       }
       nextNoteTime += secPerStep
       schedStep++
-      if (schedStep % effectiveSteps === 0 && usePlaylist.value) schedCell++
+      if (sessionActive.value ? schedStep % steps === 0 : (schedStep % effectiveSteps === 0 && usePlaylist.value)) schedCell++
     }
     scheduleAudioClips()
     // Audio processing load = compute time of this block / its time-window deadline.
@@ -4260,7 +4448,7 @@ export function useStudio() {
   }
 
   function scheduleAudioClips() {
-    if (!usePlaylist.value || !audioCtx) return
+    if (!usePlaylist.value || sessionActive.value || !audioCtx) return
     const now        = audioCtx.currentTime
     const horizon    = now + LOOK_AHEAD + 0.5   // wider window; clips scheduled once
     const secPerCell = getSecPerCell()
@@ -4372,6 +4560,7 @@ export function useStudio() {
         beatTick.value++
       } else {
         displayStep.value = entry.step
+        sessionCell.value = entry.absCell
         if (entry.isSong) displayCell.value = entry.cell
         // Emit a beat pulse when the audio-locked playhead crosses a beat. This is
         // read off the look-ahead queue (already latency-compensated) so the visual
@@ -4453,6 +4642,7 @@ export function useStudio() {
   }
 
   function stopPlay() {
+    _resetSessionPlayback()
     finalizeRecordedNotes()
     isPlaying.value = false
     transportState.value = 'stopped'
@@ -6492,6 +6682,11 @@ export function useStudio() {
         return out
       })(),
       patternLengthOverrides: { ...patternLengthOverrides },
+      session: {
+        scenes: sessionScenes.map(sc => ({ ...sc })),
+        slots: JSON.parse(JSON.stringify(sessionSlots)),
+        quantize: sessionQuantize.value,
+      },
       currentPatternId: currentPatternId.value,
       playlistTracks:   playlistTracks.map(t => ({ ...t })),
       playlistClips:    playlistClips.map(c => ({ ...c })),
@@ -6662,6 +6857,15 @@ export function useStudio() {
 
   function _applyProject(p) {
     if (isPlaying.value) pausePlay()
+    _resetSessionPlayback()
+    if (p.session) {
+      sessionScenes.splice(0, sessionScenes.length, ...(p.session.scenes ?? []).map(sc => ({ ...sc })))
+      if (!sessionScenes.length) sessionScenes.push({ id: 'sc1', name: 'Scene 1' })
+      _sceneSeq = sessionScenes.length + 1
+      for (const k of Object.keys(sessionSlots)) delete sessionSlots[k]
+      Object.assign(sessionSlots, p.session.slots ?? {})
+      sessionQuantize.value = p.session.quantize ?? 1
+    }
 
     bpm.value        = p.bpm        ?? 120
     totalSteps.value = p.totalSteps ?? 16
@@ -6979,6 +7183,11 @@ export function useStudio() {
     getPatternLengthTicks, setPatternLengthOverride, clearPatternLengthOverride,
     // Loop region (red ruler selection — temporary playback override)
     loopRegion, setLoopRegion, clearLoopRegion,
+    // Session view (clip launcher)
+    sessionScenes, sessionSlots, sessionPlaying, sessionQueued, sessionActive, sessionQuantize, sessionRecording,
+    getSessionSlot, setSessionSlot, moveSessionSlot, addSessionScene, removeSessionScene, renameSessionScene,
+    captureSessionScene, launchSessionSlot, launchSessionScene, stopSessionTrack, stopAllSessionClips,
+    sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist,
     // Project save / load / autosave / MIDI export
     saveProject, loadProjectFile, newProject, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
     // Render / export: faithful offline render (+ real-time capture for plugins,

@@ -157,6 +157,7 @@ const MENUS = [
   {
     id: 'view', label: 'VIEW', hint: 'Show windows and switch layouts',
     items: () => [
+      { label: 'Session (clip launcher)', key: 'F3', action: () => activateWindow('session') },
       { label: 'Playlist', key: 'F5', action: () => activateWindow('playlist') },
       { label: 'Channel rack', key: 'F6', action: () => activateWindow('rack') },
       { label: 'Piano roll', key: 'F7', action: () => activateWindow('piano') },
@@ -198,7 +199,7 @@ const MENUS = [
 
 const SHORTCUTS = [
   { title: 'Transport', items: [['Space', 'Play / stop'], ['Ctrl+Shift+7', 'Panic (silence everything)']] },
-  { title: 'Windows', items: [['F5', 'Playlist'], ['F6', 'Channel rack'], ['F7', 'Piano roll'], ['Alt+F8', 'Browser'], ['F9', 'Mixer'], ['F1', 'This list']] },
+  { title: 'Windows', items: [['F3', 'Session (clip launcher)'], ['F5', 'Playlist'], ['F6', 'Channel rack'], ['F7', 'Piano roll'], ['Alt+F8', 'Browser'], ['F9', 'Mixer'], ['F1', 'This list']] },
   { title: 'Project', items: [['Ctrl+N', 'New project'], ['Ctrl+O', 'Open'], ['Ctrl+S', 'Save'], ['Ctrl+Shift+S', 'Save as'], ['Ctrl+R', 'Render / export'], ['Ctrl+Z / Ctrl+Y', 'Undo / redo']] },
   { title: 'Patterns', items: [['F4', 'New pattern'], ['F2', 'Rename pattern']] },
   { title: 'Live keyboard', items: [['Z–M, Q–]', 'Play the selected channel'], ['- / =', 'Octave down / up']] },

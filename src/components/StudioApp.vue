@@ -24,6 +24,7 @@
           <ChannelRack v-if="mainView === 'sequencer' && !detachedWindows.rack" key="rack" />
           <Playlist    v-else-if="mainView === 'playlist' && !detachedWindows.playlist" key="playlist" />
           <Mixer       v-else-if="mainView === 'mixer' && !detachedWindows.mixer" key="mixer" />
+          <SessionView v-else-if="mainView === 'session'" key="session" />
           <div v-else class="detached-placeholder" key="placeholder">
             <span class="dp-icon">⇱</span>
             <span class="dp-text">{{ mainViewTitle }} is detached</span>
@@ -326,6 +327,7 @@ import TopBar      from './TopBar.vue'
 import ChannelRack from './ChannelRack.vue'
 import Playlist    from './Playlist.vue'
 import Mixer       from './Mixer.vue'
+import SessionView from './SessionView.vue'
 import PianoRoll   from './PianoRoll.vue'
 import StepGrid    from './StepGrid.vue'
 import Knob        from './Knob.vue'
@@ -354,7 +356,7 @@ const {
 
 // ── Detached main-view placeholder ────────────────────────────────────────────
 const VIEW_ID    = { sequencer: 'rack', playlist: 'playlist', mixer: 'mixer' }
-const VIEW_TITLE = { sequencer: 'Channel Rack', playlist: 'Playlist', mixer: 'Mixer' }
+const VIEW_TITLE = { sequencer: 'Channel Rack', playlist: 'Playlist', mixer: 'Mixer', session: 'Session' }
 const detachedIdForView = computed(() => VIEW_ID[mainView.value])
 const mainViewTitle     = computed(() => VIEW_TITLE[mainView.value] ?? 'Window')
 
