@@ -541,6 +541,10 @@
             style="display:none" @change="onAudioClipFileInputChange" />
         </div>
         <div class="ctx-sep" />
+        <!-- ── Audio → MIDI ── -->
+        <div class="ctx-item" @click.stop="ctxToMidi('melody')"><span>♪ Melody to MIDI</span><span class="ctx-hint">new synth</span></div>
+        <div class="ctx-item" @click.stop="ctxToMidi('drums')"><span>◉ Drums to MIDI</span><span class="ctx-hint">kick / snare / hat</span></div>
+        <div class="ctx-sep" />
         <!-- ── Warp (tempo follow) ── -->
         <div class="ctx-item" @click.stop="ctxToggleWarp">
           <span :class="{ 'ctx-checked': clipMenu.clip.warpEnabled }">⟳ Warp to tempo</span>
@@ -790,7 +794,7 @@ const {
   insertTime, deleteTime, beatSliceClip, duplicateClips,
   playlists, currentPlaylistId, switchPlaylist, clonePlaylist, addPlaylist, renamePlaylist, deletePlaylist, mergePlaylist,
   addAutomationClip, removeAutomationClip, addAutoNode, removeAutoNode, resizeAutomationClip,
-  automationTargets, automationLabel, automationValueAt,
+  automationTargets, automationLabel, automationValueAt, audioToMidi,
   getUnusedPatternIds, getPatternLengthTicks,
   transposePatternNotes, selectSourcePattern, muteAllClipsOnTrack,
   addPattern, removePattern,
@@ -1900,6 +1904,14 @@ async function onAudioClipFileInputChange(e) {
   }
   clipMenu.value = null
 }
+async function ctxToMidi(mode) {
+  const c = clipMenu.value?.clip
+  clipMenu.value = null
+  if (!c) return
+  const res = await audioToMidi({ clipId: c.id }, mode)
+  if (res?.error) alert(res.error)
+}
+
 function ctxToggleWarp() {
   const c = clipMenu.value?.clip
   if (c) setClipWarp(c.id, { warpEnabled: !c.warpEnabled })

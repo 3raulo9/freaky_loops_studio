@@ -70,3 +70,24 @@ export function wasmDetectBpm(channels, len, sampleRate, minBpm, maxBpm) {
   const bpm = run(channels, len, 0, (i) => ex.fls_detect_bpm(i, channels.length, len, sampleRate, minBpm, maxBpm))
   return bpm > 0 ? bpm : null
 }
+
+/**
+ * Transcribe mono audio to notes ('melody' → MIDI pitches, 'drums' → 0 kick /
+ * 1 snare / 2 hat). Returns [{ start, end, key, velocity }] in samples, or null
+ * when the WebAssembly module isn't available.
+ */
+export function wasmTranscribe(mono, sampleRate, mode = 'melody', sensitivity = 0.5) {
+  if (!hasWasmDsp()) return null
+  const MAX = 4096
+  const inPtr = ex.fls_alloc(mono.length)
+  const outPtr = ex.fls_alloc(MAX * 4)
+  try {
+    new Float32Array(ex.memory.buffer).set(mono, inPtr / 4)
+    const n = ex.fls_transcribe(inPtr, mono.length, sampleRate, mode === 'drums' ? 1 : 0, sensitivity, outPtr, MAX)
+    const v = new Float32Array(ex.memory.buffer, outPtr, n * 4)
+    return Array.from({ length: n }, (_, i) => ({ start: v[i * 4], end: v[i * 4 + 1], key: v[i * 4 + 2], velocity: v[i * 4 + 3] }))
+  } finally {
+    ex.fls_free(inPtr, mono.length)
+    ex.fls_free(outPtr, MAX * 4)
+  }
+}

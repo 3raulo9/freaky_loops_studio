@@ -1,6 +1,7 @@
 import { ref, reactive, computed, watch, toRaw } from 'vue'
 import { applyTheme } from '../themes.js'
 import { applyNoteFx, hasNoteFx } from '../noteFx.js'
+import { dspReady, wasmTranscribe } from '../audio/dsp.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
 import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport } from '../desktop/ipc.js'
@@ -2695,6 +2696,91 @@ export function useStudio() {
     audioFileVersions[channelId] = (audioFileVersions[channelId] ?? 0) + 1
     markDirty()
     return midi
+  }
+
+
+  // ── Audio → MIDI ───────────────────────────────────────────────────────────────
+  //   Transcribe a sampler channel's sample (or a playlist audio clip) into a new
+  //   pattern: 'melody' → a synth channel playing the detected notes, 'drums' →
+  //   kick / snare / hat channels hitting where the loop does. Analysis runs in the
+  //   Rust DSP module. Timing follows the sample's own tempo when it's warped.
+  async function audioToMidi({ channelId = null, clipId = null } = {}, mode = 'melody', sensitivity = 0.5) {
+    await dspReady
+    let buf = null, startFrac = 0, endFrac = 1, name = 'AUDIO', srcBpm = null
+    if (channelId) {
+      const src = channels.find(c => c.id === channelId)
+      buf = audioFileBufs.get(channelId)
+      startFrac = src?.params?.startOffset ?? 0
+      endFrac   = src?.params?.endOffset ?? 1
+      name = src?.name ?? name
+      if (src?.params?.warpEnabled && src.params.sampleBpm) srcBpm = src.params.sampleBpm
+    } else if (clipId) {
+      const clip = playlistClips.find(c => c.id === clipId)
+      buf = getAudioClipBuf(clipId)
+      startFrac = clip?.startOffset ?? 0
+      endFrac   = clip?.endOffset ?? 1
+      name = (clip?._label || clip?.name || 'CLIP').toUpperCase()
+      if (clip?.warpEnabled && clip.clipBpm) srcBpm = clip.clipBpm
+    }
+    if (!buf) return { error: 'No audio loaded.' }
+
+    const s0 = Math.floor(startFrac * buf.length), s1 = Math.max(s0 + 1, Math.floor(endFrac * buf.length))
+    const mono = new Float32Array(s1 - s0)
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c)
+      for (let i = 0; i < mono.length; i++) mono[i] += d[s0 + i] / buf.numberOfChannels
+    }
+    const notes = wasmTranscribe(mono, buf.sampleRate, mode, sensitivity)
+    if (!notes) return { error: 'The DSP module is unavailable.' }
+    if (!notes.length) return { error: mode === 'drums' ? 'No hits found.' : 'No pitched notes found.' }
+
+    // Seconds → ticks at the sample's tempo (warped) or the project tempo.
+    const ticksPerSec = (srcBpm || bpm.value) / 60 * 480
+    const grid = mode === 'drums' ? TICKS_PER_STEP : 30          // drums → 1/16, melody → 1/64
+    const toTick = smp => Math.round(smp / buf.sampleRate * ticksPerSec / grid) * grid
+
+    pushUndo()
+    const base = name.replace(/\s+MIDI$/, '').slice(0, 9)
+    addPattern()
+    const pid = currentPatternId.value
+    const pat = patterns.find(p => p.id === pid)
+    if (pat) pat.name = base + (mode === 'drums' ? ' drums' : ' melody')
+
+    let maxTick = 0
+    if (mode === 'drums') {
+      const kinds = ['kick', 'snare', 'hihat']
+      const made = {}
+      for (const n of notes) {
+        const kind = kinds[n.key] ?? 'snare'
+        if (!made[kind]) {
+          const cfg = _DRUM_IMPORT[kind]
+          made[kind] = makeChannel({ name: (base + ' ' + kind).toUpperCase().slice(0, 14), mode: 'piano', ...cfg, params: { ...cfg.params } })
+          channels.push(made[kind])
+        }
+        const ch = made[kind]
+        const startTick = toTick(n.start)
+        getPatData(ch.id, pid).pianoNotes.push({ pitch: ch.params.pitch ?? 60, startTick, durationTicks: TICKS_PER_STEP, velocity: n.velocity })
+        maxTick = Math.max(maxTick, startTick + TICKS_PER_STEP)
+      }
+    } else {
+      addChannel()
+      const ch = channels[channels.length - 1]
+      ch.name = (base + ' MIDI').toUpperCase().slice(0, 14)
+      ch.mode = 'piano'
+      for (const n of notes) {
+        const startTick = toTick(n.start)
+        const durationTicks = Math.max(grid, toTick(n.end) - startTick)
+        getPatData(ch.id, pid).pianoNotes.push({ pitch: n.key, startTick, durationTicks, velocity: n.velocity })
+        maxTick = Math.max(maxTick, startTick + durationTicks)
+      }
+      selectedChannelId.value = ch.id
+    }
+    // Pattern length: whole bars covering the notes.
+    const bar = totalSteps.value * TICKS_PER_STEP
+    setPatternLengthOverride(pid, Math.max(bar, Math.ceil(maxTick / bar) * bar))
+    if (audioCtx) rebuildGains()
+    mainView.value = 'sequencer'
+    return { notes: notes.length, patternId: pid }
   }
 
   // ── Slicer: transient detection + slice markers (chop a loop in the channel) ──
@@ -7446,7 +7532,7 @@ export function useStudio() {
     normalizeAudioFile, buildLoopXfade, snapToZero,
     processSampleAudio, detectSamplePitch,
     undoSampleEdit, canUndoSampleEdit, sampleHistoryDepth,
-    detectSampleSlices, setSampleSlices, clearSampleSlices, sliceSamplerToSequencer,
+    detectSampleSlices, setSampleSlices, clearSampleSlices, sliceSamplerToSequencer, audioToMidi,
     setSamplerWarp, redetectSampleBpm,
     addSampleWarpMarker, updateSampleWarpMarker, removeSampleWarpMarker, clearSampleWarpMarkers,
     getSamplerZones, addSamplerZone, removeSamplerZone, updateSamplerZone,

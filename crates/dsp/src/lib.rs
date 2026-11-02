@@ -7,6 +7,7 @@
 //! match it sample for sample.
 
 pub mod ffi;
+pub mod transcribe;
 
 use std::f64::consts::PI;
 

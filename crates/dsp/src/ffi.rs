@@ -73,3 +73,30 @@ pub unsafe extern "C" fn fls_detect_bpm(in_ptr: *const f32, n_ch: usize, len: us
     let input = channels(in_ptr, n_ch, len);
     crate::detect_bpm(&input, sample_rate, min_bpm, max_bpm).unwrap_or(0.0)
 }
+
+/// Transcribe mono audio to notes. `mode` 0 = melody (key = MIDI pitch),
+/// 1 = drums (key = 0 kick / 1 snare / 2 hat). Writes up to `max_notes` records
+/// of 4 floats [start_sample, end_sample, key, velocity] and returns the count.
+///
+/// # Safety
+/// `in_ptr` holds `len` floats; `out_ptr` holds `max_notes * 4` floats.
+#[no_mangle]
+pub unsafe extern "C" fn fls_transcribe(
+    in_ptr: *const f32, len: usize, sample_rate: f64, mode: u32, sensitivity: f64, out_ptr: *mut f32, max_notes: usize,
+) -> usize {
+    let x = std::slice::from_raw_parts(in_ptr, len);
+    let notes = if mode == 1 {
+        crate::transcribe::drums(x, sample_rate, sensitivity)
+    } else {
+        crate::transcribe::melody(x, sample_rate, sensitivity)
+    };
+    let out = std::slice::from_raw_parts_mut(out_ptr, max_notes * 4);
+    let n = notes.len().min(max_notes);
+    for (i, note) in notes.iter().take(n).enumerate() {
+        out[i * 4] = note.start as f32;
+        out[i * 4 + 1] = note.end as f32;
+        out[i * 4 + 2] = note.key as f32;
+        out[i * 4 + 3] = note.velocity;
+    }
+    n
+}
