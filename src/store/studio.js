@@ -4465,6 +4465,9 @@ export function useStudio() {
   const sessionQuantize = ref(1)         // launch on every Nth bar
   const sessionCell     = ref(0)         // un-wrapped bar counter for the UI (progress rings)
   const sessionRecording = ref(false)    // capture launches into the arrangement
+  const sessionFollow   = ref(false)     // scenes advance on their own (follow action)
+  let _pendingScene = null               // scene whose launch is queued
+  let _sceneRun = null                   // { sceneId, startCell } — scene playing now
   let _sessionOrigin = 0
   let _sessionLog = []                   // [{ trackId, patternId|null, cell }] while recording
   let _sceneSeq = sessionScenes.length
@@ -4521,8 +4524,26 @@ export function useStudio() {
     if (!sessionPlaying[trackId] && !sessionQueued[trackId]) return
     sessionQueued[trackId] = { patternId: null, sceneId: null }
   }
+  // Length of a scene in bars: its longest pattern.
+  function _sceneCells(sceneId) {
+    let len = 0
+    for (const t of playlistTracks) {
+      const sl = getSessionSlot(t.id, sceneId)
+      if (sl) len = Math.max(len, _patternCells(sl.patternId))
+    }
+    return len
+  }
+  // Cycle a scene's follow-action loop count: 1 → 2 → 4 → 8 → 1.
+  function cycleSceneLoops(sceneId) {
+    const sc = sessionScenes.find(x => x.id === sceneId)
+    if (!sc) return
+    const order = [1, 2, 4, 8]
+    sc.loops = order[(order.indexOf(sc.loops ?? 1) + 1) % order.length]
+  }
+
   // Launch a whole row: tracks with an empty slot in this scene stop.
   function launchSessionScene(sceneId) {
+    _pendingScene = sceneId
     for (const t of playlistTracks) {
       const slot = getSessionSlot(t.id, sceneId)
       if (slot) sessionQueued[t.id] = { patternId: slot.patternId, sceneId }
@@ -4542,6 +4563,18 @@ export function useStudio() {
 
   // Called by the scheduler at every bar boundary it reaches.
   function _sessionBarBoundary(cell) {
+    // Follow action: when the current scene has played its loops, launch the
+    // next scene that has clips (wrapping to the first).
+    if (sessionFollow.value && _sceneRun && sessionActive.value && !Object.keys(sessionQueued).length) {
+      const sc = sessionScenes.find(x => x.id === _sceneRun.sceneId)
+      const len = sc ? _sceneCells(sc.id) * (sc.loops ?? 1) : 0
+      if (sc && len > 0 && cell - _sceneRun.startCell >= len) {
+        const i = sessionScenes.indexOf(sc)
+        const order = [...sessionScenes.slice(i + 1), ...sessionScenes.slice(0, i + 1)]
+        const next = order.find(x => _sceneCells(x.id) > 0)
+        if (next) launchSessionScene(next.id)
+      }
+    }
     if (!Object.keys(sessionQueued).length) return
     const q = Math.max(1, sessionQuantize.value | 0)
     if (sessionActive.value && q > 1 && (cell - _sessionOrigin) % q !== 0) return
@@ -4552,6 +4585,8 @@ export function useStudio() {
       delete sessionQueued[tid]
       if (sessionRecording.value) _sessionLog.push({ trackId: tid, patternId: item.patternId, cell })
     }
+    if (_pendingScene) { _sceneRun = { sceneId: _pendingScene, startCell: cell }; _pendingScene = null }
+    if (!Object.keys(sessionPlaying).length) _sceneRun = null
   }
 
   function _sessionClipsForCell(cell) {
@@ -4628,6 +4663,7 @@ export function useStudio() {
   }
 
   function _resetSessionPlayback() {
+    _sceneRun = null; _pendingScene = null
     for (const k of Object.keys(sessionPlaying)) delete sessionPlaying[k]
     for (const k of Object.keys(sessionQueued)) delete sessionQueued[k]
     sessionActive.value = false
@@ -7147,6 +7183,7 @@ export function useStudio() {
         scenes: sessionScenes.map(sc => ({ ...sc })),
         slots: JSON.parse(JSON.stringify(sessionSlots)),
         quantize: sessionQuantize.value,
+        follow: sessionFollow.value,
       },
       currentPatternId: currentPatternId.value,
       playlistTracks:   playlistTracks.map(t => ({ ...t })),
@@ -7375,6 +7412,7 @@ export function useStudio() {
       for (const k of Object.keys(sessionSlots)) delete sessionSlots[k]
       Object.assign(sessionSlots, p.session.slots ?? {})
       sessionQuantize.value = p.session.quantize ?? 1
+      sessionFollow.value = !!p.session.follow
     }
 
     bpm.value        = p.bpm        ?? 120
@@ -7712,7 +7750,7 @@ export function useStudio() {
     sessionScenes, sessionSlots, sessionPlaying, sessionQueued, sessionActive, sessionQuantize, sessionRecording,
     getSessionSlot, setSessionSlot, moveSessionSlot, addSessionScene, removeSessionScene, renameSessionScene,
     captureSessionScene, launchSessionSlot, launchSessionScene, stopSessionTrack, stopAllSessionClips,
-    sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist,
+    sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist, sessionFollow, cycleSceneLoops,
     // Project save / load / autosave / MIDI export
     saveProject, loadProjectFile, newProject, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
     projectPath, openProjectNative,

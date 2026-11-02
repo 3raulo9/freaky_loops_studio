@@ -13,6 +13,8 @@
             <option :value="8">8 bars</option>
           </select>
         </label>
+        <button class="ses-btn" :class="{ on: sessionFollow }" @click="sessionFollow = !sessionFollow"
+          v-hint="'Follow: each scene plays its loop count (×N on the scene), then the next scene launches — a live song sequencer.'">⇣ FOLLOW</button>
         <button class="ses-btn" v-hint="'Add the clips playing right now as a new scene.'"
           :disabled="!playingCount" @click="captureSessionScene">CAPTURE</button>
         <button class="ses-btn" :class="{ rec: sessionRecording }"
@@ -85,6 +87,8 @@
                   v-hint="'Launch the whole row. Double-click to rename.'">
                   <span class="ses-play">▶</span>{{ sc.name }}
                 </button>
+                <button class="ses-loops" :class="{ dim: !sessionFollow }" @click.stop="cycleSceneLoops(sc.id)"
+                  v-hint="'Follow loops: how many times this scene plays before the next one (when FOLLOW is on).'">×{{ sc.loops ?? 1 }}</button>
                 <button v-if="sceneCtx === sc.id" class="ses-scene-del" @click.stop="removeSessionScene(sc.id); sceneCtx = null">✕</button>
               </td>
             </tr>
@@ -129,7 +133,7 @@ const {
   sessionScenes, sessionPlaying, sessionQueued, sessionQuantize, sessionRecording,
   getSessionSlot, setSessionSlot, moveSessionSlot, addSessionScene, removeSessionScene, renameSessionScene,
   captureSessionScene, launchSessionSlot, launchSessionScene, stopSessionTrack, stopAllSessionClips,
-  sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist,
+  sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist, sessionFollow, cycleSceneLoops,
 } = useStudio()
 
 const ctx = ref(null)        // { x, y, track, scene }
@@ -215,6 +219,12 @@ function onDrop(e, track, scene) {
 }
 .ses-btn:hover:not(:disabled) { border-color: #f0a030; color: #f0a030; }
 .ses-btn:disabled { opacity: 0.4; cursor: default; }
+.ses-btn.on { background: color-mix(in srgb, #2ecc71 22%, var(--bg-control)); border-color: #2ecc71; color: #2ecc71; }
+.ses-loops {
+  margin-left: 3px; height: 30px; min-width: 30px; background: var(--bg-panel); color: #2ecc71; border: 1px solid var(--border-subtle);
+  border-radius: 3px; cursor: pointer; font-family: 'Share Tech Mono', monospace; font-size: 11px; vertical-align: top;
+}
+.ses-loops.dim { color: var(--text-muted); opacity: 0.6; }
 .ses-btn.rec { background: #5a1414; border-color: #e74c3c; color: #ffb0a8; animation: ses-blink 1s steps(2) infinite; }
 .ses-stopall:hover { border-color: #e74c3c !important; color: #e74c3c !important; }
 
