@@ -10,6 +10,7 @@
 mod assets;
 mod bridge_client;
 mod files;
+mod locate;
 
 use base64::Engine as _;
 use bridge_client::BridgeClient;
@@ -47,6 +48,8 @@ enum UserEvent {
     EditorClosed(String),
     MeterTick,
     RenderDone { req_id: String, result: Result<(String, usize), String> },
+    /// A reply computed off the UI thread (e.g. asset resolution).
+    Reply { kind: &'static str, payload: Value },
 }
 
 enum Kind {
@@ -212,6 +215,15 @@ impl App {
             "fileOpen" => {
                 let reply = files::open(&self.window, &p);
                 self.send("fileOpened", reply);
+            }
+            "resolveAssets" => {
+                // Index walks can take a moment on a cold start: keep the UI thread free.
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let mut reply = locate::resolve(&p);
+                    reply["reqId"] = p.get("reqId").cloned().unwrap_or(Value::Null);
+                    let _ = proxy.send_event(UserEvent::Reply { kind: "assetsResolved", payload: reply });
+                });
             }
             "recentFiles" => {
                 let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
@@ -520,6 +532,8 @@ fn main() {
     });
 
     let device = files::setting("audioDevice").and_then(|v| v.as_str().map(str::to_string));
+    // Load (or build) the sample/plugin index in the background for fast imports.
+    locate::prewarm();
     let mut app = App { window, engine: Engine::start_on(device.as_deref()), proxy, instances: HashMap::new(), outbox: Vec::new(), next_gen: 0, cascade: 0 };
 
     event_loop.run(move |event, _, control_flow| {
@@ -534,6 +548,7 @@ fn main() {
                 app.send("vstEditorClosed", json!({ "id": id }));
             }
             Event::UserEvent(UserEvent::MeterTick) => app.on_meter_tick(),
+            Event::UserEvent(UserEvent::Reply { kind, payload }) => app.send(kind, payload),
             Event::UserEvent(UserEvent::RenderDone { req_id, result }) => match result {
                 Ok((file, frames)) => app.send("vstRenderResult", json!({ "reqId": req_id, "url": render_url(&file), "frames": frames })),
                 Err(e) => app.send("vstRenderError", json!({ "reqId": req_id, "message": e })),

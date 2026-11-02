@@ -10,7 +10,8 @@
       @mouseenter="hoverSwitch(m.id, $event)"
     >{{ m.label }}</button>
 
-    <input ref="projectInput" type="file" accept=".freak,.json" style="display:none" @change="onProjectFile" />
+    <input ref="projectInput" type="file" accept=".freak,.json,.flp,.zip" style="display:none" @change="onProjectFile" />
+    <input ref="folderInput" type="file" webkitdirectory style="display:none" @change="onProjectFolder" />
     <input ref="midiInput" type="file" accept=".mid,.midi" style="display:none" @change="onMidiFile" />
 
     <Teleport to="body">
@@ -108,7 +109,7 @@ const {
   addPattern, duplicatePattern, removePattern, splitByChannel, findNextEmptyPattern, currentPatternId, patterns,
   addPlaylistTrack, activateWindow, renderModalOpen, themeModalOpen, midiRouterOpen,
   metronomeOn, recordCountIn, keyboardInputMode, autoScroll, usePlaylist, dumpScoreLog, projectName,
-  openProjectNative,
+  openProjectNative, importProjectFiles,
 } = S
 
 // Desktop: recent projects, refreshed whenever the File menu opens.
@@ -122,6 +123,7 @@ const dropX = ref(0)
 const dropY = ref(0)
 const projectInput = ref(null)
 const midiInput = ref(null)
+const folderInput = ref(null)
 const shortcutsOpen = ref(false)
 const aboutOpen = ref(false)
 
@@ -140,6 +142,8 @@ const MENUS = [
         action: () => { if (!recoverAutosave()) alert('No autosave found.') }, disabled: () => !autosaveInfo.value },
       { sep: true },
       { heading: 'IMPORT' },
+      { label: 'Pattern project (.flp / .zip)…', action: openProject },
+      { label: 'Project folder (project + samples)…', action: () => folderInput.value?.click() },
       { label: 'MIDI file…', action: () => midiInput.value?.click() },
       { heading: 'EXPORT' },
       { label: 'Audio (WAV / MP3 / OGG)…', key: 'Ctrl+R', action: () => { renderModalOpen.value = true } },
@@ -292,8 +296,18 @@ function openProject() {
 }
 function onProjectFile(e) {
   const f = e.target.files?.[0]
-  if (f) loadProjectFile(f)
   e.target.value = ''
+  if (!f) return
+  if (/\.(flp|zip)$/i.test(f.name)) runImport([{ path: f.name, name: f.name, file: f }])
+  else loadProjectFile(f)
+}
+function onProjectFolder(e) {
+  const files = [...(e.target.files ?? [])]
+  e.target.value = ''
+  if (files.length) runImport(files.map(f => ({ path: f.webkitRelativePath || f.name, name: f.name, file: f })))
+}
+async function runImport(entries) {
+  try { await importProjectFiles(entries) } catch (err) { alert('Could not open the project: ' + err.message) }
 }
 async function onMidiFile(e) {
   const f = e.target.files?.[0]

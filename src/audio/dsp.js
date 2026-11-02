@@ -91,3 +91,46 @@ export function wasmTranscribe(mono, sampleRate, mode = 'melody', sensitivity = 
     ex.fls_free(outPtr, MAX * 4)
   }
 }
+
+/**
+ * Parse a pattern-project (.flp) file with the Rust reader (crates/projfile).
+ * Resolves to the project description, or `{ error }` for unreadable files.
+ * There's no JavaScript fallback: without WebAssembly the import is unavailable.
+ */
+export async function parsePatternProject(bytes) {
+  await dspReady
+  if (!ex?.fls_parse_project) return { error: 'The project reader needs WebAssembly, which is unavailable here.' }
+  const src = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+  const ptr = ex.fls_alloc_bytes(src.length)
+  try {
+    new Uint8Array(ex.memory.buffer, ptr, src.length).set(src)
+    const len = ex.fls_parse_project(ptr, src.length)
+    const out = new Uint8Array(ex.memory.buffer, ex.fls_result_ptr(), len)
+    return JSON.parse(new TextDecoder().decode(out))
+  } finally {
+    ex.fls_free_bytes(ptr, src.length)
+  }
+}
+
+/** Decode a WavPack (.wv) file → { channels, sampleRate, frames, data: Float32Array[] } or null. */
+export async function decodeWavPack(bytes) {
+  await dspReady
+  if (!ex?.fls_decode_wavpack) return null
+  const src = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+  const ptr = ex.fls_alloc_bytes(src.length)
+  try {
+    new Uint8Array(ex.memory.buffer, ptr, src.length).set(src)
+    const len = ex.fls_decode_wavpack(ptr, src.length)
+    if (!len) return null
+    const base = ex.fls_result_ptr()
+    const hdr = new Uint32Array(ex.memory.buffer.slice(base, base + 12))
+    const [channels, sampleRate, frames] = hdr
+    const data = []
+    for (let c = 0; c < channels; c++) {
+      data.push(new Float32Array(ex.memory.buffer.slice(base + 12 + c * frames * 4, base + 12 + (c + 1) * frames * 4)))
+    }
+    return { channels, sampleRate, frames, data }
+  } finally {
+    ex.fls_free_bytes(ptr, src.length)
+  }
+}

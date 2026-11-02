@@ -563,6 +563,9 @@ dependencies = [
 [[package]]
 name = "fls-dsp"
 version = "0.3.0"
+dependencies = [
+ "fls-projfile",
+]
 
 [[package]]
 name = "fls-host"
@@ -586,6 +589,10 @@ dependencies = [
  "serde_json",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "fls-projfile"
+version = "0.3.0"
 
 [[package]]
 name = "foldhash"

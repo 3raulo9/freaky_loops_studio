@@ -98,6 +98,18 @@ pub fn open(window: &tao::window::Window, p: &Value) -> Value {
     let Some(path) = target else {
         return json!({ "reqId": req_id, "cancelled": true });
     };
+    // Binary project formats aren't sent through the bridge: the UI fetches
+    // them from `/__file/` (fast, no base64), which this unlocks.
+    let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if matches!(ext.as_str(), "flp" | "zip") {
+        let path_s = path.to_string_lossy().into_owned();
+        if !path.is_file() {
+            return json!({ "reqId": req_id, "error": format!("{} was not found.", path.display()) });
+        }
+        crate::locate::allow(&path);
+        remember(&path_s);
+        return json!({ "reqId": req_id, "path": path_s, "name": file_name(&path), "binary": true });
+    }
     match std::fs::read_to_string(&path) {
         Ok(data) => {
             let path_s = path.to_string_lossy().into_owned();

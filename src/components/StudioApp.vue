@@ -218,6 +218,9 @@
       <RenderModal v-if="renderModalOpen" @close="renderModalOpen = false" />
     </Transition>
 
+    <!-- ── Project import (drop target, progress, report) ─────────────── -->
+    <ProjectImport />
+
     <!-- ── Theme modal ───────────────────────────────────────────────── -->
     <Transition name="modal">
       <ThemeModal v-if="themeModalOpen" @close="themeModalOpen = false" />
@@ -338,6 +341,7 @@ import PianoRoll   from './PianoRoll.vue'
 import StepGrid    from './StepGrid.vue'
 import Knob        from './Knob.vue'
 import RenderModal    from './RenderModal.vue'
+import ProjectImport  from './ProjectImport.vue'
 import ThemeModal     from './ThemeModal.vue'
 import MidiPortRouter from './MidiPortRouter.vue'
 import CustomSynth     from './CustomSynth.vue'

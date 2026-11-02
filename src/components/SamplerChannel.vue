@@ -39,11 +39,11 @@
         </div>
       </div>
 
-      <input ref="fileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
+      <input ref="fileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif,.wv"
         style="display:none" @change="onFileInput" />
     </div>
 
-    <!-- ── Warp bar (Ableton-style tempo follow) ──────────────────────────────── -->
+    <!-- ── Warp bar (tempo follow) ───────────────────────────────────────────── -->
     <div class="smp-warp-bar smp-strip">
       <button class="smp-mode-btn" :class="{ active: p.warpEnabled }"
         v-hint="'Warp — time-stretch the sample so it follows the project tempo. Pitch from the played note still applies.'"
@@ -647,7 +647,7 @@
           v-hint="'Add a sample mapped to its own key & velocity range (multisampling). Zones with equal ranges round-robin between hits.'"
           title="Add a sample as a new zone">+ ADD ZONE</button>
         <span class="smp-zone-hint">Map files to key + velocity ranges; equal matches round-robin.</span>
-        <input ref="zoneFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
+        <input ref="zoneFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif,.wv"
           style="display:none" @change="onZoneFileInput" />
       </div>
 

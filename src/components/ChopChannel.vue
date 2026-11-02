@@ -5,7 +5,7 @@
       <button class="chp-load-btn" @click="fileInput?.click()" title="Load audio file">📂</button>
       <span class="chp-name" :title="ch.sampleName">{{ ch.sampleName || 'No file — drop or click 📂' }}</span>
       <span v-if="buf" class="chp-dur">{{ durationLabel }}</span>
-      <input ref="fileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
+      <input ref="fileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif,.wv"
         style="display:none" @change="onFileInput" />
     </div>
 

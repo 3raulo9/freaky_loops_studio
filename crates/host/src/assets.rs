@@ -1,5 +1,6 @@
 //! The `fls://` custom protocol (served as `http://fls.localhost/` on Windows):
-//! the built UI from `dist`, plus offline-bounce PCM files under `/__render/`.
+//! the built UI from `dist`, offline-bounce PCM files under `/__render/`, and
+//! files the user opened or an import located, under `/__file/<abs path>`.
 
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
@@ -41,6 +42,8 @@ fn mime(path: &Path) -> &'static str {
         "wav" => "audio/wav",
         "mp3" => "audio/mpeg",
         "ogg" => "audio/ogg",
+        "flac" => "audio/flac",
+        "aif" | "aiff" => "audio/aiff",
         "mid" | "midi" => "audio/midi",
         _ => "application/octet-stream",
     }
@@ -77,6 +80,17 @@ pub fn handle(req: Request<Vec<u8>>) -> Response<Cow<'static, [u8]>> {
                 respond(StatusCode::OK, "application/octet-stream", bytes)
             }
             Err(_) => respond(StatusCode::NOT_FOUND, "text/plain", b"render not found".to_vec()),
+        };
+    }
+
+    if let Some(abs) = path.strip_prefix("/__file/") {
+        let file = PathBuf::from(abs);
+        if !crate::locate::is_allowed(&file) {
+            return respond(StatusCode::FORBIDDEN, "text/plain", b"not shared with the UI".to_vec());
+        }
+        return match std::fs::read(&file) {
+            Ok(bytes) => respond(StatusCode::OK, mime(&file), bytes),
+            Err(_) => respond(StatusCode::NOT_FOUND, "text/plain", b"file not found".to_vec()),
         };
     }
 

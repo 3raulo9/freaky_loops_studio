@@ -8,6 +8,7 @@
 
 pub mod ffi;
 pub mod transcribe;
+pub mod wavpack;
 
 use std::f64::consts::PI;
 

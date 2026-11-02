@@ -1,0 +1,458 @@
+//! Finding what an imported project refers to — samples and plugins — even
+//! when it was made on another machine, with different drive letters, or with
+//! paths written relative to an app's data folder (`%SomeRoot%\Packs\…`).
+//!
+//! Order of attempts for a sample:
+//!   1. the stored path as-is;
+//!   2. next to the project file (and in its sub-folders);
+//!   3. a file index of the usual places (home folders, Program Files, other
+//!      drives), matching by file name and ranking by how many trailing path
+//!      components agree with the stored path.
+//! Plugins: the stored DLL path, then the index by file name, then by plugin
+//! name; every candidate must export a VST2 entry point before it's offered.
+//!
+//! The index lists only audio and plugin files, is built by several threads,
+//! and is cached in %APPDATA%\FreakyLoopsStudio\file-index.txt so later
+//! imports resolve in milliseconds; a stale cache is refreshed in the
+//! background and a fresh walk runs only when something is still missing.
+
+use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
+
+const AUDIO: [&str; 9] = ["wav", "mp3", "ogg", "flac", "aif", "aiff", "wv", "m4a", "sf2"];
+const PLUGIN: [&str; 2] = ["dll", "vst3"];
+const MAX_DEPTH: usize = 10;
+const MAX_FILES: usize = 3_000_000;
+const STALE_AFTER: Duration = Duration::from_secs(6 * 3600);
+
+/// Lower-case file name → full paths.
+#[derive(Default)]
+struct FileIndex {
+    by_name: HashMap<String, Vec<PathBuf>>,
+}
+
+impl FileIndex {
+    fn insert(&mut self, p: PathBuf) {
+        if let Some(n) = p.file_name().map(|n| n.to_string_lossy().to_lowercase()) {
+            self.by_name.entry(n).or_default().push(p);
+        }
+    }
+}
+
+static INDEX: OnceLock<Mutex<Option<Arc<FileIndex>>>> = OnceLock::new();
+static ALLOWED: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+fn index_slot() -> &'static Mutex<Option<Arc<FileIndex>>> {
+    INDEX.get_or_init(|| Mutex::new(None))
+}
+
+/// Files the UI may read through `/__file/` (things the user opened or the
+/// resolver found) — nothing else on disk is reachable from the webview.
+pub fn allow(p: &Path) {
+    if let Ok(mut s) = ALLOWED.get_or_init(Default::default).lock() {
+        s.insert(norm(p));
+    }
+}
+
+pub fn is_allowed(p: &Path) -> bool {
+    ALLOWED.get_or_init(Default::default).lock().map(|s| s.contains(&norm(p))).unwrap_or(false)
+}
+
+fn norm(p: &Path) -> PathBuf {
+    PathBuf::from(p.to_string_lossy().replace('/', "\\").to_lowercase())
+}
+
+fn cache_path() -> PathBuf {
+    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("FreakyLoopsStudio");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("file-index.txt")
+}
+
+fn wanted(p: &Path) -> bool {
+    let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    AUDIO.contains(&ext.as_str()) || PLUGIN.contains(&ext.as_str())
+}
+
+fn skip_dir(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.starts_with('$')
+        || n.starts_with('.')
+        || matches!(
+            n.as_str(),
+            "windows" | "system volume information" | "appdata" | "node_modules" | "target" | "temp" | "tmp" | "cache" | "caches"
+                | "windowsapps" | "microsoft" | "microsoft office" | "windows defender" | "windows nt" | "common files\\microsoft shared"
+                | "recovery" | "perflogs" | "msocache" | "intel" | "nvidia corporation" | "amd" | "programdata" | "__pycache__" | "site-packages"
+        )
+}
+
+/// Places worth indexing: the user's folders, program folders, other drives.
+fn roots() -> Vec<PathBuf> {
+    let mut r: Vec<PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+        for sub in ["Desktop", "Documents", "Downloads", "Music", "OneDrive", "Splice"] {
+            r.push(home.join(sub));
+        }
+    }
+    for v in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+        if let Some(p) = std::env::var_os(v).map(PathBuf::from) {
+            r.push(p);
+        }
+    }
+    for extra in crate::files::setting("searchFolders").and_then(|v| v.as_array().cloned()).unwrap_or_default() {
+        if let Some(s) = extra.as_str() {
+            r.push(PathBuf::from(s));
+        }
+    }
+    let sys = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into()).to_uppercase();
+    for letter in b'C'..=b'Z' {
+        let d = format!("{}:", letter as char);
+        if d != sys && Path::new(&format!("{d}\\")).is_dir() {
+            r.push(PathBuf::from(format!("{d}\\")));
+        }
+    }
+    let mut seen = HashSet::new();
+    r.retain(|p| p.is_dir() && seen.insert(norm(p)));
+    r
+}
+
+/// Walk `roots` with a small thread pool.
+fn walk(roots: Vec<PathBuf>) -> FileIndex {
+    let queue: Arc<Mutex<Vec<(PathBuf, usize)>>> = Arc::new(Mutex::new(roots.into_iter().map(|r| (r, 0)).collect()));
+    let busy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let found: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 12);
+    let handles: Vec<_> = (0..threads)
+        .map(|_| {
+            let (queue, busy, found) = (queue.clone(), busy.clone(), found.clone());
+            std::thread::spawn(move || {
+                use std::sync::atomic::Ordering::SeqCst;
+                let mut local: Vec<PathBuf> = Vec::new();
+                loop {
+                    let job = {
+                        let mut q = queue.lock().unwrap();
+                        let j = q.pop();
+                        if j.is_some() {
+                            busy.fetch_add(1, SeqCst);
+                        }
+                        j
+                    };
+                    let Some((dir, depth)) = job else {
+                        if busy.load(SeqCst) == 0 {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    };
+                    let mut subdirs = Vec::new();
+                    if let Ok(rd) = std::fs::read_dir(&dir) {
+                        for e in rd.flatten() {
+                            let Ok(ft) = e.file_type() else { continue };
+                            let p = e.path();
+                            if ft.is_dir() {
+                                // .vst3 bundles are folders; index the bundle itself.
+                                if p.extension().map_or(false, |x| x.eq_ignore_ascii_case("vst3")) {
+                                    local.push(p);
+                                } else if depth < MAX_DEPTH && !skip_dir(&e.file_name().to_string_lossy()) {
+                                    subdirs.push((p, depth + 1));
+                                }
+                            } else if wanted(&p) {
+                                local.push(p);
+                            }
+                        }
+                    }
+                    if !subdirs.is_empty() {
+                        queue.lock().unwrap().extend(subdirs);
+                    }
+                    if local.len() > 4096 {
+                        let mut f = found.lock().unwrap();
+                        if f.len() < MAX_FILES {
+                            f.append(&mut local);
+                        } else {
+                            local.clear();
+                        }
+                    }
+                    busy.fetch_sub(1, SeqCst);
+                }
+                found.lock().unwrap().append(&mut local);
+            })
+        })
+        .collect();
+    for h in handles {
+        let _ = h.join();
+    }
+    let mut idx = FileIndex::default();
+    for p in std::mem::take(&mut *found.lock().unwrap()) {
+        idx.insert(p);
+    }
+    idx
+}
+
+fn save_cache(idx: &FileIndex) {
+    let mut s = String::new();
+    for paths in idx.by_name.values() {
+        for p in paths {
+            s.push_str(&p.to_string_lossy());
+            s.push('\n');
+        }
+    }
+    let _ = std::fs::write(cache_path(), s);
+}
+
+fn load_cache() -> Option<(FileIndex, bool)> {
+    let path = cache_path();
+    let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok())?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let mut idx = FileIndex::default();
+    for line in text.lines().filter(|l| !l.is_empty()) {
+        idx.insert(PathBuf::from(line));
+    }
+    Some((idx, age > STALE_AFTER))
+}
+
+/// How long ago the index on disk was written.
+fn index_age() -> Duration {
+    std::fs::metadata(cache_path()).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok()).unwrap_or(Duration::MAX)
+}
+
+fn rebuild() -> Arc<FileIndex> {
+    let t = std::time::Instant::now();
+    let idx = Arc::new(walk(roots()));
+    save_cache(&idx);
+    fls_native::log::write(&format!("[locate] indexed {} names in {:.1}s", idx.by_name.len(), t.elapsed().as_secs_f32()));
+    *index_slot().lock().unwrap() = Some(idx.clone());
+    idx
+}
+
+/// The index, from memory, the disk cache, or a fresh walk (second value:
+/// whether it was just walked, so a miss isn't worth walking again).
+fn index(force_fresh: bool) -> (Arc<FileIndex>, bool) {
+    if !force_fresh {
+        if let Some(i) = index_slot().lock().unwrap().clone() {
+            return (i, false);
+        }
+        if let Some((idx, stale)) = load_cache() {
+            let idx = Arc::new(idx);
+            *index_slot().lock().unwrap() = Some(idx.clone());
+            if stale {
+                std::thread::spawn(rebuild);
+            }
+            return (idx, false);
+        }
+    }
+    (rebuild(), true)
+}
+
+/// Warm the index in the background (called at startup) so the first import is fast.
+pub fn prewarm() {
+    std::thread::spawn(|| {
+        let _ = index(false);
+    });
+}
+
+/// Path components of a stored path, dropping drive letters and `%Root%` placeholders.
+fn components(stored: &str) -> Vec<String> {
+    stored
+        .split(['\\', '/'])
+        .filter(|c| !c.is_empty() && !c.ends_with(':') && !(c.starts_with('%') && c.ends_with('%')))
+        .map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// How many trailing components two paths share (file name included).
+fn suffix_score(stored: &[String], cand: &Path) -> usize {
+    let c: Vec<String> = cand.components().map(|x| x.as_os_str().to_string_lossy().to_lowercase()).collect();
+    stored.iter().rev().zip(c.iter().rev()).take_while(|(a, b)| a == b).count()
+}
+
+fn best<'a>(stored: &str, cands: impl Iterator<Item = &'a PathBuf>) -> Option<PathBuf> {
+    let comps = components(stored);
+    cands
+        .filter(|p| p.exists())
+        .map(|p| (suffix_score(&comps, p), std::cmp::Reverse(p.as_os_str().len()), p))
+        .max_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)))
+        .map(|(_, _, p)| p.clone())
+}
+
+fn file_name_lower(stored: &str) -> String {
+    stored.rsplit(['\\', '/']).next().unwrap_or(stored).trim().to_lowercase()
+}
+
+/// Shallow index of the project's own folder (shared projects keep samples beside the file).
+fn project_index(dir: &Path) -> FileIndex {
+    let mut idx = FileIndex::default();
+    let mut stack = vec![(dir.to_path_buf(), 0usize)];
+    let mut n = 0;
+    while let Some((d, depth)) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+        for e in rd.flatten() {
+            n += 1;
+            if n > 200_000 {
+                return idx;
+            }
+            let p = e.path();
+            match e.file_type() {
+                Ok(t) if t.is_dir() && depth < 5 => stack.push((p, depth + 1)),
+                Ok(t) if t.is_file() && wanted(&p) => idx.insert(p),
+                _ => {}
+            }
+        }
+    }
+    idx
+}
+
+fn normalize_name(s: &str) -> String {
+    s.to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// `resolveAssets` request: `{ project?, samples: [path], plugins: [{ name, path, vendor, native }] }`.
+/// Reply: `{ samples: { stored: found|null }, plugins: [{ path, arch, how } | null], indexed }`.
+pub fn resolve(p: &Value) -> Value {
+    let t = std::time::Instant::now();
+    let project_dir = p.get("project").and_then(Value::as_str).filter(|s| !s.is_empty()).map(|s| Path::new(s).parent().map(Path::to_path_buf)).flatten();
+    let samples: Vec<String> = p.get("samples").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let plugins: Vec<Value> = p.get("plugins").and_then(Value::as_array).cloned().unwrap_or_default();
+
+    let mut found: HashMap<String, Option<PathBuf>> = HashMap::new();
+    let proj_idx = project_dir.as_deref().map(project_index);
+    for s in &samples {
+        let direct = PathBuf::from(s.replace('/', "\\"));
+        let hit = if !s.contains('%') && direct.is_file() {
+            Some(direct)
+        } else {
+            proj_idx.as_ref().and_then(|pi| pi.by_name.get(&file_name_lower(s)).and_then(|c| best(s, c.iter())))
+        };
+        found.insert(s.clone(), hit);
+    }
+
+    // Plugins: the stored path first.
+    let mut plug_hits: Vec<Option<(PathBuf, &'static str)>> = plugins
+        .iter()
+        .map(|q| {
+            let path = q.get("path").and_then(Value::as_str).unwrap_or("");
+            let pb = PathBuf::from(path);
+            (!path.is_empty() && pb.is_file() && fls_native::pe::is_vst2(&pb)).then_some((pb, "original location"))
+        })
+        .collect();
+
+    // Name-only plugin lookups (built-in generators that may have a VST build)
+    // are optional: not finding one is normal and never worth a disk walk.
+    let optional: Vec<bool> = plugins.iter().map(|q| q.get("path").and_then(Value::as_str).unwrap_or("").is_empty()).collect();
+    let missing = |found: &HashMap<String, Option<PathBuf>>, plug: &[Option<(PathBuf, &'static str)>]| {
+        found.values().any(Option::is_none) || plug.iter().zip(&optional).any(|(h, &opt)| h.is_none() && !opt)
+    };
+    let mut fresh = false;
+    if missing(&found, &plug_hits) {
+        let (mut idx, walked) = index(false);
+        fresh = walked;
+        loop {
+            for (s, hit) in found.iter_mut().filter(|(_, h)| h.is_none()) {
+                if let Some(c) = idx.by_name.get(&file_name_lower(s)) {
+                    *hit = best(s, c.iter());
+                }
+            }
+            for (q, hit) in plugins.iter().zip(plug_hits.iter_mut()).filter(|(_, h)| h.is_none()) {
+                *hit = find_plugin(&idx, q);
+            }
+            // Still missing with an older index → the files may be new: walk again once.
+            if fresh || !missing(&found, &plug_hits) || index_age() < Duration::from_secs(60) {
+                break;
+            }
+            idx = index(true).0;
+            fresh = true;
+        }
+    }
+
+    let mut out_samples = serde_json::Map::new();
+    for (s, hit) in &found {
+        if let Some(h) = hit {
+            allow(h);
+        }
+        out_samples.insert(s.clone(), hit.as_ref().map_or(Value::Null, |h| json!(h.to_string_lossy())));
+    }
+    let out_plugins: Vec<Value> = plug_hits
+        .into_iter()
+        .map(|h| match h {
+            Some((p, how)) => json!({ "path": p.to_string_lossy(), "arch": fls_native::pe::arch(&p.to_string_lossy()), "how": how }),
+            None => Value::Null,
+        })
+        .collect();
+    let ms = t.elapsed().as_millis() as u64;
+    fls_native::log::write(&format!("[locate] {} samples, {} plugins in {ms} ms (fresh walk: {fresh})", samples.len(), plugins.len()));
+    json!({ "samples": out_samples, "plugins": out_plugins, "ms": ms, "freshWalk": fresh })
+}
+
+fn find_plugin(idx: &FileIndex, q: &Value) -> Option<(PathBuf, &'static str)> {
+    let path = q.get("path").and_then(Value::as_str).unwrap_or("");
+    let name = q.get("name").and_then(Value::as_str).unwrap_or("");
+    let ok = |p: &PathBuf| p.extension().map_or(false, |e| e.eq_ignore_ascii_case("dll")) && p.is_file() && fls_native::pe::is_vst2(p);
+    // Same file name as the stored path (moved install, other drive).
+    if !path.is_empty() {
+        if let Some(c) = idx.by_name.get(&file_name_lower(path)) {
+            let comps = components(path);
+            let mut v: Vec<&PathBuf> = c.iter().filter(|p| ok(p)).collect();
+            // Prefer 64-bit builds, then the closest folder structure.
+            v.sort_by_key(|p| (fls_native::pe::detect(&p.to_string_lossy()) != fls_native::pe::Arch::X64, std::cmp::Reverse(suffix_score(&comps, p))));
+            if let Some(p) = v.first() {
+                return Some(((*p).clone(), "same file elsewhere"));
+            }
+        }
+    }
+    // By plugin name: "<name>.dll", or any DLL whose name matches ignoring punctuation.
+    if !name.is_empty() {
+        let want = normalize_name(name);
+        let mut v: Vec<&PathBuf> = idx
+            .by_name
+            .iter()
+            .filter(|(n, _)| n.ends_with(".dll") && normalize_name(n.trim_end_matches(".dll")) == want)
+            .flat_map(|(_, ps)| ps.iter())
+            .filter(|p| ok(p))
+            .collect();
+        v.sort_by_key(|p| fls_native::pe::detect(&p.to_string_lossy()) != fls_native::pe::Arch::X64);
+        if let Some(p) = v.first() {
+            return Some(((*p).clone(), "matched by name"));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ranks_by_shared_path_tail() {
+        let stored = "%DataRoot%\\Packs\\Drums\\Kicks\\Kick 01.wav";
+        let a = PathBuf::from("D:\\Samples\\Kick 01.wav");
+        let b = PathBuf::from("C:\\Apps\\Studio\\Data\\Packs\\Drums\\Kicks\\Kick 01.wav");
+        let comps = components(stored);
+        assert_eq!(comps, vec!["packs", "drums", "kicks", "kick 01.wav"]);
+        assert_eq!(suffix_score(&comps, &a), 1);
+        assert_eq!(suffix_score(&comps, &b), 4);
+    }
+
+    #[test]
+    fn names_compare_loosely() {
+        assert_eq!(normalize_name("Delay Lama"), normalize_name("delay_lama"));
+        assert_eq!(file_name_lower("C:/x/Y/Kick.WAV"), "kick.wav");
+    }
+}
+
+#[cfg(test)]
+mod machine_tests {
+    /// `cargo test -p fls-host -- --ignored --nocapture locate_real`: index this
+    /// machine and resolve paths given in FLS_LOCATE_SAMPLES (`;`-separated).
+    #[test]
+    #[ignore]
+    fn locate_real() {
+        let samples: Vec<String> = std::env::var("FLS_LOCATE_SAMPLES").unwrap_or_default().split(';').filter(|s| !s.is_empty()).map(str::to_string).collect();
+        let plugins: Vec<serde_json::Value> = std::env::var("FLS_LOCATE_PLUGINS").unwrap_or_default().split(';').filter(|s| !s.is_empty()).map(|n| serde_json::json!({ "name": n, "path": format!("C:/Nowhere/{n}.dll") })).collect();
+        let t = std::time::Instant::now();
+        let r = super::resolve(&serde_json::json!({ "samples": samples, "plugins": plugins }));
+        println!("{}", serde_json::to_string_pretty(&r).unwrap());
+        println!("total {:.2}s", t.elapsed().as_secs_f32());
+    }
+}

@@ -537,7 +537,7 @@
       <template v-if="isAudioClip(clipMenu.clip)">
         <div class="ctx-item" @click="ctxAudioClipReload">
           ♪ Load audio file…
-          <input ref="audioClipFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
+          <input ref="audioClipFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif,.wv"
             style="display:none" @change="onAudioClipFileInputChange" />
         </div>
         <div class="ctx-sep" />

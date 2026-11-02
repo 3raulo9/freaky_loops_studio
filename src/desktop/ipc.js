@@ -128,6 +128,20 @@ export function openFileNative({ path = null, filter } = {}) {
   return request('fileOpen', 'fileOpened', { path, filter }, DIALOG_MS)
 }
 
+/**
+ * Find an imported project's samples and plugins on this machine. Resolves to
+ * `{ samples: { stored: path|null }, plugins: [{ path, arch, how }|null] }`.
+ * The first run may walk the disks, so allow it time.
+ */
+export function resolveAssetsNative({ project = null, samples = [], plugins = [] }) {
+  return request('resolveAssets', 'assetsResolved', { project, samples, plugins }, 5 * 60 * 1000)
+}
+
+/** URL the UI can fetch a host-approved local file from (opened or located). */
+export function hostFileUrl(path) {
+  return 'http://fls.localhost/__file/' + String(path).replace(/\\/g, '/').split('/').map(encodeURIComponent).join('/')
+}
+
 /** Recently opened / saved projects (most recent first). */
 export async function recentFilesNative() {
   const res = await request('recentFiles', 'recentFiles', {})

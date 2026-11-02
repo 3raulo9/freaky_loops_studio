@@ -2,11 +2,15 @@ import { ref, reactive, computed, watch, toRaw } from 'vue'
 import { applyTheme } from '../themes.js'
 import { applyNoteFx, hasNoteFx } from '../noteFx.js'
 import { grooveAt } from '../grooves.js'
-import { dspReady, wasmTranscribe } from '../audio/dsp.js'
+import { dspReady, wasmTranscribe, parsePatternProject } from '../audio/dsp.js'
+import { mapPatternProject, AUDIO_EXT, baseName as importBaseName } from '../import/patternProject.js'
+import { readZip } from '../import/zip.js'
+import { decodeSampleFile } from '../audio/sampleDecode.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
 import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport,
-         saveFileNative, openFileNative, setWindowTitle, bytesToBase64 } from '../desktop/ipc.js'
+         saveFileNative, openFileNative, setWindowTitle, bytesToBase64,
+         resolveAssetsNative, hostFileUrl } from '../desktop/ipc.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
 import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
@@ -477,6 +481,7 @@ export const TICKS_PER_STEP = 120   // 1/16 note at 480 PPQ
 export const STEPS_PITCH    = 72    // C5 — steps mode stores notes here in pianoNotes[]
 export const PLAYLIST_BARS  = 32
 export const PLAYLIST_CELLS = 32
+export const MAX_PLAYLIST_CELLS = 2048   // ~68 minutes at 120 BPM
 
 export const SCALE_DEFS = {
   major:      [0, 2, 4, 5, 7, 9, 11],
@@ -1181,7 +1186,7 @@ export function useStudio() {
     return newIds
   }
 
-  // ── FL Studio Arrangements (multiple Playlist layouts) ─────────────────────────
+  // ── Arrangements (multiple Playlist layouts) ───────────────────────────────────
   const playlists = reactive([{ id: 'pl1', name: 'Arrangement 1' }])
   const currentPlaylistId = ref('pl1')
   const _playlistSnapshots = reactive({})
@@ -1297,7 +1302,7 @@ export function useStudio() {
     for (const c of playlistClips) end = Math.max(end, (c.cell || 0) + (c.width || 1))
     for (const a of automationClips) end = Math.max(end, (a.cell || 0) + (a.width || 1))
     for (const m of timeMarkers) end = Math.max(end, (m.cell || 0) + 1)
-    return Math.max(PLAYLIST_CELLS, Math.ceil((end + 4) / 4) * 4)
+    return Math.min(MAX_PLAYLIST_CELLS, Math.max(PLAYLIST_CELLS, Math.ceil((end + 4) / 4) * 4))
   })
   let _autoId = 0
 
@@ -2266,13 +2271,36 @@ export function useStudio() {
     let buf
     try {
       const ab = await file.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) {
       console.error('[Sampler] Failed to decode audio file:', e)
       return null
     }
     const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
     return _addSamplerFromBuffer(buf, base, file.name)
+  }
+
+  // Full sampler parameter set for a buffer (new channels and imports).
+  function _samplerDefaults(buf) {
+    return {
+      pitch: 60, rootNote: 60, fineTune: 0, keyTrack: 1,
+      startOffset: 0, endOffset: 1,
+      envDelay: 0, envAttack: 0.005, envDecay: 0.1, envSustain: 0.8, envRelease: 0.2,
+      envAttackCurve: 0, envDecayCurve: -0.5, envReleaseCurve: -0.5,
+      filterType: 'off', filterCutoff: 1.0, filterReso: 0,
+      fEnvAmount: 0, fEnvAttack: 0.01, fEnvDecay: 0.2, fEnvSustain: 0,
+      reverse: false, loopMode: 'off', loopStart: 0, loopEnd: 1, loopXfade: 0,
+      velSens: 1, velocity: 0.8,
+      ..._autoWarpDefaults(buf), warpMode: 'complex', warpMarkers: [],
+      pEnvAmount: 0, pEnvAttack: 0.002, pEnvDecay: 0.15,
+      lfoDest: 'off', lfoRate: 0.3, lfoDepth: 0, lfoShape: 'sine',
+      lfo2Dest: 'off', lfo2Rate: 0.2, lfo2Depth: 0, lfo2Shape: 'triangle',
+      playMode: 'classic', grainSize: 0.08, grainScan: 0.5,
+      grainDensity: 0.5, grainSpray: 0.15, grainPan: 0, grainMotion: 0, grainShape: 'hann',
+      arpEnabled: false, arpMode: 'up', arpRate: '1/16', arpGate: 0.5, arpRange: 1,
+      sliceMode: false, sliceMarkers: [],
+      zones: [],
+    }
   }
 
   // New sampler channel playing `buf` (shared by file drops and bounces).
@@ -2285,25 +2313,7 @@ export function useStudio() {
       instrumentType: 'audiofile',
       sampleName,
       audioFileMissing: false,
-      params: {
-        pitch: 60, rootNote: 60, fineTune: 0, keyTrack: 1,
-        startOffset: 0, endOffset: 1,
-        envDelay: 0, envAttack: 0.005, envDecay: 0.1, envSustain: 0.8, envRelease: 0.2,
-        envAttackCurve: 0, envDecayCurve: -0.5, envReleaseCurve: -0.5,
-        filterType: 'off', filterCutoff: 1.0, filterReso: 0,
-        fEnvAmount: 0, fEnvAttack: 0.01, fEnvDecay: 0.2, fEnvSustain: 0,
-        reverse: false, loopMode: 'off', loopStart: 0, loopEnd: 1, loopXfade: 0,
-        velSens: 1, velocity: 0.8,
-        ..._autoWarpDefaults(buf), warpMode: 'complex', warpMarkers: [],
-        pEnvAmount: 0, pEnvAttack: 0.002, pEnvDecay: 0.15,
-        lfoDest: 'off', lfoRate: 0.3, lfoDepth: 0, lfoShape: 'sine',
-        lfo2Dest: 'off', lfo2Rate: 0.2, lfo2Depth: 0, lfo2Shape: 'triangle',
-        playMode: 'classic', grainSize: 0.08, grainScan: 0.5,
-        grainDensity: 0.5, grainSpray: 0.15, grainPan: 0, grainMotion: 0, grainShape: 'hann',
-        arpEnabled: false, arpMode: 'up', arpRate: '1/16', arpGate: 0.5, arpRange: 1,
-        sliceMode: false, sliceMarkers: [],
-        zones: [],
-      },
+      params: _samplerDefaults(buf),
       knobs: [{ key: 'pitch', label: 'NOTE', min: 0, max: 127, decimals: 0 }],
       fn: () => {},
     })
@@ -2329,7 +2339,7 @@ export function useStudio() {
     let buf
     try {
       const ab = await file.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) {
       console.error('[Sampler] Failed to decode audio file:', e)
       return
@@ -2398,7 +2408,7 @@ export function useStudio() {
     let buf
     try {
       const ab = await file.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) { console.error('[Sampler] zone decode failed:', e); return null }
     const id = 'z' + (++_zid) + Date.now().toString(36)
     samplerZoneBufs.set(channelId + ':' + id, buf)
@@ -2943,7 +2953,7 @@ export function useStudio() {
     let buf
     try {
       const ab = await file.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) { console.error('[AudioClip] Failed to decode:', e); return }
 
     const secPerCell = getSecPerCell()
@@ -2982,7 +2992,7 @@ export function useStudio() {
     let buf
     try {
       const ab = await file.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) { console.error('[AudioClip] Failed to decode:', e); return }
 
     audioClipBufs.set(clipId, buf)
@@ -3266,7 +3276,7 @@ export function useStudio() {
     let buf
     try {
       const ab = await blob.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) { console.error('[Rec] decode failed:', e); return }
 
     if (target.channelId) {
@@ -3405,7 +3415,7 @@ export function useStudio() {
       initAudio()
       try {
         const ab  = await file.arrayBuffer()
-        const buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+        const buf = await decodeSampleFile(audioCtx, ab)
         chopBufs.set(ch.id, buf)
         const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
         ch.name = base.length > 12 ? base.slice(0, 12) : base
@@ -3432,7 +3442,7 @@ export function useStudio() {
     initAudio()
     try {
       const ab  = await file.arrayBuffer()
-      const buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      const buf = await decodeSampleFile(audioCtx, ab)
       chopBufs.set(channelId, buf)
       _clearWarpCache(channelId)
       const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
@@ -3669,7 +3679,7 @@ export function useStudio() {
     initAudio()
     try {
       const ab  = await file.arrayBuffer()
-      const buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      const buf = await decodeSampleFile(audioCtx, ab)
       const rev = _makeReversedBuf(buf)
       if (deck === 'A') {
         forgeBufsA.set(channelId, buf); forgeBufsA_rev.set(channelId, rev)
@@ -4511,7 +4521,7 @@ export function useStudio() {
     const sc = sessionScenes.find(x => x.id === sceneId)
     if (sc && name) sc.name = name
   }
-  // Capture whatever is playing right now as a new scene (Ableton-style).
+  // Capture whatever is playing right now as a new scene.
   function captureSessionScene() {
     addSessionScene()
     const sc = sessionScenes[sessionScenes.length - 1]
@@ -7254,9 +7264,20 @@ export function useStudio() {
 
   // Desktop: Open… through the native dialog (or a recent file's path).
   async function openProjectNative(path = null) {
-    const res = await openFileNative({ path, filter: PROJECT_FILTER })
+    const res = await openFileNative({ path, filter: { name: 'Projects', ext: ['freak', 'flp', 'zip'] } })
     if (!res || res.cancelled) return false
     if (res.error) { alert(res.error); return false }
+    if (res.binary) {
+      try {
+        const blob = await (await fetch(hostFileUrl(res.path))).blob()
+        await importProjectFiles([{ path: res.name, name: res.name, file: blob }], { path: res.path })
+      } catch (err) {
+        console.error('[FreakyLoops] Import failed:', err)
+        alert('Could not open ' + res.name + ': ' + err.message)
+        return false
+      }
+      return true
+    }
     try {
       _applyProject(JSON.parse(res.data))
     } catch (err) {
@@ -7289,6 +7310,183 @@ export function useStudio() {
       }
     }
     reader.readAsText(file)
+  }
+
+  // ── Pattern-project import (.flp, or a .zip package holding one) ─────────────
+  //   1. The Rust reader (WebAssembly) parses the file in a few milliseconds.
+  //   2. Samples and plugins are located: on desktop by the host's file index
+  //      (any drive, moved folders, %Root% placeholders), on the web from files
+  //      dropped alongside the project or packed in the same .zip.
+  //   3. The project is mapped onto ours and loaded like a saved project.
+  //   4. Every sample is fetched and decoded once, in parallel, and attached.
+  const importState = reactive({ busy: false, stage: '', report: null })
+
+  // Attach a decoded sample to an imported sampler channel.
+  function _attachImportedSample(chId, buf, fileName) {
+    const ch = channels.find(c => c.id === chId)
+    if (!ch) return
+    const fromFile = { ...ch.params }
+    ch.params = { ..._samplerDefaults(buf), ...fromFile, warpEnabled: false }
+    audioFileBufs.set(ch.id, buf)
+    warpedSampleBufs.delete(ch.id)
+    _buildSamplerDerivedBufs(ch.id, buf)
+    ch.fn = makeAudioFileFn(ch.id)
+    ch.sampleName = fileName
+    ch.audioFileMissing = false
+    audioFileVersions[ch.id] = (audioFileVersions[ch.id] ?? 0) + 1
+  }
+
+  // Attach a decoded sample to an imported audio clip, trimmed to the region
+  // the project used.
+  function _attachImportedClip(job, buf, fileName) {
+    const clip = playlistClips.find(c => c.id === job.id)
+    if (!clip) return
+    const dur = buf.duration || 1
+    clip.startOffset = Math.max(0, Math.min(0.999, (job.startSec ?? 0) / dur))
+    clip.endOffset = Math.max(clip.startOffset + 0.001, Math.min(1, ((job.startSec ?? 0) + (job.lenSec ?? dur)) / dur))
+    clip.sampleName = fileName
+    clip.audioFileMissing = false
+    audioClipBufs.set(clip.id, buf)
+    audioClipVersions[clip.id] = (audioClipVersions[clip.id] ?? 0) + 1
+  }
+
+  /**
+   * Import a pattern-project. `bytes`: the .flp contents. Options:
+   *   name  — project name; path — where it lives on disk (desktop: samples
+   *   beside it are found first); files — [{ path, name, file }] dropped or
+   *   unzipped with it.
+   * Resolves to the import report (also kept in importState.report).
+   */
+  async function importPatternProject(bytes, { name = 'Imported project', path = null, files = [] } = {}) {
+    initAudio()
+    const t0 = performance.now()
+    importState.busy = true
+    importState.report = null
+    importState.stage = 'Reading the project…'
+    try {
+      const P = await parsePatternProject(bytes)
+      if (P.error) throw new Error(P.error)
+      const tParse = performance.now() - t0
+
+      // What the file refers to.
+      const samples = new Set()
+      for (const c of P.channels) {
+        if (c.sample) samples.add(c.sample)
+        for (const sp of c.plugin?.paths ?? []) if (AUDIO_EXT.test(sp)) samples.add(sp)
+      }
+      const vsts = P.channels.filter(c => c.plugin?.vst).map(c => c.plugin.vst)
+      // Built-in generators of the original app, by name (a VST build may be installed).
+      const natives = [...new Set(P.channels
+        .filter(c => c.kind === 'generator' && !c.plugin?.vst && c.plugin?.internal && !(c.plugin.paths ?? []).length)
+        .map(c => c.plugin.internal))]
+
+      // Files that came with the project (a dropped folder or the .zip),
+      // matched by name, ranked by how much of the stored path they share.
+      const byName = new Map()
+      for (const f of files) {
+        const k = f.name.toLowerCase()
+        if (!byName.has(k)) byName.set(k, [])
+        byName.get(k).push(f)
+      }
+      const fromFiles = stored => {
+        const list = byName.get(importBaseName(stored).toLowerCase())
+        if (!list) return null
+        const tail = stored.toLowerCase().split(/[\\/]/).reverse()
+        const score = f => { const t = f.path.toLowerCase().split('/').reverse(); let n = 0; while (n < t.length && t[n] === tail[n]) n++; return n }
+        return list.reduce((a, b) => (score(b) > score(a) ? b : a))
+      }
+
+      importState.stage = `Finding ${samples.size} samples${vsts.length ? ` and ${vsts.length} plugins` : ''}…`
+      const resolved = new Map()      // stored path → { file, name } | { url, path, name }
+      for (const sp of samples) { const f = fromFiles(sp); if (f) resolved.set(sp, { file: f.file, name: f.name }) }
+      let plugins = []
+      if (isDesktop) {
+        const ask = [...samples].filter(sp => !resolved.has(sp))
+        const r = await resolveAssetsNative({
+          project: path, samples: ask,
+          plugins: [...vsts.map(v => ({ name: v.name, path: v.path, vendor: v.vendor })), ...natives.map(n => ({ name: n, path: '' }))],
+        })
+        for (const [sp, hit] of Object.entries(r?.samples ?? {})) if (hit) resolved.set(sp, { url: hostFileUrl(hit), path: hit, name: importBaseName(hit) })
+        plugins = r?.plugins ?? []
+      }
+      const vstHit = new Map(vsts.map((v, i) => [v, plugins[i] ?? null]))
+      const nativeHit = new Map(natives.map((n, i) => [n, plugins[vsts.length + i] ?? null]))
+
+      const { project, jobs, report, usePlaylist: songMode } = mapPatternProject(P, {
+        desktop: isDesktop,
+        resolveVst: v => vstHit.get(v),
+        resolveNative: n => nativeHit.get(n),
+        lib: {
+          fmPresets: FM_PRESETS, drumPresets: _DRUM_IMPORT, gmParams: makeGMParams, gmKnobs, gmColor: gmChannelColor, gmSustains,
+          makeEffect, effectDefs: EFFECT_DEFS,
+        },
+      })
+      _applyProject(project)
+      usePlaylist.value = songMode
+      projectName.value = name.replace(/\.(flp|zip)$/i, '')
+      projectPath.value = null          // Save writes our own format, never over the original
+      projectDirty.value = true
+      mainView.value = songMode ? 'playlist' : 'sequencer'
+
+      // Decode every distinct sample once, all in parallel.
+      importState.stage = `Loading ${jobs.samples.length} samples…`
+      const decoded = new Map()
+      const decode = sp => {
+        if (!decoded.has(sp)) {
+          const src = resolved.get(sp)
+          decoded.set(sp, !src ? Promise.resolve(null) : (async () => {
+            const ab = src.file ? await src.file.arrayBuffer() : await (await fetch(src.url)).arrayBuffer()
+            return await decodeSampleFile(audioCtx, ab)
+          })().catch(err => { console.warn('[import] could not decode', sp, err); return null }))
+        }
+        return decoded.get(sp)
+      }
+      const missing = new Set()
+      await Promise.all(jobs.samples.map(async j => {
+        const buf = await decode(j.path)
+        if (!buf) { missing.add(j.path); return }
+        const fileName = resolved.get(j.path)?.name ?? importBaseName(j.path)
+        if (j.kind === 'channel') _attachImportedSample(j.id, buf, fileName)
+        else _attachImportedClip(j, buf, fileName)
+      }))
+      if (audioCtx) { rebuildGains(); buildMixerInserts() }
+
+      report.samplesTotal = decoded.size
+      report.samplesFound = decoded.size - missing.size
+      report.samplesMissing = [...missing]
+      report.parseMs = Math.round(tParse)
+      report.ms = Math.round(performance.now() - t0)
+      report.name = projectName.value
+      importState.report = report
+      return report
+    } finally {
+      importState.busy = false
+      importState.stage = ''
+    }
+  }
+
+  /**
+   * Import from picked or dropped files: a .flp (plus any samples/folders that
+   * came with it) or a .zip package. `entries`: [{ path, name, file }], where
+   * `file` is anything with arrayBuffer() (File, Blob).
+   */
+  async function importProjectFiles(entries, { path = null } = {}) {
+    const all = [...entries]
+    // Unpack zips: their contents count as files dropped with the project.
+    for (const e of entries.filter(e => /\.zip$/i.test(e.name))) {
+      try {
+        for (const z of await readZip(e.file)) {
+          if (/\.(flp|sf2)$/i.test(z.name) || AUDIO_EXT.test(z.name)) {
+            all.push({ path: z.path, name: z.name, file: { arrayBuffer: async () => (await z.blob()).arrayBuffer() } })
+          }
+        }
+      } catch (err) { console.warn('[import] unreadable zip', e.name, err) }
+    }
+    const projects = all.filter(e => /\.flp$/i.test(e.name)).sort((a, b) => a.path.split('/').length - b.path.split('/').length)
+    if (!projects.length) throw new Error('No .flp project was found in what was opened.')
+    const main = projects[0]
+    const bytes = await main.file.arrayBuffer()
+    return importPatternProject(bytes, { name: main.name, path, files: all.filter(e => e !== main) })
   }
 
   // ── Autosave + recovery ────────────────────────────────────────────────────────
@@ -7762,7 +7960,7 @@ export function useStudio() {
     captureSessionScene, launchSessionSlot, launchSessionScene, stopSessionTrack, stopAllSessionClips,
     sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist, sessionFollow, cycleSceneLoops,
     // Project save / load / autosave / MIDI export
-    saveProject, loadProjectFile, newProject, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
+    saveProject, loadProjectFile, newProject, importPatternProject, importProjectFiles, importState, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
     projectPath, openProjectNative,
     // Render / export: faithful offline render (+ real-time capture for plugins,
     // + native bounce for VST instrument channels)

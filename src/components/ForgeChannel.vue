@@ -21,7 +21,7 @@
       <button class="frg-load-btn" @click="fileInput?.click()" :title="`Load Deck ${activeDeck}`">📂</button>
       <span class="frg-name" :title="deckName">{{ deckName || `No file — drop or click 📂` }}</span>
       <span v-if="activeBuf" class="frg-dur">{{ durationLabel }}</span>
-      <input ref="fileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
+      <input ref="fileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif,.wv"
         style="display:none" @change="onFileInput" />
     </div>
 

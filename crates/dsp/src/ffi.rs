@@ -100,3 +100,73 @@ pub unsafe extern "C" fn fls_transcribe(
     }
     n
 }
+
+// ── Project import ───────────────────────────────────────────────────────────
+
+fn byte_layout(n: usize) -> Layout {
+    Layout::array::<u8>(n.max(1)).expect("buffer too large")
+}
+
+#[no_mangle]
+pub extern "C" fn fls_alloc_bytes(n: usize) -> *mut u8 {
+    unsafe { alloc(byte_layout(n)) }
+}
+
+/// # Safety
+/// `ptr` must come from `fls_alloc_bytes(n)` with the same count.
+#[no_mangle]
+pub unsafe extern "C" fn fls_free_bytes(ptr: *mut u8, n: usize) {
+    if !ptr.is_null() {
+        dealloc(ptr, byte_layout(n));
+    }
+}
+
+static RESULT: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+/// Parse a pattern-project file held in `len` bytes at `ptr`. The JSON result
+/// (or `{"error": …}`) is kept until the next call; read it through
+/// `fls_result_ptr` and the returned length.
+///
+/// # Safety
+/// `ptr` holds `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fls_parse_project(ptr: *const u8, len: usize) -> usize {
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    let json = match fls_projfile::parse(bytes) {
+        Ok(p) => p.to_json(),
+        Err(e) => format!("{{\"error\":{:?}}}", e),
+    };
+    let mut r = RESULT.lock().unwrap_or_else(|e| e.into_inner());
+    *r = json.into_bytes();
+    r.len()
+}
+
+#[no_mangle]
+pub extern "C" fn fls_result_ptr() -> *const u8 {
+    RESULT.lock().map(|r| r.as_ptr()).unwrap_or(std::ptr::null())
+}
+
+/// Decode a WavPack file. On success the result buffer holds
+/// `[channels u32, sample rate u32, frames u32, planar f32 samples…]` and the
+/// return value is its length in bytes; 0 means unsupported/corrupt.
+///
+/// # Safety
+/// `ptr` holds `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fls_decode_wavpack(ptr: *const u8, len: usize) -> usize {
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    let mut r = RESULT.lock().unwrap_or_else(|e| e.into_inner());
+    r.clear();
+    let Ok(d) = crate::wavpack::decode(bytes) else { return 0 };
+    let frames = d.data.first().map_or(0, Vec::len);
+    r.reserve(12 + d.channels * frames * 4);
+    r.extend_from_slice(&(d.channels as u32).to_le_bytes());
+    r.extend_from_slice(&d.sample_rate.to_le_bytes());
+    r.extend_from_slice(&(frames as u32).to_le_bytes());
+    for ch in &d.data {
+        for x in ch {
+            r.extend_from_slice(&x.to_le_bytes());
+        }
+    }
+    r.len()
+}
