@@ -533,6 +533,8 @@
       <div class="ctx-item" @click="ctxAction('rename-color')">Rename, color and icon…</div>
       <div class="ctx-item" @click="ctxAction('rename')">Rename</div>
       <div class="ctx-item" @click="ctxAction('clone')">Clone</div>
+      <div class="ctx-item" @click="ctxAction('bounce')"
+        v-hint="'Render this channel (with its effects) to audio in a new sampler, and mute the original.'">Bounce to audio (freeze)</div>
       <div class="ctx-item" @click="ctxAction('clear')">Clear Pattern</div>
       <template v-if="ctxMenu.channel?.mode === 'steps'">
         <div class="ctx-sep"/>
@@ -774,7 +776,7 @@ const {
   addAudioFileChannel, loadAudioFileForChannel,
   addChopChannel, addForgeChannel,
   instrumentDrag, startInstrumentDrag,
-  pushUndo, createAutomationClipFor,
+  pushUndo, createAutomationClipFor, bounceChannelToSampler,
 } = useStudio()
 
 // Local MIDI-tick constant (matches store's TICKS_PER_STEP = 120)
@@ -1551,6 +1553,7 @@ function ctxAction(action) {
   if (action === 'rename')       startRename(ch)
   if (action === 'rename-color') startRenameColor(ch)
   if (action === 'clone')        cloneChannel(ch.id)
+  if (action === 'bounce')       bounceChannelToSampler(ch.id).then(r => { if (r?.error) alert(r.error) })
   if (action === 'clear')        clearChannel(ch.id)
   if (action === 'move-up')      moveChannel(ch.id, -1)
   if (action === 'move-down')    moveChannel(ch.id, +1)

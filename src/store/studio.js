@@ -2260,12 +2260,18 @@ export function useStudio() {
       return null
     }
     const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
+    return _addSamplerFromBuffer(buf, base, file.name)
+  }
+
+  // New sampler channel playing `buf` (shared by file drops and bounces).
+  function _addSamplerFromBuffer(buf, name, sampleName) {
+    const base = name
     const ch = makeChannel({
       name: base.length > 14 ? base.slice(0, 14) : base,
       color: '#ff9f43',
       type: 'audiofile', mode: 'steps', sustains: false,
       instrumentType: 'audiofile',
-      sampleName: file.name,
+      sampleName,
       audioFileMissing: false,
       params: {
         pitch: 60, rootNote: 60, fineTune: 0, keyTrack: 1,
@@ -2698,6 +2704,51 @@ export function useStudio() {
     return midi
   }
 
+
+
+  // ── Bounce / freeze ────────────────────────────────────────────────────────────
+  //   Render one channel's part of the current pattern (with its own insert FX)
+  //   into a new sampler channel that plays it back in sync, and mute the
+  //   original — a frozen copy that costs almost no CPU. The render runs two
+  //   passes and keeps the second, so reverb / delay tails wrap around the loop
+  //   exactly as they do in playback. Un-mute the original to go back.
+  async function bounceChannelToSampler(channelId) {
+    const src = channels.find(c => c.id === channelId)
+    if (!src) return { error: 'No such channel.' }
+    if (!_offlineRenderable(src) || _isVst(src)) return { error: `${src.name} runs as a live plugin and can't be bounced offline yet.` }
+    initAudio()
+    const pid = currentPatternId.value
+    const sr = audioCtx.sampleRate
+    const patTicks = Math.max(totalSteps.value * TICKS_PER_STEP, getPatternLengthTicks(pid))
+    const patSec = patTicks / TICKS_PER_STEP * (60 / bpm.value) / 4
+    const full = await renderProjectToBuffer({
+      mode: 'pattern', patternId: pid, bars: 2, tail: 0.05, normalize: false, sampleRate: sr,
+      onlyChannelIds: [channelId], bypassMixer: true,
+    })
+    const START = 0.01
+    const from = Math.round((START + patSec) * sr)
+    const len = Math.max(1, Math.round(patSec * sr))
+    const out = new AudioBuffer({ length: len, numberOfChannels: 2, sampleRate: sr })
+    for (let c = 0; c < 2; c++) out.getChannelData(c).set(full.getChannelData(c).subarray(from, from + len))
+    let peak = 0
+    for (let c = 0; c < 2; c++) for (const v of out.getChannelData(c)) peak = Math.max(peak, Math.abs(v))
+    if (peak < 1e-4) return { error: `${src.name} is silent in this pattern.` }
+
+    pushUndo()
+    const ch = _addSamplerFromBuffer(out, (src.name + ' BNC').slice(0, 14), src.name.toLowerCase() + '-bounce.wav')
+    ch.color = src.color
+    ch.mixerTrack = src.mixerTrack ?? 0
+    ch.bouncedFrom = src.id
+    Object.assign(ch.params, { warpEnabled: false, sampleBpm: bpm.value })
+    // One note spanning the whole pattern plays the bounce once per loop.
+    ch.mode = 'piano'
+    getPatData(ch.id, pid).pianoNotes.push({ pitch: ch.params.rootNote ?? 60, startTick: 0, durationTicks: patTicks, velocity: 1 })
+    // Bounced audio already carries the channel's volume, pan and insert FX.
+    ch.volume = 1; ch.pan = 0
+    src.muted = true
+    rebuildGains()
+    return { channelId: ch.id, seconds: patSec }
+  }
 
   // ── Audio → MIDI ───────────────────────────────────────────────────────────────
   //   Transcribe a sampler channel's sample (or a playlist audio clip) into a new
@@ -5175,7 +5226,10 @@ export function useStudio() {
       sampleRate = 44100,
       tail = 3.5,
       normalize = true,
+      onlyChannelIds = null,   // render just these channels (bounce)
+      bypassMixer = false,     // …straight to the master, skipping mixer inserts
     } = opts
+    const only = onlyChannelIds ? new Set(onlyChannelIds) : null
 
     const bpmV         = bpm.value
     const secPerStep   = (60 / bpmV) / 4
@@ -5197,7 +5251,7 @@ export function useStudio() {
     // Resolve playlist audio clips (song mode only — the playlist owns them).
     const playingTracks = new Set(playlistTracks.filter(t => !t.muted).map(t => t.id))
     const audioClips = []
-    if (mode === 'song') {
+    if (mode === 'song' && !only) {
       for (const clip of playlistClips) {
         if (clip.type !== 'audio' || clip.muted || !playingTracks.has(clip.trackId)) continue
         const buf = getWarpedClipBuf(clip)
@@ -5287,6 +5341,7 @@ export function useStudio() {
     const cutNode  = new Array(rawChannels.length).fill(null)
     rawChannels.forEach((ch, ci) => {
       if (ch.muted || !_offlineRenderable(ch) || _isVst(ch)) return
+      if (only && !only.has(ch.id)) return
       const g = offCtx.createGain(); g.gain.value = ch.volume ?? 1
       const p = offCtx.createStereoPanner(); p.pan.value = ch.pan ?? 0
       g.connect(p)
@@ -5296,7 +5351,7 @@ export function useStudio() {
         let h; try { h = createEffect(offCtx, fx) } catch (_) { h = null }
         if (h) { tail.connect(h.input); tail = h.output }
       })
-      tail.connect(insertDest(ch.mixerTrack || 0))
+      tail.connect(bypassMixer ? masterGainOff : insertDest(ch.mixerTrack || 0))
       gainNode[ci] = g
       panNode[ci]  = p
       if (ch.cutSelf) { const cg = offCtx.createGain(); cg.gain.value = 1; cg.connect(g); cutNode[ci] = cg }
@@ -7532,7 +7587,7 @@ export function useStudio() {
     normalizeAudioFile, buildLoopXfade, snapToZero,
     processSampleAudio, detectSamplePitch,
     undoSampleEdit, canUndoSampleEdit, sampleHistoryDepth,
-    detectSampleSlices, setSampleSlices, clearSampleSlices, sliceSamplerToSequencer, audioToMidi,
+    detectSampleSlices, setSampleSlices, clearSampleSlices, sliceSamplerToSequencer, audioToMidi, bounceChannelToSampler,
     setSamplerWarp, redetectSampleBpm,
     addSampleWarpMarker, updateSampleWarpMarker, removeSampleWarpMarker, clearSampleWarpMarkers,
     getSamplerZones, addSamplerZone, removeSamplerZone, updateSamplerZone,
