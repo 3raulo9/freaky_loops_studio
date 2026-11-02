@@ -13,7 +13,7 @@ import { makeGMPlayFn, preloadGMInstrument, gmSustains } from '../audio/gmSynth.
 import { GM_INSTRUMENTS, GM_CATEGORIES } from '../midi/gmDictionary.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
-import { createEffect, makeEffect, EFFECT_DEFS } from '../audio/effects.js'
+import { createEffect, makeEffect, EFFECT_DEFS, setEffectsTempo } from '../audio/effects.js'
 import { detectBpm, timeStretch, timeStretchSegments, buildWarpSegments, tempoRatio, WARP_MODES } from '../audio/warp.js'
 import {
   playFMBell, playFMRhodes, playFMBass, playFMOrgan, playFMBrass,
@@ -1563,6 +1563,9 @@ export function useStudio() {
   // the position you were at in the other mode.
   const _savedPatCell  = ref(0)
   const _savedSongCell = ref(0)
+  // Tempo-synced effects (gate, auto pan, ping-pong, auto filter) follow the song.
+  watch(bpm, b => setEffectsTempo(b), { immediate: true })
+
   // Desktop: plugins read tempo + play state from the host's transport clock
   // (tempo-synced LFOs, delays, arps), so keep it in step with ours.
   if (isDesktop) watch([bpm, isPlaying], ([b, playing]) => sendTransport(b, playing), { immediate: true })

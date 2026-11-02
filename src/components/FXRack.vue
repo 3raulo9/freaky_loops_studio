@@ -87,6 +87,14 @@
           <Knob :model-value="effect.value" :min="0" :max="1" label="Level" :color="color" :size="32" :decimals="2"
             @update:model-value="updateEffect(idx, 'value', $event)" />
         </template>
+
+        <!-- Any other effect: one 0..1 knob per parameter -->
+        <template v-else>
+          <Knob v-for="(_, key) in (EFFECT_DEFS[effect.type]?.defaults ?? {})" :key="key"
+            :model-value="effect[key]" :min="0" :max="1" :label="GENERIC_LABELS[key] ?? key"
+            :color="color" :size="32" :decimals="2"
+            @update:model-value="updateEffect(idx, key, $event)" />
+        </template>
       </div>
     </div>
   </div>
@@ -95,6 +103,13 @@
 <script setup>
 import { ref } from 'vue'
 import Knob from './Knob.vue'
+import { EFFECT_DEFS } from '../audio/effects.js'
+
+const GENERIC_LABELS = {
+  cutoff: 'Cutoff', reso: 'Reso', rate: 'Rate', depth: 'Depth', low: 'Low', mid: 'Mid', high: 'High',
+  midfreq: 'Freq', bits: 'Crush', drive: 'Drive', mix: 'Mix', threshold: 'Thresh', release: 'Rel',
+  gain: 'Gain', smooth: 'Smooth', time: 'Time', division: 'Time', feedback: 'Fdbk',
+}
 
 const props = defineProps({
   effects: { type: Array, default: () => [] },
@@ -112,7 +127,7 @@ function formatEffectName(type) {
     delay: 'Delay', chorus: 'Chorus', phaser: 'Phaser', flanger: 'Flanger',
     eq: 'EQ', volume: 'Volume', dimension: 'Dimension',
   }
-  return names[type] || type
+  return names[type] || EFFECT_DEFS[type]?.label || type
 }
 
 function toggleEffect(idx) { emit('update', idx, 'enabled', !props.effects[idx].enabled) }

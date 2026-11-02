@@ -540,7 +540,8 @@ const PARAM_LABELS = {
   drive: 'Drive', tone: 'Tone', size: 'Size', decay: 'Decay',
   mix: 'Mix', time: 'Time', feedback: 'Feedback', rate: 'Rate',
   depth: 'Depth', threshold: 'Threshold', ratio: 'Ratio', value: 'Gain',
-  width: 'Width',
+  width: 'Width', cutoff: 'Cutoff', reso: 'Resonance', low: 'Low', mid: 'Mid', high: 'High',
+  midfreq: 'Mid freq', bits: 'Crush', release: 'Release', gain: 'Makeup', smooth: 'Smooth', division: 'Time',
 }
 function paramLabel(key) { return PARAM_LABELS[key] ?? key }
 
