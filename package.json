@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "desktop": "cargo run -p fls-host",
+    "desktop:bridge": "cargo build -p fls-bridge --target i686-pc-windows-msvc",
+    "desktop:build": "npm run build && node scripts/package-desktop.mjs",
+    "build:dsp": "cargo build -p fls-dsp --target wasm32-unknown-unknown --release && node -e \"require('fs').copyFileSync('target/wasm32-unknown-unknown/release/fls_dsp.wasm','src/wasm/fls_dsp.wasm')\""
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",

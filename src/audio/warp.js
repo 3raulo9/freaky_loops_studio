@@ -1,6 +1,8 @@
 // ─── Audio Warping & Time-Stretch engine ────────────────────────────────────
 //
-//   Ableton-style, pitch-independent time-stretching plus tempo detection.
+//   Pitch-independent time-stretching plus tempo detection. The heavy loops also
+//   exist in Rust (crates/dsp → src/wasm/fls_dsp.wasm, loaded by dsp.js); these
+//   JavaScript versions are the reference and the fallback.
 //   Everything here is OFFLINE: given a source AudioBuffer and a stretch ratio,
 //   we render a brand-new AudioBuffer that is longer/shorter in time but keeps
 //   the original pitch. The caller then plays that buffer with a normal
@@ -18,7 +20,21 @@
 //   ratio < 1 = faster/shorter. Pitch is preserved for every mode except
 //   repitch.
 
+import { wasmWsola, wasmGranular, wasmDetectBpm } from './dsp.js'
+
 export const WARP_MODES = ['repitch', 'beats', 'tones', 'complex', 'texture']
+
+function channelsOf(buffer) {
+  const out = []
+  for (let c = 0; c < buffer.numberOfChannels; c++) out.push(buffer.getChannelData(c))
+  return out
+}
+
+function toBuffer(ctx, chans, sr) {
+  const buf = ctx.createBuffer(chans.length, chans[0].length, sr)
+  chans.forEach((d, c) => buf.copyToChannel(d, c))
+  return buf
+}
 
 // ── Window ───────────────────────────────────────────────────────────────────
 function hann(n) {
@@ -45,6 +61,10 @@ function mixdownMono(channels, len) {
 //   with the natural continuation of the previously placed frame — this keeps
 //   phase coherent and avoids the "robotic" artefacts of plain OLA.
 function wsola(ctx, buffer, ratio, { frame, overlap, tol }) {
+  // Rust/WebAssembly implementation when loaded (same algorithm, much faster).
+  const fast = wasmWsola(channelsOf(buffer), buffer.length, ratio, frame, overlap, tol)
+  if (fast) return toBuffer(ctx, fast, buffer.sampleRate)
+
   const sr   = buffer.sampleRate
   const nCh  = buffer.numberOfChannels
   const inLen = buffer.length
@@ -115,6 +135,9 @@ function wsola(ctx, buffer, ratio, { frame, overlap, tol }) {
 
 // ─── Granular smear (texture mode) ───────────────────────────────────────────
 function granular(ctx, buffer, ratio, { grain, jitter }) {
+  const fast = wasmGranular(channelsOf(buffer), buffer.length, ratio, grain, jitter * buffer.sampleRate)
+  if (fast) return toBuffer(ctx, fast, buffer.sampleRate)
+
   const sr    = buffer.sampleRate
   const nCh   = buffer.numberOfChannels
   const inLen = buffer.length
@@ -182,6 +205,8 @@ export function timeStretch(ctx, buffer, ratio, mode = 'complex') {
 //   strongest periodicity. Octave-folds the result into a musical range.
 export function detectBpm(buffer, { minBpm = 70, maxBpm = 180 } = {}) {
   if (!buffer) return null
+  const fast = wasmDetectBpm(channelsOf(buffer), buffer.length, buffer.sampleRate, minBpm, maxBpm)
+  if (fast !== undefined) return fast
   const sr   = buffer.sampleRate
   const len  = buffer.length
   const nCh  = buffer.numberOfChannels

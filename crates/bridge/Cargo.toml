@@ -1,0 +1,22 @@
+[package]
+name = "fls-bridge"
+description = "32-bit helper process that hosts one 32-bit VST2 plugin for the 64-bit desktop app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "FreakyLoopsVstBridge"
+path = "src/main.rs"
+
+[dependencies]
+fls-native = { path = "../native" }
+serde_json.workspace = true
+base64.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }

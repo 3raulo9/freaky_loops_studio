@@ -121,14 +121,14 @@ onBeforeUnmount(() => {
 .tb-ctrl-label {
   font-family: 'Rajdhani', sans-serif;
   font-size: 8px; font-weight: 700; letter-spacing: 0.18em;
-  color: #28283c; text-transform: uppercase; line-height: 1;
+  color: var(--text-muted); text-transform: uppercase; line-height: 1;
 }
 .tb-metro-btn {
   position: relative;
   width: 30px; height: 26px;
   display: flex; align-items: center; justify-content: center;
   border: 1px solid var(--border-subtle); border-radius: 5px;
-  background: transparent; color: #35354a; cursor: pointer;
+  background: transparent; color: var(--text-muted); cursor: pointer;
   transition: all 0.1s; outline: none;
 }
 .tb-metro-btn:hover { border-color: #404068; color: #8080b0; }

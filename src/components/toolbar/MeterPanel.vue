@@ -298,7 +298,7 @@ onBeforeUnmount(() => {
 .sm-row { display: flex; align-items: center; gap: 5px; line-height: 1.15; }
 .sm-lbl {
   font-family: 'Rajdhani', sans-serif; font-size: 7px; font-weight: 700;
-  letter-spacing: 0.14em; color: #2a2a40; width: 20px; flex-shrink: 0;
+  letter-spacing: 0.14em; color: var(--text-muted); width: 20px; flex-shrink: 0;
 }
 .sm-val {
   font-family: 'Share Tech Mono', monospace; font-size: 11px; color: #6a6a98;
@@ -308,7 +308,7 @@ onBeforeUnmount(() => {
 .sm-vox { color: #9b59b6; min-width: 22px; }
 .sm-under {
   font-family: 'Share Tech Mono', monospace; font-size: 8px;
-  color: #33334a; padding: 0 3px; border-radius: 3px;
+  color: var(--text-muted); padding: 0 3px; border-radius: 3px;
   border: 1px solid var(--border-subtle); margin-left: auto;
   transition: background 0.5s ease, color 0.5s ease, border-color 0.5s ease;
 }
@@ -327,7 +327,7 @@ onBeforeUnmount(() => {
 .scope-menu-title {
   padding: 4px 9px 4px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.16em; color: #5a5a80;
+  letter-spacing: 0.16em; color: var(--text-muted);
 }
 .scope-menu-item {
   display: flex; align-items: center; gap: 7px;

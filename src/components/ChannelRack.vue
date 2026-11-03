@@ -81,6 +81,9 @@
       <div class="op-item" @click="addWasmChannel(); closeAllMenus()">
         <span class="op-dot" style="background:#7b2fff"/>⬡ WASM Plugin
       </div>
+      <div v-if="isDesktop" class="op-item" @click="addVstPlugin(); closeAllMenus()">
+        <span class="op-dot" style="background:#1abc9c"/>⬡ VST Plugin (.dll)
+      </div>
       <div class="op-item" @click="addChopChannel(); closeAllMenus()">
         <span class="op-dot" style="background:#e67e22"/>⚡ CHOP Slicer
       </div>
@@ -356,13 +359,15 @@
         <!-- ── Normal view ───────────────────────────────────────── -->
         <template v-else>
           <!-- Pan knob -->
-          <div class="rack-knob-wrap" :title="`Pan: ${Math.round(ch.pan * 100)}%`">
+          <div class="rack-knob-wrap" :title="`Pan: ${Math.round(ch.pan * 100)}% — right-click: create automation clip`"
+            @contextmenu.prevent.stop="createAutomationClipFor(ch.id, 'pan')">
             <Knob v-model="ch.pan" :min="-1" :max="1" :decimals="2"
               label="" :color="ch.color" :size="24" />
           </div>
 
           <!-- Vol knob -->
-          <div class="rack-knob-wrap" :title="`Volume: ${Math.round(ch.volume * 100)}%`">
+          <div class="rack-knob-wrap" :title="`Volume: ${Math.round(ch.volume * 100)}% — right-click: create automation clip`"
+            @contextmenu.prevent.stop="createAutomationClipFor(ch.id, 'volume')">
             <Knob v-model="ch.volume" :min="0" :max="1.25" :decimals="2"
               label="" :color="ch.color" :size="24" />
           </div>
@@ -413,7 +418,7 @@
                    behind them as a label / empty-state. -->
               <div v-if="!isMultiBarChannel(ch)"
                 class="mini-pr" :style="{ '--cols': totalSteps }"
-                @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
+                @click="openPianoRoll(ch)" title="Click to open Piano Roll">
                 <div v-for="s in totalSteps" :key="s-1" class="mini-pr-col"
                   :class="{
                     playing: isPlaying && displayStep === s-1,
@@ -431,7 +436,7 @@
                    the window pages with playback (see miniWindowStartBar). -->
               <div v-else
                 class="mini-pr mini-pr-wide"
-                @click="openOrSelectChannel(ch)" title="Click to open Piano Roll">
+                @click="openPianoRoll(ch)" title="Click to open Piano Roll">
                 <!-- Playhead lives outside v-memo so it updates every tick without re-rendering notes.
                      Positioned relative to the visible 4-bar window so it tracks the audible part. -->
                 <div v-if="isPlaying && displayStep >= 0"
@@ -528,6 +533,8 @@
       <div class="ctx-item" @click="ctxAction('rename-color')">Rename, color and icon…</div>
       <div class="ctx-item" @click="ctxAction('rename')">Rename</div>
       <div class="ctx-item" @click="ctxAction('clone')">Clone</div>
+      <div class="ctx-item" @click="ctxAction('bounce')"
+        v-hint="'Render this channel (with its effects) to audio in a new sampler, and mute the original.'">Bounce to audio (freeze)</div>
       <div class="ctx-item" @click="ctxAction('clear')">Clear Pattern</div>
       <template v-if="ctxMenu.channel?.mode === 'steps'">
         <div class="ctx-sep"/>
@@ -743,6 +750,7 @@
 import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useStudio, FM_PRESETS, TICKS_PER_STEP } from '../store/studio.js'
 import { getAsset } from '../browserLibrary.js'
+import { isDesktop } from '../desktop/ipc.js'
 import Knob from './Knob.vue'
 
 const {
@@ -750,7 +758,7 @@ const {
   pianoRollOpen, kbOctave,
   patterns, currentPatternId, getSteps, getPianoNotes,
   addPattern, removePattern, duplicatePattern,
-  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, addGMChannel, addWasmChannel, addCustomSynthChannel, addSubterraChannel, removeChannel, moveChannel, setChannelMode,
+  toggleStep, soloChannel, clearChannel, addChannel, addFMChannel, addGMChannel, addWasmChannel, addVstPlugin, openVstEditor, addCustomSynthChannel, addSubterraChannel, removeChannel, moveChannel, setChannelMode,
   GM_CATEGORIES, GM_CAT_COLORS, GM_INSTRUMENTS,
   channelGroups, addGroup, removeGroup, renameGroup, assignChannelsToGroup,
   graphEditorOpen, graphParam,
@@ -768,7 +776,7 @@ const {
   addAudioFileChannel, loadAudioFileForChannel,
   addChopChannel, addForgeChannel,
   instrumentDrag, startInstrumentDrag,
-  pushUndo,
+  pushUndo, createAutomationClipFor, bounceChannelToSampler,
 } = useStudio()
 
 // Local MIDI-tick constant (matches store's TICKS_PER_STEP = 120)
@@ -1201,7 +1209,16 @@ function applyGradient() {
 // ── Piano roll open/select ────────────────────────────────────────────────────
 function openOrSelectChannel(ch) {
   selectedChannelId.value = ch.id
+  if (ch.type === 'vst') { openVstEditor(ch.id); return }
   if (ch.mode === 'piano') pianoRollOpen.value = true
+}
+
+// Always open the piano roll, for every channel type (incl. VST) — used by the
+// mini piano-roll preview to the right of the name box.
+function openPianoRoll(ch) {
+  selectedChannelId.value = ch.id
+  if (ch.mode !== 'piano') setChannelMode(ch.id, 'piano')
+  pianoRollOpen.value = true
 }
 
 // ── Mini piano-roll preview helpers ──────────────────────────────────────────
@@ -1536,6 +1553,7 @@ function ctxAction(action) {
   if (action === 'rename')       startRename(ch)
   if (action === 'rename-color') startRenameColor(ch)
   if (action === 'clone')        cloneChannel(ch.id)
+  if (action === 'bounce')       bounceChannelToSampler(ch.id).then(r => { if (r?.error) alert(r.error) })
   if (action === 'clear')        clearChannel(ch.id)
   if (action === 'move-up')      moveChannel(ch.id, -1)
   if (action === 'move-down')    moveChannel(ch.id, +1)
@@ -1723,7 +1741,7 @@ function commitRename() {
 .op-section {
   padding: 6px 14px 3px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.18em; color: #303050; text-transform: uppercase;
+  letter-spacing: 0.18em; color: var(--text-muted); text-transform: uppercase;
 }
 .op-item {
   display: flex; align-items: center; gap: 8px;
@@ -1739,7 +1757,7 @@ function commitRename() {
 .op-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .op-kb {
   margin-left: auto; font-family: 'Share Tech Mono', monospace;
-  font-size: 9px; color: #353548; letter-spacing: 0;
+  font-size: 9px; color: var(--text-muted); letter-spacing: 0;
 }
 .op-sep { height: 1px; background: var(--border-subtle); margin: 3px 0; }
 
@@ -1775,7 +1793,7 @@ function commitRename() {
 .options-btn:hover { border-color: #4a4a6a; color: #b0b0d0; }
 .rack-title {
   font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
-  letter-spacing: 0.18em; color: #40405a; text-transform: uppercase;
+  letter-spacing: 0.18em; color: var(--text-muted); text-transform: uppercase;
   flex-shrink: 0;
 }
 
@@ -1803,10 +1821,10 @@ function commitRename() {
 }
 .df-item:hover { background: var(--bg-hover); color: var(--text-primary); }
 .df-item.active { color: #c0c0ee; }
-.df-item.df-group { padding-left: 20px; color: #5a5a80; }
+.df-item.df-group { padding-left: 20px; color: var(--text-muted); }
 .df-item.df-group:hover { color: #d0d0ee; }
 .df-item.df-group.active { color: #4ecdc4; }
-.df-item.df-add { color: #3a3a5a; }
+.df-item.df-add { color: var(--text-muted); }
 .df-item.df-add:hover { color: #4ecdc4; }
 .df-sep { height: 1px; background: var(--border-subtle); margin: 2px 0; }
 
@@ -1822,7 +1840,7 @@ function commitRename() {
 
 .rack-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .kb-badge {
-  font-family: 'Share Tech Mono', monospace; font-size: 10px; color: #30304a;
+  font-family: 'Share Tech Mono', monospace; font-size: 10px; color: var(--text-muted);
 }
 .add-synth-wrap { position: relative; }
 .add-ch-btn {
@@ -1869,7 +1887,7 @@ function commitRename() {
 .synth-pick-hint {
   padding: 3px 10px 6px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 500;
-  letter-spacing: 0.06em; color: #44445a; line-height: 1.4;
+  letter-spacing: 0.06em; color: var(--text-muted); line-height: 1.4;
 }
 .synth-picker {
   position: fixed; z-index: 100000;
@@ -1881,7 +1899,7 @@ function commitRename() {
 .synth-pick-section {
   padding: 5px 14px 3px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.18em; color: #303048; text-transform: uppercase;
+  letter-spacing: 0.18em; color: var(--text-muted); text-transform: uppercase;
 }
 .synth-pick-item {
   display: flex; align-items: center; gap: 8px; padding: 6px 14px;
@@ -1908,12 +1926,12 @@ function commitRename() {
 }
 .col-headers > div {
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.15em; color: #252540; text-transform: uppercase;
+  letter-spacing: 0.15em; color: var(--text-muted); text-transform: uppercase;
   display: flex; align-items: center; justify-content: center;
 }
 .col-name { justify-content: flex-start; padding-left: 6px; }
 .col-seq  { justify-content: flex-start; padding-left: 8px; }
-.steps-label { color: #303050; font-weight: 400; margin-left: 4px; }
+.steps-label { color: var(--text-muted); font-weight: 400; margin-left: 4px; }
 
 /* ── Channel list ────────────────────────────────────────────────── */
 .channel-list { flex: 1; overflow-y: auto; }
@@ -1975,7 +1993,7 @@ function commitRename() {
 .zip-ch-btn:hover { filter: brightness(1.12); }
 .unzip-btn {
   width: 16px; height: 16px; border-radius: 3px; border: 1px solid var(--border);
-  background: transparent; color: #404058; font-size: 8px;
+  background: transparent; color: var(--text-muted); font-size: 8px;
   cursor: pointer; display: flex; align-items: center; justify-content: center;
   flex-shrink: 0; transition: all 0.1s;
 }
@@ -2111,9 +2129,9 @@ function commitRename() {
   position: absolute; inset: 0;
   display: flex; align-items: center; justify-content: center;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.15em; color: #252540; pointer-events: none;
+  letter-spacing: 0.15em; color: var(--text-muted); pointer-events: none;
 }
-.mini-pr:hover .mini-pr-hint { color: #4a4a6a; }
+.mini-pr:hover .mini-pr-hint { color: var(--text-muted); }
 
 /* ── Multi-bar panoramic mini-pr ─────────────────────────────── */
 .mini-pr-wide {
@@ -2170,7 +2188,7 @@ function commitRename() {
 .ge-tab.active { border-color: var(--accent); color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .ge-tabs-right { margin-left: auto; }
 .ge-hint {
-  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #252540; letter-spacing: 0;
+  font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--text-muted); letter-spacing: 0;
 }
 
 .ge-chart {
@@ -2210,7 +2228,7 @@ function commitRename() {
 /* ── Empty state ─────────────────────────────────────────────────── */
 .empty-state {
   padding: 20px; text-align: center;
-  font-family: 'Rajdhani', sans-serif; font-size: 12px; color: #303048;
+  font-family: 'Rajdhani', sans-serif; font-size: 12px; color: var(--text-muted);
 }
 
 /* ── Context menu ────────────────────────────────────────────────── */
@@ -2302,7 +2320,7 @@ function commitRename() {
 .ctx-section-label {
   padding: 4px 14px 2px;
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
-  letter-spacing: 0.14em; color: #555575; text-transform: uppercase;
+  letter-spacing: 0.14em; color: var(--text-muted); text-transform: uppercase;
   pointer-events: none;
 }
 

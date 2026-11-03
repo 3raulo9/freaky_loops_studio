@@ -124,7 +124,7 @@ onBeforeUnmount(() => {
 }
 .tb-timecode-mode {
   font-family: 'Rajdhani', sans-serif; font-size: 7px; font-weight: 700;
-  letter-spacing: 0.18em; color: #2a2a40; text-transform: uppercase;
+  letter-spacing: 0.18em; color: var(--text-muted); text-transform: uppercase;
 }
 
 /* ── Mode menu ───────────────────────────────────────────────────────────────── */
@@ -136,7 +136,7 @@ onBeforeUnmount(() => {
 .tc-menu-title {
   padding: 4px 9px 5px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.18em; color: #5a5a80; border-bottom: 1px solid var(--border-subtle);
+  letter-spacing: 0.18em; color: var(--text-muted); border-bottom: 1px solid var(--border-subtle);
 }
 .tc-menu-item {
   display: flex; align-items: center; gap: 7px; padding: 6px 10px;

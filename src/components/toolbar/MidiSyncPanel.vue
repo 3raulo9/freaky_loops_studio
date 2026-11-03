@@ -115,7 +115,7 @@ onBeforeUnmount(() => {
 }
 .tb-ctrl-label {
   font-family: 'Rajdhani', sans-serif; font-size: 7px; font-weight: 700;
-  letter-spacing: 0.16em; color: #28283c; text-transform: uppercase;
+  letter-spacing: 0.16em; color: var(--text-muted); text-transform: uppercase;
 }
 .tb-midi-row {
   display: flex; align-items: center; gap: 5px;
@@ -148,7 +148,7 @@ onBeforeUnmount(() => {
 .midi-menu-sub {
   padding: 6px 9px 2px;
   font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
-  letter-spacing: 0.14em; color: #40405a;
+  letter-spacing: 0.14em; color: var(--text-muted);
 }
 .midi-menu-note {
   padding: 5px 9px;
@@ -170,7 +170,7 @@ onBeforeUnmount(() => {
 .midi-link-dot { width: 7px; height: 7px; border-radius: 50%; background: #f39c12; flex-shrink: 0; }
 .midi-link-dot.global { background: #3498db; }
 .midi-link-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.midi-link-cc { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #50506e; }
+.midi-link-cc { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted); }
 .midi-link-btn {
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
   padding: 1px 5px; border-radius: 3px;

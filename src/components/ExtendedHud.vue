@@ -120,7 +120,7 @@ onBeforeUnmount(() => {
 }
 .ehud-close {
   position: absolute; top: 6px; right: 8px;
-  background: transparent; border: none; color: #50506e;
+  background: transparent; border: none; color: var(--text-muted);
   font-size: 12px; cursor: pointer; line-height: 1;
 }
 .ehud-close:hover { color: #e74c3c; }

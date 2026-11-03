@@ -1,0 +1,9 @@
+[package]
+name = "fls-projfile"
+description = "Reader for .flp pattern-project files: turns the binary event stream into a plain project description (JSON) the UI maps onto its own model."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib"]

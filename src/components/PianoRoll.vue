@@ -3,7 +3,7 @@
     @mouseenter="prFocused = true"
     @mouseleave="prFocused = false"
     @wheel="onWheel"
-    @click="rulerCtx = null">
+    @click="rulerCtx = null; toolsMenuOpen = false">
 
     <!-- ── Channel selector title bar ─────────────────────────────────── -->
     <div class="pr-title-bar">
@@ -69,6 +69,33 @@
         title="Slide mode (S)" @click="toggleSlideMode('slide')">&#x27CB;</button>
       <button class="pr-tool" :class="{ active: slideMode === 'porta' }"
         title="Portamento mode (O)" @click="toggleSlideMode('porta')">&#x24C2;</button>
+
+      <div class="pr-sep" />
+
+      <!-- Stamp: drawing a note places a whole chord -->
+      <select class="pr-sel pr-stamp" :class="{ on: stamp !== 'off' }" v-model="stamp"
+        v-hint="'Stamp: each note you draw becomes this chord. In-scale chords follow the piano roll scale (or C major).'">
+        <option value="off">STAMP: off</option>
+        <optgroup label="In scale">
+          <option v-for="(d, k) in DIATONIC_CHORDS" :key="k" :value="k">{{ d.label }}</option>
+        </optgroup>
+        <optgroup label="Fixed">
+          <option v-for="(c, k) in CHORD_TYPES" :key="k" :value="k">{{ c.label }}</option>
+        </optgroup>
+      </select>
+
+      <!-- Batch tools (act on the selection, or every note when none is selected) -->
+      <div class="pr-tools-menu" @click.stop>
+        <button class="pr-tools-btn" :class="{ open: toolsMenuOpen }"
+          v-hint="'Note tools: quantize, humanize, strum, arpeggiate, chop, chords, chance, flip — on the selection or all notes'"
+          @click="toolsMenuOpen = !toolsMenuOpen">TOOLS ▾</button>
+        <div v-if="toolsMenuOpen" class="pr-tools-drop">
+          <template v-for="(t, i) in TOOL_DEFS" :key="i">
+            <div v-if="t.sep" class="pr-tools-sep" />
+            <div v-else class="pr-tools-item" @click="openTool(t)">{{ t.label }}</div>
+          </template>
+        </div>
+      </div>
 
       <div class="pr-sep" />
 
@@ -267,7 +294,7 @@
             <!-- Active channel notes -->
             <div v-for="{ note, idx } in visibleNotesWithIdx" :key="'n' + idx"
               class="pr-note"
-              :class="{ selected: selectedNotes.has(idx), muted: note.muted,
+              :class="{ selected: selectedNotes.has(idx), muted: note.muted, chance: note.chance < 1,
                         slide: note.slideType === 'slide', porta: note.slideType === 'porta' }"
               :style="noteStyle(note)"
               @mousedown.prevent.stop="onNoteDown($event, idx)"
@@ -357,6 +384,36 @@
       </div>
     </div>
 
+    <!-- ── Tool dialog ──────────────────────────────────────────────────── -->
+    <div v-if="toolDialog" class="pr-nprops-overlay" @click.self="toolDialog = null">
+      <div class="pr-nprops pr-tooldlg">
+        <div class="pr-nprops-hdr">
+          <span>{{ toolDialog.def.label.replace('…', '') }} — {{ selectedNotes.size || currentNotes.length }} notes</span>
+          <button class="pr-nprops-close" @click="toolDialog = null">×</button>
+        </div>
+        <div v-for="p in toolDialog.def.params" :key="p.key" class="pr-tool-row">
+          <label>{{ p.label }}</label>
+          <select v-if="p.type === 'grid'" v-model.number="toolDialog.opts[p.key]" class="pr-sel">
+            <option v-for="g in GRID_OPTIONS" :key="g.v" :value="g.v">{{ g.l }}</option>
+          </select>
+          <select v-else-if="p.type === 'select'" v-model="toolDialog.opts[p.key]" class="pr-sel">
+            <option v-for="(lbl, v) in p.options" :key="v" :value="v">{{ lbl }}</option>
+          </select>
+          <input v-else-if="p.type === 'bool'" type="checkbox" v-model="toolDialog.opts[p.key]" />
+          <template v-else>
+            <input type="range" class="pr-tool-range"
+              :min="p.type === 'pct' ? 0 : p.min" :max="p.type === 'pct' ? 1 : p.max" :step="p.type === 'pct' ? 0.01 : p.step"
+              v-model.number="toolDialog.opts[p.key]" />
+            <span class="pr-tool-val">{{ p.type === 'pct' ? Math.round(toolDialog.opts[p.key] * 100) + '%' : toolDialog.opts[p.key] }}</span>
+          </template>
+        </div>
+        <div class="pr-nprops-btns">
+          <button class="pr-nprops-btn" @click="toolDialog = null">Cancel</button>
+          <button class="pr-nprops-btn pr-nprops-accept" @click="applyTool(toolDialog.def, toolDialog.opts); toolDialog = null">Apply</button>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Note Properties Dialog ───────────────────────────────────────── -->
     <div v-if="notePropsDialog" class="pr-nprops-overlay" @click.self="notePropsDialog = null">
       <div class="pr-nprops">
@@ -374,6 +431,7 @@
             { key: 'modX',      label: 'MOD X', min: 0,  max: 1,   step: 0.01, fmt: v => Math.round(v * 100) },
             { key: 'modY',      label: 'MOD Y', min: 0,  max: 1,   step: 0.01, fmt: v => Math.round(v * 100) },
             { key: 'finePitch', label: 'PITCH', min: -100,max: 100,step: 1,    fmt: v => v },
+            { key: 'chance',    label: 'CHANCE', min: 0, max: 1,   step: 0.01, fmt: v => Math.round(v * 100) + '%' },
           ]" :key="k.key" class="pr-knob-col">
             <input type="range" :min="k.min" :max="k.max" :step="k.step"
               v-model.number="notePropsDialog.edit[k.key]" class="pr-knob-range" />
@@ -458,11 +516,13 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick, toRaw } from 'vue'
 import {
   useStudio, PIANO_KEYS, isBlackKey, midiToLabel,
   SCALE_DEFS, NOTE_NAMES,
 } from '../store/studio.js'
+import { TOOL_DEFS, runTool } from './pianoRollTools.js'
+import { CHORD_TYPES, DIATONIC_CHORDS, chordOffsets } from '../noteFx.js'
 
 const props = defineProps({ ch: { type: Object, required: true } })
 
@@ -508,6 +568,7 @@ const CTRL_OPTIONS = [
     { key: 'modX',      label: 'Note filter cutoff' },
     { key: 'modY',      label: 'Note filter resonance' },
     { key: 'finePitch', label: 'Note fine pitch' },
+    { key: 'chance',    label: 'Note chance' },
   ]},
   { group: 'Channel controls', items: [
     { key: 'ch-pan',   label: 'Channel panning' },
@@ -537,6 +598,13 @@ const timeMarkers = ref([])            // [{ id, tick, label }]
 const clipboardNotes = ref([])
 const copyHint    = ref('')            // transient "Copied N notes" confirmation
 const sliceLine   = ref(null)          // { x } while slice drag active
+const toolsMenuOpen = ref(false)
+const stamp       = ref('off')         // chord stamp for the draw tool
+const toolDialog  = ref(null)          // { def, opts } while a tool's dialog is open
+const GRID_OPTIONS = [
+  { v: 30, l: '1/64' }, { v: 60, l: '1/32' }, { v: 80, l: '1/16 T' }, { v: 120, l: '1/16' },
+  { v: 160, l: '1/8 T' }, { v: 240, l: '1/8' }, { v: 480, l: '1/4' }, { v: 960, l: '1/2' }, { v: 1920, l: '1 bar' },
+]
 
 let copyHintTimer = null
 function flashCopyHint(msg) {
@@ -761,6 +829,36 @@ function quickQuantize() {
   targets.forEach(n => { n.startTick = snapTick(n.startTick) })
 }
 
+// ── Batch tools (Tools menu) ───────────────────────────────────────────────────
+function openTool(def) {
+  toolsMenuOpen.value = false
+  if (!def.params?.length) { applyTool(def, {}); return }
+  const opts = {}
+  for (const p of def.params) opts[p.key] = p.type === 'grid' ? snapTicks.value : p.def
+  toolDialog.value = { def, opts }
+}
+
+// Runs a tool on the selection (or every note) as one undo step, then keeps
+// the result selected so tools can be chained.
+function applyTool(def, opts) {
+  const notes = getPatData(targetChId.value).pianoNotes
+  const targets = selectedNotes.value.size > 0
+    ? [...selectedNotes.value].map(i => notes[i]).filter(Boolean)
+    : [...notes]
+  if (!targets.length) return
+  pushUndo()
+  const scale = { tonic: snapScale.tonic ?? 0, intervals: scaleIntervals.value }
+  const { remove, add } = runTool(def.id, targets, { ...opts }, scale)
+  const gone = new Set(remove.map(n => toRaw(n)))
+  if (gone.size) notes.splice(0, notes.length, ...notes.filter(n => !gone.has(toRaw(n))))
+  notes.push(...add)
+  const result = new Set([...targets.map(n => toRaw(n)).filter(n => !gone.has(n)), ...add])
+  const sel = new Set()
+  notes.forEach((n, i) => { if (result.has(toRaw(n))) sel.add(i) })
+  selectedNotes.value = sel
+  flashCopyHint(`${def.label.replace('…', '')} → ${sel.size} notes`)
+}
+
 // ── Note Properties Dialog ─────────────────────────────────────────────────────
 function openNoteProps(idx) {
   const notes = currentNotes.value
@@ -773,6 +871,7 @@ function openNoteProps(idx) {
     modX:       note.modX       ?? 0.5,
     modY:       note.modY       ?? 0.5,
     finePitch:  note.finePitch  ?? 0,
+    chance:     note.chance     ?? 1,
     slideType:  note.slideType  ?? 'none',
     colorGroup: note.colorGroup ?? 0,
     startTick:  note.startTick,
@@ -795,6 +894,7 @@ function applyNoteProps() {
       modX:       dlg.edit.modX,
       modY:       dlg.edit.modY,
       finePitch:  dlg.edit.finePitch,
+      chance:     dlg.edit.chance < 1 ? dlg.edit.chance : undefined,
       slideType:  dlg.edit.slideType,
       colorGroup: dlg.edit.colorGroup,
     })
@@ -985,6 +1085,8 @@ function noteStyle(note) {
     height: (ROW_H - 1) + 'px',
     background: color,
     borderColor: note.muted ? '#333348' : `color-mix(in srgb, ${color} 55%, #000)`,
+    // Notes that only sometimes play fade with their chance.
+    ...(note.chance < 1 ? { opacity: 0.35 + 0.65 * note.chance } : {}),
   }
 }
 
@@ -1026,6 +1128,10 @@ function ctrlBarStyle(note) {
   if (ctrlTarget.value === 'modY') {
     const v = note.modY ?? 0.5
     return { ...base, bottom: 0, height: (v * 100) + '%', background: '#d148e8' }
+  }
+  if (ctrlTarget.value === 'chance') {
+    const v = note.chance ?? 1
+    return { ...base, bottom: 0, height: (v * 100) + '%', background: '#9ae83c' }
   }
   if (ctrlTarget.value === 'finePitch') {
     const p = (note.finePitch ?? 0) / 100
@@ -1294,8 +1400,20 @@ function onGridDown(e) {
   if (noteColorGroup.value > 0) newNote.colorGroup = noteColorGroup.value
   notes.push(newNote)
   playNote(targetCh.value, pitch, false)
+  // Stamp: add the rest of the chord on top of the drawn note.
+  const chordIdx = []
+  if (stamp.value !== 'off') {
+    const intervals = snapScale.enabled ? scaleIntervals.value : SCALE_DEFS.major
+    const root = snapScale.enabled ? snapScale.tonic : 0
+    for (const off of chordOffsets(stamp.value, pitch, { root, intervals }).slice(1)) {
+      if (pitch + off > 127) continue
+      notes.push({ ...newNote, pitch: pitch + off })
+      chordIdx.push(notes.length - 1)
+      playNote(targetCh.value, pitch + off, false)
+    }
+  }
   drag = {
-    type: 'create', noteIdx: notes.length - 1,
+    type: 'create', noteIdx: notes.length - 1 - chordIdx.length, chordIdx,
     startClientX: e.clientX, origDurationTicks: snapTicks.value,
   }
 }
@@ -1438,6 +1556,8 @@ function onWindowMouseMove(e) {
     note.durationTicks = alt
       ? Math.max(1, drag.origDurationTicks + dTicks)
       : Math.max(snapTicks.value, snapTick(drag.origDurationTicks + dTicks))
+    // Stamped chord tones stretch with the note being drawn.
+    for (const i of drag.chordIdx ?? []) if (notes[i]) notes[i].durationTicks = note.durationTicks
     return
   }
 
@@ -1546,6 +1666,11 @@ function applyCtrlEdit(e) {
   else if (ctrlTarget.value === 'modX')      notes[best].modX     = clamp01(relY)
   else if (ctrlTarget.value === 'modY')      notes[best].modY     = clamp01(relY)
   else if (ctrlTarget.value === 'finePitch') notes[best].finePitch = Math.round(clamp11((relY - 0.5) * 2) * 100)
+  else if (ctrlTarget.value === 'chance') {
+    const c = Math.round(Math.max(0, Math.min(1, relY)) * 100) / 100
+    if (c >= 0.99) delete notes[best].chance
+    else notes[best].chance = c
+  }
 }
 
 // ── Keyboard shortcuts ─────────────────────────────────────────────────────────
@@ -1757,11 +1882,11 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--border-subtle); flex-shrink: 0; min-height: 24px;
 }
 .pr-title-text {
-  font-size: 9px; font-weight: 700; letter-spacing: 0.18em; color: #252540;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.18em; color: var(--text-muted);
   text-transform: uppercase; flex-shrink: 0;
 }
 .pr-title-info {
-  margin-left: auto; font-size: 8px; color: #25254a; letter-spacing: 0;
+  margin-left: auto; font-size: 8px; color: var(--text-muted); letter-spacing: 0;
 }
 .pr-title-info.pr-flash {
   color: var(--accent, #45c076); font-weight: bold;
@@ -1776,7 +1901,7 @@ onUnmounted(() => {
 .pr-ch-sel:hover { border-color: #4a4a6a; }
 .pr-ch-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
 .pr-ch-name { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; color: #b0b0d0; }
-.pr-ch-caret { font-size: 8px; color: #50506a; }
+.pr-ch-caret { font-size: 8px; color: var(--text-muted); }
 .pr-ch-drop {
   position: absolute; top: calc(100% + 3px); left: 0; z-index: 200;
   background: var(--bg-panel); border: 1px solid var(--border); border-radius: 5px;
@@ -1796,7 +1921,7 @@ onUnmounted(() => {
 .pr-ghost-btn {
   font-size: 8px; font-weight: 700; letter-spacing: 0.12em;
   padding: 2px 7px; border: 1px solid var(--border-subtle); border-radius: 3px;
-  background: transparent; color: #28283a; cursor: pointer; transition: all 0.1s;
+  background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.1s;
 }
 .pr-ghost-btn.on { border-color: #4ecdc444; color: #4ecdc488; background: #041614; }
 .pr-ghost-btn:hover { border-color: #3a3a5a; color: #6060a0; }
@@ -1818,7 +1943,7 @@ onUnmounted(() => {
 .pr-tool:hover  { border-color: #4a4a6a; color: #b0b0d0; }
 .pr-tool.active { border-color: #4ecdc4; color: #4ecdc4; background: #041614; }
 .pr-sep { width: 1px; height: 18px; background: var(--border-subtle); margin: 0 2px; flex-shrink: 0; }
-.pr-lbl { font-size: 9px; font-weight: 700; letter-spacing: 0.14em; color: #333348; white-space: nowrap; }
+.pr-lbl { font-size: 9px; font-weight: 700; letter-spacing: 0.14em; color: var(--text-muted); white-space: nowrap; }
 .pr-sel {
   background: var(--bg-control); border: 1px solid var(--border-subtle); color: var(--text-muted);
   font-family: 'Share Tech Mono', monospace; font-size: 9px;
@@ -1827,7 +1952,7 @@ onUnmounted(() => {
 .pr-sel:focus { border-color: #4ecdc4; }
 .pr-zbtn {
   width: 18px; height: 18px; border-radius: 3px; border: 1px solid var(--border);
-  background: transparent; color: #50506a; font-size: 14px; cursor: pointer;
+  background: transparent; color: var(--text-muted); font-size: 14px; cursor: pointer;
   display: flex; align-items: center; justify-content: center; padding: 0; line-height: 1;
   transition: all 0.1s;
 }
@@ -1838,7 +1963,7 @@ onUnmounted(() => {
 .pr-scale-toggle input { display: none; }
 .pr-scale-toggle span {
   font-size: 9px; font-weight: 700; letter-spacing: 0.15em;
-  color: #222234; padding: 2px 5px; border: 1px solid #1a1a2c; border-radius: 3px; transition: all 0.1s;
+  color: var(--text-muted); padding: 2px 5px; border: 1px solid #1a1a2c; border-radius: 3px; transition: all 0.1s;
 }
 .pr-scale-toggle.on span { color: #1abc9c; border-color: #1abc9c; background: #001a14; }
 .pr-scale-chips { display: flex; gap: 2px; }
@@ -1877,7 +2002,7 @@ onUnmounted(() => {
 .pr-key.scale-root   { background: #1abc9c !important; }
 .pr-key.active       { background: #b0cfe8 !important; }
 .pr-key.black.active { background: #3a6080 !important; }
-.pr-key-lbl { font-size: 7px; color: #555; line-height: 1; }
+.pr-key-lbl { font-size: 7px; color: var(--text-muted); line-height: 1; }
 .pr-key.black .pr-key-lbl { color: #aaa; }
 .pr-key.scale-root .pr-key-lbl { color: #fff; }
 
@@ -2007,7 +2132,7 @@ onUnmounted(() => {
   color: #9090c0; cursor: pointer; transition: background 0.07s;
 }
 .pr-ctx-item:hover { background: var(--bg-hover); color: var(--text-primary); }
-.pr-ctx-cancel { color: #50506a; border-top: 1px solid var(--border-subtle); margin-top: 3px; }
+.pr-ctx-cancel { color: var(--text-muted); border-top: 1px solid var(--border-subtle); margin-top: 3px; }
 
 /* ── Control pane ──────────────────────────────────────────────────────────── */
 .pr-ctrl-outer {
@@ -2055,7 +2180,7 @@ onUnmounted(() => {
   padding: 4px 0; min-width: 180px; box-shadow: 0 8px 28px rgba(0,0,0,0.8);
 }
 .pr-ctrl-grp-lbl {
-  font-size: 8px; font-weight: 700; letter-spacing: 0.1em; color: #3a3a5a;
+  font-size: 8px; font-weight: 700; letter-spacing: 0.1em; color: var(--text-muted);
   padding: 4px 10px 2px; text-transform: uppercase;
 }
 .pr-ctrl-item {
@@ -2119,7 +2244,7 @@ onUnmounted(() => {
 }
 .pr-ghost-panel-hdr {
   font-size: 8px; font-weight: 700; letter-spacing: 0.12em;
-  color: #3a3a5a; padding: 4px 12px 3px; text-transform: uppercase;
+  color: var(--text-muted); padding: 4px 12px 3px; text-transform: uppercase;
 }
 .pr-ghost-panel-item {
   display: flex; align-items: center; gap: 6px;
@@ -2169,12 +2294,12 @@ onUnmounted(() => {
   font-size: 11px; font-weight: 700; color: #b0b0d0; letter-spacing: 0.08em;
 }
 .pr-nprops-close {
-  background: transparent; border: none; color: #5a5a7a; font-size: 16px;
+  background: transparent; border: none; color: var(--text-muted); font-size: 16px;
   cursor: pointer; padding: 0 4px; line-height: 1;
 }
 .pr-nprops-close:hover { color: #e74c3c; }
 .pr-nprops-sec-title {
-  font-size: 8px; font-weight: 700; letter-spacing: 0.15em; color: #3a3a5a;
+  font-size: 8px; font-weight: 700; letter-spacing: 0.15em; color: var(--text-muted);
   text-transform: uppercase; padding: 8px 14px 4px;
 }
 .pr-nprops-knobs {
@@ -2189,7 +2314,7 @@ onUnmounted(() => {
   height: 60px; width: 20px;
 }
 .pr-knob-val  { font-size: 9px; color: #b0b0d0; }
-.pr-knob-lbl  { font-size: 7px; color: #50506a; letter-spacing: 0.1em; text-transform: uppercase; }
+.pr-knob-lbl  { font-size: 7px; color: var(--text-muted); letter-spacing: 0.1em; text-transform: uppercase; }
 .pr-nprops-flags {
   display: flex; align-items: center; gap: 6px; padding: 4px 14px 8px; flex-wrap: wrap;
 }
@@ -2204,7 +2329,7 @@ onUnmounted(() => {
 .pr-nprops-color-row {
   display: flex; align-items: center; gap: 4px; margin-left: 8px;
 }
-.pr-nprops-color-lbl { font-size: 8px; color: #50506a; }
+.pr-nprops-color-lbl { font-size: 8px; color: var(--text-muted); }
 .pr-nprops-color-cell {
   width: 12px; height: 12px; border-radius: 2px; cursor: pointer;
   border: 1px solid rgba(255,255,255,0.1);
@@ -2239,11 +2364,44 @@ onUnmounted(() => {
   font-family: 'Share Tech Mono', monospace; max-height: 60vh; overflow-y: auto;
 }
 .pr-ctx-sec {
-  font-size: 8px; font-weight: 700; letter-spacing: 0.12em; color: #2a2a4a;
+  font-size: 8px; font-weight: 700; letter-spacing: 0.12em; color: var(--text-muted);
   padding: 5px 12px 2px; text-transform: uppercase;
 }
 .pr-ctx-div { height: 1px; background: var(--border-subtle); margin: 3px 0; }
 .pr-ctx-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; }
 .pr-ctx-check { display: inline-block; width: 14px; font-size: 9px; color: #4ecdc4; }
-.pr-ctx-cancel { color: #40406a; }
+.pr-ctx-cancel { color: var(--text-muted); }
+
+/* ── Tools menu + dialog ─────────────────────────────────────────────────── */
+.pr-tools-menu { position: relative; }
+.pr-stamp { max-width: 118px; }
+.pr-stamp.on { border-color: #f0a030; color: #f0a030; }
+.pr-tools-btn {
+  height: 22px; padding: 0 8px; border-radius: 3px; cursor: pointer;
+  background: var(--bg-control); border: 1px solid var(--border-subtle); color: var(--text-primary);
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+}
+.pr-tools-btn:hover, .pr-tools-btn.open { border-color: #f0a030; color: #f0a030; }
+.pr-tools-drop {
+  position: absolute; top: 26px; left: 0; z-index: 60; min-width: 170px; padding: 4px 0;
+  background: var(--bg-panel); border: 1px solid var(--border); border-radius: 4px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+.pr-tools-item {
+  padding: 4px 12px; cursor: pointer; white-space: nowrap;
+  font-family: 'Rajdhani', sans-serif; font-size: 13px; color: var(--text-primary);
+}
+.pr-tools-item:hover { background: var(--bg-hover); }
+.pr-tools-sep { height: 1px; margin: 4px 8px; background: var(--border-subtle); }
+.pr-tooldlg { min-width: 340px; }
+.pr-tool-row {
+  display: grid; grid-template-columns: 150px 1fr 44px; align-items: center; gap: 8px;
+  padding: 5px 14px; font-family: 'Rajdhani', sans-serif; font-size: 12px; color: var(--text-primary);
+}
+.pr-tool-row label { color: var(--text-muted); }
+.pr-tool-row select { grid-column: span 2; }
+.pr-tool-row input[type=checkbox] { justify-self: start; }
+.pr-tool-range { width: 100%; accent-color: #f0a030; }
+.pr-tool-val { font-family: 'Share Tech Mono', monospace; font-size: 11px; text-align: right; }
+.pr-note.chance { border-style: dashed; }
 </style>

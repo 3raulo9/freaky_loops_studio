@@ -1,0 +1,12 @@
+[package]
+name = "fls-dsp"
+description = "Offline DSP for Freaky Loops Studio (time-stretch, tempo detection), compiled to WebAssembly for the UI."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+fls-projfile = { path = "../projfile" }

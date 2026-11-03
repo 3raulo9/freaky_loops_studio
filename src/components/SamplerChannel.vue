@@ -39,11 +39,11 @@
         </div>
       </div>
 
-      <input ref="fileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
+      <input ref="fileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif,.wv"
         style="display:none" @change="onFileInput" />
     </div>
 
-    <!-- ── Warp bar (Ableton-style tempo follow) ──────────────────────────────── -->
+    <!-- ── Warp bar (tempo follow) ───────────────────────────────────────────── -->
     <div class="smp-warp-bar smp-strip">
       <button class="smp-mode-btn" :class="{ active: p.warpEnabled }"
         v-hint="'Warp — time-stretch the sample so it follows the project tempo. Pitch from the played note still applies.'"
@@ -219,6 +219,10 @@
         v-hint="'Dump to sequencer — build a new pattern that triggers every slice in order.'"
         title="Send slices to a new pattern">→ SEQ</button>
       <button class="smp-icon-btn" v-if="slices.length" @click="onClearSlices" title="Clear all slices">CLR</button>
+      <button class="smp-icon-btn" @click="onToMidi('melody')"
+        v-hint="'Melody to MIDI — transcribe the notes in this sample to a new synth channel and pattern.'">MELODY→MIDI</button>
+      <button class="smp-icon-btn" @click="onToMidi('drums')"
+        v-hint="'Drums to MIDI — turn the hits in this loop into kick / snare / hat channels and a pattern.'">DRUMS→MIDI</button>
       <span class="smp-zone-hint" v-if="p.sliceMode">dbl-click wave = add slice</span>
     </div>
 
@@ -643,7 +647,7 @@
           v-hint="'Add a sample mapped to its own key & velocity range (multisampling). Zones with equal ranges round-robin between hits.'"
           title="Add a sample as a new zone">+ ADD ZONE</button>
         <span class="smp-zone-hint">Map files to key + velocity ranges; equal matches round-robin.</span>
-        <input ref="zoneFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
+        <input ref="zoneFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif,.wv"
           style="display:none" @change="onZoneFileInput" />
       </div>
 
@@ -685,7 +689,7 @@ const props = defineProps({ channel: Object })
 const { loadAudioFileForChannel, getAudioFileBuf, audioFileVersions, normalizeAudioFile, buildLoopXfade, snapToZero,
         processSampleAudio, detectSamplePitch,
         undoSampleEdit, sampleHistoryDepth,
-        detectSampleSlices, setSampleSlices, clearSampleSlices, sliceSamplerToSequencer,
+        detectSampleSlices, setSampleSlices, clearSampleSlices, sliceSamplerToSequencer, audioToMidi,
         setSamplerWarp, redetectSampleBpm, WARP_MODES, bpm,
         addSampleWarpMarker, updateSampleWarpMarker, removeSampleWarpMarker, clearSampleWarpMarkers,
         getSamplerZones, addSamplerZone, removeSamplerZone, updateSamplerZone,
@@ -1111,6 +1115,11 @@ function onClearSlices() {
 }
 function onSliceToSeq() {
   if (ch.value) sliceSamplerToSequencer(ch.value.id)
+}
+async function onToMidi(mode) {
+  if (!ch.value) return
+  const res = await audioToMidi({ channelId: ch.value.id }, mode, sliceSens.value)
+  if (res?.error) alert(res.error)
 }
 function toggleSliceMode() {
   if (!ch.value) return

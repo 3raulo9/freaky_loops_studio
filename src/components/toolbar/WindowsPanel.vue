@@ -78,6 +78,7 @@ const {
 } = useStudio()
 
 const WINDOWS = [
+  { id: 'session',  label: 'SESSION',  icon: '▣', title: 'Session — clip launcher', key: 'F3',    hint: 'Session view: launch patterns live in a grid of scenes (F3)', accent: '' },
   { id: 'playlist', label: 'PLAYLIST', icon: '▤', title: 'Playlist / Song editor', key: 'F5',     hint: 'win.playlist', accent: '' },
   { id: 'rack',     label: 'RACK',     icon: '▦', title: 'Channel Rack',           key: 'F6',     hint: 'win.rack',     accent: '' },
   { id: 'piano',    label: 'PIANO',    icon: '𝅘𝅥𝅮', title: 'Piano Roll',              key: 'F7',     hint: 'win.piano',    accent: '' },
@@ -123,7 +124,8 @@ function onKey(e) {
   const t = e.target
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
   let id = null
-  if      (e.key === 'F5') id = 'playlist'
+  if      (e.key === 'F3') id = 'session'
+  else if (e.key === 'F5') id = 'playlist'
   else if (e.key === 'F6') id = 'rack'
   else if (e.key === 'F7') id = 'piano'
   else if (e.key === 'F9') id = 'mixer'
@@ -172,7 +174,7 @@ onBeforeUnmount(() => {
 .win-menu-title {
   padding: 4px 9px 5px;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.16em; color: #5a5a80; border-bottom: 1px solid var(--border-subtle);
+  letter-spacing: 0.16em; color: var(--text-muted); border-bottom: 1px solid var(--border-subtle);
 }
 .win-menu-item {
   display: flex; align-items: center; gap: 7px; padding: 6px 10px;

@@ -116,7 +116,7 @@ onBeforeUnmount(() => {
 .tb-ms-ctrl { display: flex; flex-direction: column; gap: 3px; }
 .tb-ms-label {
   font-family: 'Rajdhani', sans-serif; font-size: 7px; font-weight: 700;
-  letter-spacing: 0.16em; color: #28283c; text-transform: uppercase;
+  letter-spacing: 0.16em; color: var(--text-muted); text-transform: uppercase;
 }
 .tb-ms-pitchrow { display: flex; align-items: center; gap: 5px; }
 

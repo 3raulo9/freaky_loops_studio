@@ -1,7 +1,16 @@
 import { ref, reactive, computed, watch, toRaw } from 'vue'
 import { applyTheme } from '../themes.js'
+import { applyNoteFx, hasNoteFx } from '../noteFx.js'
+import { grooveAt } from '../grooves.js'
+import { dspReady, wasmTranscribe, parsePatternProject } from '../audio/dsp.js'
+import { mapPatternProject, AUDIO_EXT, baseName as importBaseName } from '../import/patternProject.js'
+import { readZip } from '../import/zip.js'
+import { decodeSampleFile } from '../audio/sampleDecode.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
+import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport,
+         saveFileNative, openFileNative, setWindowTitle, bytesToBase64,
+         resolveAssetsNative, hostFileUrl, pickFolderNative } from '../desktop/ipc.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
 import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
@@ -11,7 +20,7 @@ import { makeGMPlayFn, preloadGMInstrument, gmSustains } from '../audio/gmSynth.
 import { GM_INSTRUMENTS, GM_CATEGORIES } from '../midi/gmDictionary.js'
 import { DRUM_MODULE_DEFS } from '../audio/drumModules.js'
 import { playMelodicNote } from '../audio/melodic.js'
-import { createEffect, makeEffect, EFFECT_DEFS } from '../audio/effects.js'
+import { createEffect, makeEffect, EFFECT_DEFS, setEffectsTempo } from '../audio/effects.js'
 import { detectBpm, timeStretch, timeStretchSegments, buildWarpSegments, tempoRatio, WARP_MODES } from '../audio/warp.js'
 import {
   playFMBell, playFMRhodes, playFMBass, playFMOrgan, playFMBrass,
@@ -472,6 +481,7 @@ export const TICKS_PER_STEP = 120   // 1/16 note at 480 PPQ
 export const STEPS_PITCH    = 72    // C5 — steps mode stores notes here in pianoNotes[]
 export const PLAYLIST_BARS  = 32
 export const PLAYLIST_CELLS = 32
+export const MAX_PLAYLIST_CELLS = 2048   // ~68 minutes at 120 BPM
 
 export const SCALE_DEFS = {
   major:      [0, 2, 4, 5, 7, 9, 11],
@@ -984,13 +994,13 @@ export function useStudio() {
     )
     if (collision) return
     clip.trackId = newTrackId
-    clip.cell    = Math.max(0, Math.min(PLAYLIST_CELLS - w, newCell))
+    clip.cell    = Math.max(0, Math.min(playlistCells.value - w, newCell))
   }
 
   function resizeClip(clipId, newWidth) {
     const clip = playlistClips.find(c => c.id === clipId)
     if (!clip) return
-    clip.width      = Math.max(1, Math.min(PLAYLIST_CELLS - clip.cell, newWidth))
+    clip.width      = Math.max(1, Math.min(playlistCells.value - clip.cell, newWidth))
     clip._userWidth = clip.width   // mark manual override so auto-stretch won't shrink below this
   }
 
@@ -1176,7 +1186,7 @@ export function useStudio() {
     return newIds
   }
 
-  // ── FL Studio Arrangements (multiple Playlist layouts) ─────────────────────────
+  // ── Arrangements (multiple Playlist layouts) ───────────────────────────────────
   const playlists = reactive([{ id: 'pl1', name: 'Arrangement 1' }])
   const currentPlaylistId = ref('pl1')
   const _playlistSnapshots = reactive({})
@@ -1284,6 +1294,16 @@ export function useStudio() {
 
   // ── Automation clips ───────────────────────────────────────────────────────────
   const automationClips = reactive([])
+
+  // Song length in bars: at least PLAYLIST_CELLS, growing past the last clip,
+  // automation clip or marker so long arrangements (imports included) fit.
+  const playlistCells = computed(() => {
+    let end = 0
+    for (const c of playlistClips) end = Math.max(end, (c.cell || 0) + (c.width || 1))
+    for (const a of automationClips) end = Math.max(end, (a.cell || 0) + (a.width || 1))
+    for (const m of timeMarkers) end = Math.max(end, (m.cell || 0) + 1)
+    return Math.min(MAX_PLAYLIST_CELLS, Math.max(PLAYLIST_CELLS, Math.ceil((end + 4) / 4) * 4))
+  })
   let _autoId = 0
 
   function addAutomationClip(trackId, cell, targetChannelId = null, targetParam = 'volume') {
@@ -1319,7 +1339,165 @@ export function useStudio() {
   function resizeAutomationClip(clipId, newWidth) {
     const clip = automationClips.find(a => a.id === clipId)
     if (!clip) return
-    clip.width = Math.max(1, Math.min(PLAYLIST_CELLS - clip.cell, newWidth))
+    clip.width = Math.max(1, Math.min(playlistCells.value - clip.cell, newWidth))
+  }
+
+
+  // ── Automation playback ────────────────────────────────────────────────────────
+  //   An automation clip holds a 0..1 curve; its target maps that onto a real
+  //   range. Targets: a channel's volume / pan / any instrument knob, a mixer
+  //   track's volume / pan, the master volume, or the song tempo.
+  //   targetChannelId: channel id | 'mx:<mixerTrackId>' | '__master' | '__tempo'
+  const TEMPO_MIN = 40, TEMPO_SPAN = 180
+
+  function _autoTarget(clip) {
+    const id = clip.targetChannelId, prm = clip.targetParam
+    if (id === '__tempo') {
+      return { label: 'TEMPO', get: () => (bpm.value - TEMPO_MIN) / TEMPO_SPAN, set: v => { bpm.value = Math.round((TEMPO_MIN + v * TEMPO_SPAN) * 10) / 10 } }
+    }
+    if (id === '__master') {
+      return { label: 'MASTER VOL', get: () => mixerTracks[0].volume / 1.25, set: v => setMixerTrackVolume(0, v * 1.25) }
+    }
+    if (id?.startsWith('mx:')) {
+      const idx = mixerTracks.findIndex(t => t.id === id.slice(3))
+      if (idx < 1) return null
+      const mt = mixerTracks[idx]
+      return prm === 'pan'
+        ? { label: mt.name + ' PAN', get: () => (mt.pan + 1) / 2, set: v => setMixerTrackPan(idx, v * 2 - 1) }
+        : { label: mt.name + ' VOL', get: () => mt.volume / 1.25, set: v => setMixerTrackVolume(idx, v * 1.25) }
+    }
+    const ch = channels.find(c => c.id === id)
+    if (!ch) return null
+    if (prm === 'volume') return { label: ch.name + ' VOL', get: () => ch.volume / 1.25, set: v => { ch.volume = v * 1.25 } }
+    if (prm === 'pan') return { label: ch.name + ' PAN', get: () => (ch.pan + 1) / 2, set: v => { ch.pan = v * 2 - 1 } }
+    const k = ch.knobs?.find(x => x.key === prm)
+    if (!k) return null
+    return {
+      label: ch.name + ' ' + (k.label || prm),
+      get: () => ((ch.params[prm] ?? k.min) - k.min) / ((k.max - k.min) || 1),
+      set: v => { ch.params[prm] = k.min + v * (k.max - k.min) },
+      param: prm, map: v => k.min + v * (k.max - k.min),
+    }
+  }
+
+  // Everything that can be automated, for the playlist's automation picker.
+  function automationTargets() {
+    const out = []
+    for (const ch of channels) {
+      out.push({ section: 'CHANNELS', key: ch.id + '_volume', label: ch.name + ' VOL', color: ch.color, channelId: ch.id, param: 'volume' })
+      out.push({ section: 'CHANNELS', key: ch.id + '_pan', label: ch.name + ' PAN', color: ch.color, channelId: ch.id, param: 'pan' })
+      for (const k of ch.knobs ?? []) {
+        out.push({ section: 'CHANNELS', key: ch.id + '_' + k.key, label: ch.name + ' ' + (k.label || k.key), color: ch.color, channelId: ch.id, param: k.key })
+      }
+    }
+    mixerTracks.slice(1).forEach(mt => {
+      out.push({ section: 'MIXER', key: 'mx:' + mt.id + '_volume', label: mt.name + ' VOL', color: mt.color, channelId: 'mx:' + mt.id, param: 'volume' })
+      out.push({ section: 'MIXER', key: 'mx:' + mt.id + '_pan', label: mt.name + ' PAN', color: mt.color, channelId: 'mx:' + mt.id, param: 'pan' })
+    })
+    out.push({ section: 'GLOBAL', key: '__master_volume', label: 'MASTER VOL', color: '#e74c3c', channelId: '__master', param: 'volume' })
+    out.push({ section: 'GLOBAL', key: '__tempo_bpm', label: 'TEMPO', color: '#f0a030', channelId: '__tempo', param: 'bpm' })
+    return out
+  }
+
+  function automationLabel(clip) { return _autoTarget(clip)?.label ?? clip.targetParam }
+
+  // Curve value at x (0..1 across the clip). A node's tension bends the segment
+  // that starts at it: > 0 eases in (slow start), < 0 eases out.
+  function automationValueAt(clip, x) {
+    const nodes = clip.nodes
+    if (!nodes?.length) return 0
+    if (x <= nodes[0].x) return nodes[0].y
+    for (let i = 0; i < nodes.length - 1; i++) {
+      const a = nodes[i], b = nodes[i + 1]
+      if (x <= b.x) {
+        let t = (x - a.x) / ((b.x - a.x) || 1)
+        const ten = a.tension ?? 0
+        if (ten > 0) t = Math.pow(t, 1 + ten * 3)
+        else if (ten < 0) t = 1 - Math.pow(1 - t, 1 - ten * 3)
+        return a.y + (b.y - a.y) * t
+      }
+    }
+    return nodes[nodes.length - 1].y
+  }
+
+  const _autoLast = new Map()   // clipId → last value applied (skip redundant writes)
+  function _applyAutomationAt(pos) {
+    const muted = new Set(playlistTracks.filter(t => t.muted).map(t => t.id))
+    for (const clip of automationClips) {
+      if (muted.has(clip.trackId)) continue
+      const w = clip.width || 1
+      if (pos < clip.cell || pos >= clip.cell + w) continue
+      const v = automationValueAt(clip, (pos - clip.cell) / w)
+      const last = _autoLast.get(clip.id)
+      if (last !== undefined && Math.abs(last - v) < 0.0005) continue
+      _autoLast.set(clip.id, v)
+      _autoTarget(clip)?.set(Math.max(0, Math.min(1, v)))
+    }
+  }
+
+  // Knob right-click → "Create automation clip": a flat clip at the current value
+  // on a new playlist track named after the target, spanning the song.
+  function createAutomationClipFor(targetChannelId, targetParam) {
+    pushUndo()
+    const probe = { targetChannelId, targetParam }
+    const tgt = _autoTarget(probe)
+    if (!tgt) return null
+    addPlaylistTrack()
+    const track = playlistTracks[playlistTracks.length - 1]
+    track.name = tgt.label
+    const songEnd = playlistClips.reduce((m, c) => Math.max(m, c.cell + (c.width || 1)), 0)
+    const width = Math.max(4, Math.min(playlistCells.value, songEnd || 4))
+    addAutomationClip(track.id, 0, targetChannelId, targetParam)
+    const clip = automationClips[automationClips.length - 1]
+    clip.width = width
+    const y = Math.max(0, Math.min(1, tgt.get()))
+    clip.nodes = [{ x: 0, y, tension: 0 }, { x: 1, y, tension: 0 }]
+    clipFocusMode.value = 'automation'
+    mainView.value = 'playlist'
+    usePlaylist.value = true
+    return clip.id
+  }
+
+  // Offline render: write automation into the render graph / note params.
+  function _renderAutomation(events, nodes, { secPerStep, START, steps }) {
+    const muted = new Set(playlistTracks.filter(t => t.muted).map(t => t.id))
+    const rawChannels = toRaw(channels)
+    for (const clip of automationClips) {
+      if (muted.has(clip.trackId)) continue
+      const id = clip.targetChannelId, prm = clip.targetParam
+      const w = clip.width || 1
+      const totalSteps_ = w * steps
+      const at = s => automationValueAt(clip, s / totalSteps_)
+      const timeOf = s => START + (clip.cell * steps + s) * secPerStep
+      let param = null, map = v => v
+      if (id === '__master') { param = nodes.master.gain; map = v => v * 1.25 }
+      else if (id?.startsWith('mx:')) {
+        const n = nodes.inserts.find(x => x.id === id.slice(3))
+        if (n) { param = prm === 'pan' ? n.panner.pan : n.gain.gain; map = prm === 'pan' ? v => v * 2 - 1 : v => v * 1.25 }
+      } else {
+        const ci = rawChannels.findIndex(c => c.id === id)
+        if (ci >= 0 && prm === 'volume' && nodes.chGain[ci]) { param = nodes.chGain[ci].gain; map = v => v * 1.25 }
+        else if (ci >= 0 && prm === 'pan' && nodes.chPan[ci]) { param = nodes.chPan[ci].pan; map = v => v * 2 - 1 }
+        else if (ci >= 0) {
+          // Instrument knob: bake the value into each note this clip covers.
+          const tgt = _autoTarget(clip)
+          if (!tgt?.map) continue
+          for (const ev of events) {
+            if (ev.ci !== ci || ev.kind === 'cut') continue
+            const s = (ev.when - START) / secPerStep - clip.cell * steps
+            if (s < 0 || s >= totalSteps_) continue
+            const v = tgt.map(at(s))
+            if (ev.kind === 'arp') ev.baseParams = { ...ev.baseParams, [prm]: v }
+            else ev.params = { ...ev.params, [prm]: v }
+          }
+          continue
+        }
+      }
+      if (!param) continue
+      for (let s = 0; s <= totalSteps_; s++) {
+        try { param.setValueAtTime(map(at(Math.min(s, totalSteps_ - 0.001))), timeOf(s)) } catch (_) {}
+      }
+    }
   }
 
   // ── Unused patterns helper ────────────────────────────────────────────────────
@@ -1360,7 +1538,7 @@ export function useStudio() {
   const renderModalOpen    = ref(false)
   const themeModalOpen     = ref(false)
   const midiRouterOpen     = ref(false)
-  const currentTheme       = ref(localStorage.getItem('fls-theme') ?? 'white')
+  const currentTheme       = ref(localStorage.getItem('fls-theme') ?? 'studio')
   applyTheme(currentTheme.value)
   const kbOctave           = ref(4)
   const gridSnap           = ref('1/4')
@@ -1456,7 +1634,7 @@ export function useStudio() {
   const detachedWindows   = reactive({})   // id → { x, y, w, h, z }
   let   _winZ        = 200
   let   _prevMainView = 'sequencer'
-  const WINDOW_VIEW  = { rack: 'sequencer', playlist: 'playlist', mixer: 'mixer' }
+  const WINDOW_VIEW  = { rack: 'sequencer', playlist: 'playlist', mixer: 'mixer', session: 'session' }
 
   // Resolve a window's current lifecycle state for the shortcut LED.
   function windowState(id) {
@@ -1561,6 +1739,13 @@ export function useStudio() {
   // the position you were at in the other mode.
   const _savedPatCell  = ref(0)
   const _savedSongCell = ref(0)
+  // Tempo-synced effects (gate, auto pan, ping-pong, auto filter) follow the song.
+  watch(bpm, b => setEffectsTempo(b), { immediate: true })
+
+  // Desktop: plugins read tempo + play state from the host's transport clock
+  // (tempo-synced LFOs, delays, arps), so keep it in step with ours.
+  if (isDesktop) watch([bpm, isPlaying], ([b, playing]) => sendTransport(b, playing), { immediate: true })
+
   watch(usePlaylist, (nowSong) => {
     // Snapshot the outgoing mode's position before stopPlay() can clear it
     if (nowSong) _savedPatCell.value  = displayCell.value
@@ -2086,38 +2271,49 @@ export function useStudio() {
     let buf
     try {
       const ab = await file.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) {
       console.error('[Sampler] Failed to decode audio file:', e)
       return null
     }
     const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
+    return _addSamplerFromBuffer(buf, base, file.name)
+  }
+
+  // Full sampler parameter set for a buffer (new channels and imports).
+  function _samplerDefaults(buf) {
+    return {
+      pitch: 60, rootNote: 60, fineTune: 0, keyTrack: 1,
+      startOffset: 0, endOffset: 1,
+      envDelay: 0, envAttack: 0.005, envDecay: 0.1, envSustain: 0.8, envRelease: 0.2,
+      envAttackCurve: 0, envDecayCurve: -0.5, envReleaseCurve: -0.5,
+      filterType: 'off', filterCutoff: 1.0, filterReso: 0,
+      fEnvAmount: 0, fEnvAttack: 0.01, fEnvDecay: 0.2, fEnvSustain: 0,
+      reverse: false, loopMode: 'off', loopStart: 0, loopEnd: 1, loopXfade: 0,
+      velSens: 1, velocity: 0.8,
+      ..._autoWarpDefaults(buf), warpMode: 'complex', warpMarkers: [],
+      pEnvAmount: 0, pEnvAttack: 0.002, pEnvDecay: 0.15,
+      lfoDest: 'off', lfoRate: 0.3, lfoDepth: 0, lfoShape: 'sine',
+      lfo2Dest: 'off', lfo2Rate: 0.2, lfo2Depth: 0, lfo2Shape: 'triangle',
+      playMode: 'classic', grainSize: 0.08, grainScan: 0.5,
+      grainDensity: 0.5, grainSpray: 0.15, grainPan: 0, grainMotion: 0, grainShape: 'hann',
+      arpEnabled: false, arpMode: 'up', arpRate: '1/16', arpGate: 0.5, arpRange: 1,
+      sliceMode: false, sliceMarkers: [],
+      zones: [],
+    }
+  }
+
+  // New sampler channel playing `buf` (shared by file drops and bounces).
+  function _addSamplerFromBuffer(buf, name, sampleName) {
+    const base = name
     const ch = makeChannel({
       name: base.length > 14 ? base.slice(0, 14) : base,
       color: '#ff9f43',
       type: 'audiofile', mode: 'steps', sustains: false,
       instrumentType: 'audiofile',
-      sampleName: file.name,
+      sampleName,
       audioFileMissing: false,
-      params: {
-        pitch: 60, rootNote: 60, fineTune: 0, keyTrack: 1,
-        startOffset: 0, endOffset: 1,
-        envDelay: 0, envAttack: 0.005, envDecay: 0.1, envSustain: 0.8, envRelease: 0.2,
-        envAttackCurve: 0, envDecayCurve: -0.5, envReleaseCurve: -0.5,
-        filterType: 'off', filterCutoff: 1.0, filterReso: 0,
-        fEnvAmount: 0, fEnvAttack: 0.01, fEnvDecay: 0.2, fEnvSustain: 0,
-        reverse: false, loopMode: 'off', loopStart: 0, loopEnd: 1, loopXfade: 0,
-        velSens: 1, velocity: 0.8,
-        ..._autoWarpDefaults(buf), warpMode: 'complex', warpMarkers: [],
-        pEnvAmount: 0, pEnvAttack: 0.002, pEnvDecay: 0.15,
-        lfoDest: 'off', lfoRate: 0.3, lfoDepth: 0, lfoShape: 'sine',
-        lfo2Dest: 'off', lfo2Rate: 0.2, lfo2Depth: 0, lfo2Shape: 'triangle',
-        playMode: 'classic', grainSize: 0.08, grainScan: 0.5,
-        grainDensity: 0.5, grainSpray: 0.15, grainPan: 0, grainMotion: 0, grainShape: 'hann',
-        arpEnabled: false, arpMode: 'up', arpRate: '1/16', arpGate: 0.5, arpRange: 1,
-        sliceMode: false, sliceMarkers: [],
-        zones: [],
-      },
+      params: _samplerDefaults(buf),
       knobs: [{ key: 'pitch', label: 'NOTE', min: 0, max: 127, decimals: 0 }],
       fn: () => {},
     })
@@ -2143,7 +2339,7 @@ export function useStudio() {
     let buf
     try {
       const ab = await file.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) {
       console.error('[Sampler] Failed to decode audio file:', e)
       return
@@ -2212,7 +2408,7 @@ export function useStudio() {
     let buf
     try {
       const ab = await file.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) { console.error('[Sampler] zone decode failed:', e); return null }
     const id = 'z' + (++_zid) + Date.now().toString(36)
     samplerZoneBufs.set(channelId + ':' + id, buf)
@@ -2530,6 +2726,136 @@ export function useStudio() {
     return midi
   }
 
+
+
+  // ── Bounce / freeze ────────────────────────────────────────────────────────────
+  //   Render one channel's part of the current pattern (with its own insert FX)
+  //   into a new sampler channel that plays it back in sync, and mute the
+  //   original — a frozen copy that costs almost no CPU. The render runs two
+  //   passes and keeps the second, so reverb / delay tails wrap around the loop
+  //   exactly as they do in playback. Un-mute the original to go back.
+  async function bounceChannelToSampler(channelId) {
+    const src = channels.find(c => c.id === channelId)
+    if (!src) return { error: 'No such channel.' }
+    if (!_offlineRenderable(src) || _isVst(src)) return { error: `${src.name} runs as a live plugin and can't be bounced offline yet.` }
+    initAudio()
+    const pid = currentPatternId.value
+    const sr = audioCtx.sampleRate
+    const patTicks = Math.max(totalSteps.value * TICKS_PER_STEP, getPatternLengthTicks(pid))
+    const patSec = patTicks / TICKS_PER_STEP * (60 / bpm.value) / 4
+    const full = await renderProjectToBuffer({
+      mode: 'pattern', patternId: pid, bars: 2, tail: 0.05, normalize: false, sampleRate: sr,
+      onlyChannelIds: [channelId], bypassMixer: true,
+    })
+    const START = 0.01
+    const from = Math.round((START + patSec) * sr)
+    const len = Math.max(1, Math.round(patSec * sr))
+    const out = new AudioBuffer({ length: len, numberOfChannels: 2, sampleRate: sr })
+    for (let c = 0; c < 2; c++) out.getChannelData(c).set(full.getChannelData(c).subarray(from, from + len))
+    let peak = 0
+    for (let c = 0; c < 2; c++) for (const v of out.getChannelData(c)) peak = Math.max(peak, Math.abs(v))
+    if (peak < 1e-4) return { error: `${src.name} is silent in this pattern.` }
+
+    pushUndo()
+    const ch = _addSamplerFromBuffer(out, (src.name + ' BNC').slice(0, 14), src.name.toLowerCase() + '-bounce.wav')
+    ch.color = src.color
+    ch.mixerTrack = src.mixerTrack ?? 0
+    ch.bouncedFrom = src.id
+    Object.assign(ch.params, { warpEnabled: false, sampleBpm: bpm.value })
+    // One note spanning the whole pattern plays the bounce once per loop.
+    ch.mode = 'piano'
+    getPatData(ch.id, pid).pianoNotes.push({ pitch: ch.params.rootNote ?? 60, startTick: 0, durationTicks: patTicks, velocity: 1 })
+    // Bounced audio already carries the channel's volume, pan and insert FX.
+    ch.volume = 1; ch.pan = 0
+    src.muted = true
+    rebuildGains()
+    return { channelId: ch.id, seconds: patSec }
+  }
+
+  // ── Audio → MIDI ───────────────────────────────────────────────────────────────
+  //   Transcribe a sampler channel's sample (or a playlist audio clip) into a new
+  //   pattern: 'melody' → a synth channel playing the detected notes, 'drums' →
+  //   kick / snare / hat channels hitting where the loop does. Analysis runs in the
+  //   Rust DSP module. Timing follows the sample's own tempo when it's warped.
+  async function audioToMidi({ channelId = null, clipId = null } = {}, mode = 'melody', sensitivity = 0.5) {
+    await dspReady
+    let buf = null, startFrac = 0, endFrac = 1, name = 'AUDIO', srcBpm = null
+    if (channelId) {
+      const src = channels.find(c => c.id === channelId)
+      buf = audioFileBufs.get(channelId)
+      startFrac = src?.params?.startOffset ?? 0
+      endFrac   = src?.params?.endOffset ?? 1
+      name = src?.name ?? name
+      if (src?.params?.warpEnabled && src.params.sampleBpm) srcBpm = src.params.sampleBpm
+    } else if (clipId) {
+      const clip = playlistClips.find(c => c.id === clipId)
+      buf = getAudioClipBuf(clipId)
+      startFrac = clip?.startOffset ?? 0
+      endFrac   = clip?.endOffset ?? 1
+      name = (clip?._label || clip?.name || 'CLIP').toUpperCase()
+      if (clip?.warpEnabled && clip.clipBpm) srcBpm = clip.clipBpm
+    }
+    if (!buf) return { error: 'No audio loaded.' }
+
+    const s0 = Math.floor(startFrac * buf.length), s1 = Math.max(s0 + 1, Math.floor(endFrac * buf.length))
+    const mono = new Float32Array(s1 - s0)
+    for (let c = 0; c < buf.numberOfChannels; c++) {
+      const d = buf.getChannelData(c)
+      for (let i = 0; i < mono.length; i++) mono[i] += d[s0 + i] / buf.numberOfChannels
+    }
+    const notes = wasmTranscribe(mono, buf.sampleRate, mode, sensitivity)
+    if (!notes) return { error: 'The DSP module is unavailable.' }
+    if (!notes.length) return { error: mode === 'drums' ? 'No hits found.' : 'No pitched notes found.' }
+
+    // Seconds → ticks at the sample's tempo (warped) or the project tempo.
+    const ticksPerSec = (srcBpm || bpm.value) / 60 * 480
+    const grid = mode === 'drums' ? TICKS_PER_STEP : 30          // drums → 1/16, melody → 1/64
+    const toTick = smp => Math.round(smp / buf.sampleRate * ticksPerSec / grid) * grid
+
+    pushUndo()
+    const base = name.replace(/\s+MIDI$/, '').slice(0, 9)
+    addPattern()
+    const pid = currentPatternId.value
+    const pat = patterns.find(p => p.id === pid)
+    if (pat) pat.name = base + (mode === 'drums' ? ' drums' : ' melody')
+
+    let maxTick = 0
+    if (mode === 'drums') {
+      const kinds = ['kick', 'snare', 'hihat']
+      const made = {}
+      for (const n of notes) {
+        const kind = kinds[n.key] ?? 'snare'
+        if (!made[kind]) {
+          const cfg = _DRUM_IMPORT[kind]
+          made[kind] = makeChannel({ name: (base + ' ' + kind).toUpperCase().slice(0, 14), mode: 'piano', ...cfg, params: { ...cfg.params } })
+          channels.push(made[kind])
+        }
+        const ch = made[kind]
+        const startTick = toTick(n.start)
+        getPatData(ch.id, pid).pianoNotes.push({ pitch: ch.params.pitch ?? 60, startTick, durationTicks: TICKS_PER_STEP, velocity: n.velocity })
+        maxTick = Math.max(maxTick, startTick + TICKS_PER_STEP)
+      }
+    } else {
+      addChannel()
+      const ch = channels[channels.length - 1]
+      ch.name = (base + ' MIDI').toUpperCase().slice(0, 14)
+      ch.mode = 'piano'
+      for (const n of notes) {
+        const startTick = toTick(n.start)
+        const durationTicks = Math.max(grid, toTick(n.end) - startTick)
+        getPatData(ch.id, pid).pianoNotes.push({ pitch: n.key, startTick, durationTicks, velocity: n.velocity })
+        maxTick = Math.max(maxTick, startTick + durationTicks)
+      }
+      selectedChannelId.value = ch.id
+    }
+    // Pattern length: whole bars covering the notes.
+    const bar = totalSteps.value * TICKS_PER_STEP
+    setPatternLengthOverride(pid, Math.max(bar, Math.ceil(maxTick / bar) * bar))
+    if (audioCtx) rebuildGains()
+    mainView.value = 'sequencer'
+    return { notes: notes.length, patternId: pid }
+  }
+
   // ── Slicer: transient detection + slice markers (chop a loop in the channel) ──
   //   Detects onset peaks and stores them as fractional slice positions. With slice
   //   mode on, each played note (relative to the root) triggers the matching slice.
@@ -2627,7 +2953,7 @@ export function useStudio() {
     let buf
     try {
       const ab = await file.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) { console.error('[AudioClip] Failed to decode:', e); return }
 
     const secPerCell = getSecPerCell()
@@ -2666,7 +2992,7 @@ export function useStudio() {
     let buf
     try {
       const ab = await file.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) { console.error('[AudioClip] Failed to decode:', e); return }
 
     audioClipBufs.set(clipId, buf)
@@ -2950,7 +3276,7 @@ export function useStudio() {
     let buf
     try {
       const ab = await blob.arrayBuffer()
-      buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      buf = await decodeSampleFile(audioCtx, ab)
     } catch (e) { console.error('[Rec] decode failed:', e); return }
 
     if (target.channelId) {
@@ -3089,7 +3415,7 @@ export function useStudio() {
       initAudio()
       try {
         const ab  = await file.arrayBuffer()
-        const buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+        const buf = await decodeSampleFile(audioCtx, ab)
         chopBufs.set(ch.id, buf)
         const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
         ch.name = base.length > 12 ? base.slice(0, 12) : base
@@ -3116,7 +3442,7 @@ export function useStudio() {
     initAudio()
     try {
       const ab  = await file.arrayBuffer()
-      const buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      const buf = await decodeSampleFile(audioCtx, ab)
       chopBufs.set(channelId, buf)
       _clearWarpCache(channelId)
       const base = file.name.replace(/\.[a-z0-9]+$/i, '').toUpperCase()
@@ -3353,7 +3679,7 @@ export function useStudio() {
     initAudio()
     try {
       const ab  = await file.arrayBuffer()
-      const buf = await new Promise((res, rej) => audioCtx.decodeAudioData(ab, res, rej))
+      const buf = await decodeSampleFile(audioCtx, ab)
       const rev = _makeReversedBuf(buf)
       if (deck === 'A') {
         forgeBufsA.set(channelId, buf); forgeBufsA_rev.set(channelId, rev)
@@ -3594,8 +3920,24 @@ export function useStudio() {
   }
 
   function buildMixerInserts() {
+    // Tear down a previous graph (project load) so stale nodes don't keep summing.
+    for (const n of mixerInsertNodes) {
+      for (const k of ['eqLow', 'eqMid', 'eqHigh', 'phaseGain', 'duckGain', 'gain', 'panner', 'analyser']) {
+        try { n[k].disconnect() } catch (_) {}
+      }
+      n.fxHandles.forEach(h => h?.dispose?.())
+    }
     mixerInsertNodes = []
-    mixerTracks.slice(1).forEach(mt => {
+    mixerTracks.slice(1).forEach(mt => mixerInsertNodes.push(_buildInsertNode(mt)))
+    // Second pass: post-fader send taps into the return buses + track outputs.
+    mixerTracks.slice(1).forEach((mt, i) => {
+      _wireMixerSends(mixerInsertNodes[i], mt)
+      _connectInsertOutput(mixerInsertNodes[i], mt)
+    })
+  }
+
+  // One insert's chain: EQ → FX → phase → sidechain duck → fader → pan → meter.
+  function _buildInsertNode(mt) {
       const eqLow     = audioCtx.createBiquadFilter()
       const eqMid     = audioCtx.createBiquadFilter()
       const eqHigh    = audioCtx.createBiquadFilter()
@@ -3605,23 +3947,109 @@ export function useStudio() {
       const panner    = audioCtx.createStereoPanner()
       const analyser  = audioCtx.createAnalyser()
       analyser.fftSize = 256
-      eqLow.type  = 'lowshelf';   eqLow.frequency.value  = 80;   eqLow.gain.value  = mt.eq.low
-      eqMid.type  = 'peaking';    eqMid.frequency.value  = 1000; eqMid.Q.value = 1; eqMid.gain.value = mt.eq.mid
-      eqHigh.type = 'highshelf';  eqHigh.frequency.value = 8000; eqHigh.gain.value = mt.eq.high
+      _applyEqParams({ eqLow, eqMid, eqHigh }, mt.eq)
       phaseGain.gain.value = mt.phaseInvert ? -1 : 1
       duckGain.gain.value  = 1
       gain.gain.value  = mt.muted ? 0 : mt.volume
       panner.pan.value = mt.pan
       eqLow.connect(eqMid); eqMid.connect(eqHigh)
       phaseGain.connect(duckGain); duckGain.connect(gain); gain.connect(panner)
-      panner.connect(analyser); analyser.connect(masterGain)
+      panner.connect(analyser)
       const node = { eqLow, eqMid, eqHigh, phaseGain, duckGain, gain, panner, analyser, fxHandles: [], sendGains: {} }
-      mixerInsertNodes.push(node)
       // Wire FX chain: eqHigh → [enabled fx slots] → phaseGain
       _wireMixerFxChain(node, mt)
-    })
-    // Second pass: post-fader send taps into the return buses.
-    mixerTracks.slice(1).forEach((mt, i) => _wireMixerSends(mixerInsertNodes[i], mt))
+      return node
+  }
+
+  // EQ band frequencies / Q are per track (parametric EQ); gains in dB.
+  function _applyEqParams(n, eq) {
+    n.eqLow.type  = 'lowshelf';  n.eqLow.frequency.value  = eq.lowFreq  ?? 80;   n.eqLow.gain.value  = eq.low ?? 0
+    n.eqMid.type  = 'peaking';   n.eqMid.frequency.value  = eq.midFreq  ?? 1000; n.eqMid.Q.value = eq.midQ ?? 1; n.eqMid.gain.value = eq.mid ?? 0
+    n.eqHigh.type = 'highshelf'; n.eqHigh.frequency.value = eq.highFreq ?? 8000; n.eqHigh.gain.value = eq.high ?? 0
+  }
+
+  // A track feeds the master, or another insert ("route to"), e.g. a drum bus.
+  function _connectInsertOutput(node, mt) {
+    if (!node) return
+    try { node.analyser.disconnect() } catch (_) {}
+    const tIdx = mt.output ? mixerTracks.findIndex(t => t.id === mt.output) : -1
+    const target = tIdx >= 1 ? mixerInsertNodes[tIdx - 1] : null
+    node.analyser.connect(target && target !== node ? target.eqLow : masterGain)
+  }
+
+  // Would routing track `fromId` into `toId` create a feedback loop?
+  function _routesInto(fromId, toId) {
+    const seen = new Set()
+    let cur = toId
+    while (cur && !seen.has(cur)) {
+      if (cur === fromId) return true
+      seen.add(cur)
+      cur = mixerTracks.find(t => t.id === cur)?.output ?? null
+    }
+    return false
+  }
+
+  // Route insert `trackIdx` to another insert/return by id (null = master).
+  function setMixerTrackOutput(trackIdx, targetId) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt || trackIdx === 0) return false
+    if (targetId && (targetId === mt.id || _routesInto(mt.id, targetId))) return false
+    pushUndo()
+    mt.output = targetId || null
+    if (audioCtx) _connectInsertOutput(mixerInsertNodes[trackIdx - 1], mt)
+    return true
+  }
+
+  // Number of insert tracks (they sit between the master and the return buses).
+  function _insertCount() {
+    const r = mixerTracks.findIndex(t => t.kind === 'return')
+    return (r < 0 ? mixerTracks.length : r) - 1
+  }
+
+  // Add an insert track just before the return buses. Everything that points at a
+  // track by index (channel routing, audio clips, sidechain keys) is shifted so it
+  // keeps pointing at the same track.
+  const MAX_MX_TRACKS = 1 + NUM_MX_RETURNS + 64
+  function addMixerInsert() {
+    if (mixerTracks.length >= MAX_MX_TRACKS) return -1
+    pushUndo()
+    const pos = _insertCount() + 1
+    const mt = {
+      id: 'mx' + Date.now().toString(36), name: 'MIX ' + pos, kind: 'insert',
+      color: COLORS[(pos - 1) % COLORS.length],
+      volume: 1.0, pan: 0, muted: false, _soloed: false,
+      eq: { low: 0, mid: 0, high: 0 }, fxSlots: [], phaseInvert: false, sends: {}, output: null,
+      sidechain: { source: null, amount: 0, attack: 0.01, release: 0.18 },
+    }
+    mixerTracks.splice(pos, 0, mt)
+    const bump = i => (i >= pos ? i + 1 : i)
+    channels.forEach(ch => { if (ch.mixerTrack) ch.mixerTrack = bump(ch.mixerTrack) })
+    playlistClips.forEach(c => { if (c.mixerTrack) c.mixerTrack = bump(c.mixerTrack) })
+    mixerTracks.forEach(t => { if (t.sidechain?.source > 0) t.sidechain.source = bump(t.sidechain.source) })
+    if (audioCtx) {
+      const node = _buildInsertNode(mixerTracks[pos])
+      mixerInsertNodes.splice(pos - 1, 0, node)
+      _connectInsertOutput(node, mixerTracks[pos])
+      rebuildGains()
+    }
+    return pos
+  }
+
+  // Parametric EQ band edit: { gain?, freq?, q? } for band 'low' | 'mid' | 'high'.
+  function setMixerEqBand(trackIdx, band, patch) {
+    const mt = mixerTracks[trackIdx]
+    if (!mt || trackIdx === 0) return
+    if (patch.gain != null) mt.eq[band] = Math.max(-18, Math.min(18, patch.gain))
+    if (patch.freq != null) mt.eq[band + 'Freq'] = Math.max(20, Math.min(20000, patch.freq))
+    if (patch.q != null && band === 'mid') mt.eq.midQ = Math.max(0.1, Math.min(18, patch.q))
+    const node = mixerInsertNodes[trackIdx - 1]
+    if (node) _applyEqParams(node, mt.eq)
+  }
+
+  // Live EQ nodes of a track (the EQ graph reads their frequency response).
+  function getMixerEqNodes(trackIdx) {
+    const n = mixerInsertNodes[trackIdx - 1]
+    return n ? [n.eqLow, n.eqMid, n.eqHigh] : null
   }
 
   // (Re)build the post-fader send taps from one track into the return buses.
@@ -3923,7 +4351,7 @@ export function useStudio() {
 
   function assignChannelToMixerTrack(channelId, trackIdx) {
     const ch = channels.find(c => c.id === channelId); if (!ch) return
-    ch.mixerTrack = Math.max(0, Math.min(NUM_MX_INSERTS, trackIdx))
+    ch.mixerTrack = Math.max(0, Math.min(mixerTracks.length - 1, trackIdx))
     if (audioCtx) rebuildGains()
   }
 
@@ -3932,7 +4360,8 @@ export function useStudio() {
   // to the new positions and the routing graph rebuilt.
   function moveMixerTrack(idx, dir) {
     const a = idx, b = idx + dir
-    if (a < 1 || b < 1 || a > NUM_MX_INSERTS || b > NUM_MX_INSERTS) return false
+    const nIns = _insertCount()
+    if (a < 1 || b < 1 || a > nIns || b > nIns) return false
     const t = mixerTracks[a]; mixerTracks[a] = mixerTracks[b]; mixerTracks[b] = t   // swap descriptors
     // Channels routed to either lane follow their track to its new slot.
     channels.forEach(ch => { if (ch.mixerTrack === a) ch.mixerTrack = -b; else if (ch.mixerTrack === b) ch.mixerTrack = -a })
@@ -3943,12 +4372,12 @@ export function useStudio() {
       if (!n) return
       n.gain.gain.value   = mt.muted ? 0 : mt.volume
       n.panner.pan.value  = mt.pan
-      n.eqLow.gain.value  = mt.eq.low
-      n.eqMid.gain.value  = mt.eq.mid
-      n.eqHigh.gain.value = mt.eq.high
+      _applyEqParams(n, mt.eq)
       if (n.phaseGain) n.phaseGain.gain.value = mt.phaseInvert ? -1 : 1
       _wireMixerFxChain(n, mt)
     })
+    // Outputs follow track ids, so re-resolve every track's destination node.
+    mixerTracks.slice(1).forEach((mt, i) => _connectInsertOutput(mixerInsertNodes[i], mt))
     if (audioCtx) rebuildGains()
     markDirty()
     return true
@@ -4041,13 +4470,234 @@ export function useStudio() {
   // Each descriptor carries the offset into the clip so multi-bar patterns
   // play the correct bar, and the clip boundary so truncated clips are silent
   // beyond their visible end.  slipOffset (in steps) shifts the playback window.
+  // ── Session view (clip launcher) ────────────────────────────────────────────────
+  //   A grid of pattern slots: columns are the playlist tracks, rows are scenes.
+  //   Launching a slot (or a whole scene) queues it; the scheduler applies queued
+  //   launches on the next bar boundary (or every N bars with launch quantize), so
+  //   changes land in time. Each playing slot loops its pattern until stopped.
+  //   While anything is launched the transport runs in session mode: the clips that
+  //   play come from the launched slots instead of the arrangement or the rack.
+  const sessionScenes   = reactive(Array.from({ length: 8 }, (_, i) => ({ id: 'sc' + (i + 1), name: 'Scene ' + (i + 1) })))
+  const sessionSlots    = reactive({})   // `${trackId}:${sceneId}` → { patternId }
+  const sessionPlaying  = reactive({})   // trackId → { patternId, sceneId, startCell }
+  const sessionQueued   = reactive({})   // trackId → { patternId|null, sceneId }  (null = stop)
+  const sessionActive   = ref(false)
+  const sessionQuantize = ref(1)         // launch on every Nth bar
+  const sessionCell     = ref(0)         // un-wrapped bar counter for the UI (progress rings)
+  const sessionRecording = ref(false)    // capture launches into the arrangement
+  const sessionFollow   = ref(false)     // scenes advance on their own (follow action)
+  let _pendingScene = null               // scene whose launch is queued
+  let _sceneRun = null                   // { sceneId, startCell } — scene playing now
+  let _sessionOrigin = 0
+  let _sessionLog = []                   // [{ trackId, patternId|null, cell }] while recording
+  let _sceneSeq = sessionScenes.length
+
+  const slotKey = (trackId, sceneId) => trackId + ':' + sceneId
+  function getSessionSlot(trackId, sceneId) { return sessionSlots[slotKey(trackId, sceneId)] ?? null }
+  function setSessionSlot(trackId, sceneId, patternId) {
+    pushUndo()
+    if (patternId) sessionSlots[slotKey(trackId, sceneId)] = { patternId }
+    else delete sessionSlots[slotKey(trackId, sceneId)]
+  }
+  function moveSessionSlot(fromTrack, fromScene, toTrack, toScene, copy = false) {
+    const src = getSessionSlot(fromTrack, fromScene)
+    if (!src || (fromTrack === toTrack && fromScene === toScene)) return
+    pushUndo()
+    sessionSlots[slotKey(toTrack, toScene)] = { ...src }
+    if (!copy) delete sessionSlots[slotKey(fromTrack, fromScene)]
+  }
+  function addSessionScene() {
+    sessionScenes.push({ id: 'sc' + (++_sceneSeq), name: 'Scene ' + (sessionScenes.length + 1) })
+  }
+  function removeSessionScene(sceneId) {
+    if (sessionScenes.length <= 1) return
+    pushUndo()
+    const i = sessionScenes.findIndex(sc => sc.id === sceneId)
+    if (i < 0) return
+    sessionScenes.splice(i, 1)
+    for (const k of Object.keys(sessionSlots)) if (k.endsWith(':' + sceneId)) delete sessionSlots[k]
+  }
+  function renameSessionScene(sceneId, name) {
+    const sc = sessionScenes.find(x => x.id === sceneId)
+    if (sc && name) sc.name = name
+  }
+  // Capture whatever is playing right now as a new scene.
+  function captureSessionScene() {
+    addSessionScene()
+    const sc = sessionScenes[sessionScenes.length - 1]
+    for (const [tid, pl] of Object.entries(sessionPlaying)) sessionSlots[slotKey(tid, sc.id)] = { patternId: pl.patternId }
+    return sc.id
+  }
+
+  function _patternCells(patternId) {
+    const bar = totalSteps.value * TICKS_PER_STEP
+    return Math.max(1, Math.ceil(getPatternLengthTicks(patternId) / bar))
+  }
+
+  // Queue a slot; starts the transport (in session mode) if it isn't running.
+  function launchSessionSlot(trackId, sceneId) {
+    const slot = getSessionSlot(trackId, sceneId)
+    sessionQueued[trackId] = { patternId: slot?.patternId ?? null, sceneId }
+    _ensureSessionTransport()
+  }
+  function stopSessionTrack(trackId) {
+    if (!sessionPlaying[trackId] && !sessionQueued[trackId]) return
+    sessionQueued[trackId] = { patternId: null, sceneId: null }
+  }
+  // Length of a scene in bars: its longest pattern.
+  function _sceneCells(sceneId) {
+    let len = 0
+    for (const t of playlistTracks) {
+      const sl = getSessionSlot(t.id, sceneId)
+      if (sl) len = Math.max(len, _patternCells(sl.patternId))
+    }
+    return len
+  }
+  // Cycle a scene's follow-action loop count: 1 → 2 → 4 → 8 → 1.
+  function cycleSceneLoops(sceneId) {
+    const sc = sessionScenes.find(x => x.id === sceneId)
+    if (!sc) return
+    const order = [1, 2, 4, 8]
+    sc.loops = order[(order.indexOf(sc.loops ?? 1) + 1) % order.length]
+  }
+
+  // Launch a whole row: tracks with an empty slot in this scene stop.
+  function launchSessionScene(sceneId) {
+    _pendingScene = sceneId
+    for (const t of playlistTracks) {
+      const slot = getSessionSlot(t.id, sceneId)
+      if (slot) sessionQueued[t.id] = { patternId: slot.patternId, sceneId }
+      else if (sessionPlaying[t.id]) sessionQueued[t.id] = { patternId: null, sceneId: null }
+    }
+    _ensureSessionTransport()
+  }
+  function stopAllSessionClips() {
+    for (const tid of Object.keys(sessionPlaying)) sessionQueued[tid] = { patternId: null, sceneId: null }
+  }
+  function _ensureSessionTransport() {
+    if (isPlaying.value || transportState.value === 'arming') return
+    playbackStartCell.value = 0
+    displayCell.value = 0
+    startPlay()
+  }
+
+  // Called by the scheduler at every bar boundary it reaches.
+  function _sessionBarBoundary(cell) {
+    // Follow action: when the current scene has played its loops, launch the
+    // next scene that has clips (wrapping to the first).
+    if (sessionFollow.value && _sceneRun && sessionActive.value && !Object.keys(sessionQueued).length) {
+      const sc = sessionScenes.find(x => x.id === _sceneRun.sceneId)
+      const len = sc ? _sceneCells(sc.id) * (sc.loops ?? 1) : 0
+      if (sc && len > 0 && cell - _sceneRun.startCell >= len) {
+        const i = sessionScenes.indexOf(sc)
+        const order = [...sessionScenes.slice(i + 1), ...sessionScenes.slice(0, i + 1)]
+        const next = order.find(x => _sceneCells(x.id) > 0)
+        if (next) launchSessionScene(next.id)
+      }
+    }
+    if (!Object.keys(sessionQueued).length) return
+    const q = Math.max(1, sessionQuantize.value | 0)
+    if (sessionActive.value && q > 1 && (cell - _sessionOrigin) % q !== 0) return
+    if (!sessionActive.value) { sessionActive.value = true; _sessionOrigin = cell }
+    for (const [tid, item] of Object.entries(sessionQueued)) {
+      if (item.patternId) sessionPlaying[tid] = { patternId: item.patternId, sceneId: item.sceneId, startCell: cell }
+      else delete sessionPlaying[tid]
+      delete sessionQueued[tid]
+      if (sessionRecording.value) _sessionLog.push({ trackId: tid, patternId: item.patternId, cell })
+    }
+    if (_pendingScene) { _sceneRun = { sceneId: _pendingScene, startCell: cell }; _pendingScene = null }
+    if (!Object.keys(sessionPlaying).length) _sceneRun = null
+  }
+
+  function _sessionClipsForCell(cell) {
+    const out = []
+    const muted = new Set(playlistTracks.filter(t => t.muted).map(t => t.id))
+    for (const [tid, pl] of Object.entries(sessionPlaying)) {
+      if (muted.has(tid)) continue
+      const len = _patternCells(pl.patternId)
+      out.push({ patternId: pl.patternId, clipOffset: ((cell - pl.startCell) % len + len) % len, clipWidth: len, slipOffset: 0 })
+    }
+    return out
+  }
+
+  // Loop progress (0..1) of a playing slot, for the UI.
+  function sessionSlotProgress(trackId) {
+    const pl = sessionPlaying[trackId]
+    if (!pl || !isPlaying.value) return 0
+    const len = _patternCells(pl.patternId)
+    const bars = (((sessionCell.value - pl.startCell) % len) + len) % len
+    return (bars * totalSteps.value + Math.max(0, displayStep.value) + 1) / (len * totalSteps.value)
+  }
+
+  // Arm/disarm capture. Disarming writes the captured performance into the
+  // playlist: every launch becomes back-to-back pattern clips on its track,
+  // starting at bar 1.
+  function toggleSessionRecording() {
+    if (!sessionRecording.value) {
+      _sessionLog = Object.entries(sessionPlaying).map(([trackId, pl]) => ({ trackId, patternId: pl.patternId, cell: sessionCell.value }))
+      sessionRecording.value = true
+      return 0
+    }
+    sessionRecording.value = false
+    return _writeSessionLog(sessionCell.value + 1)
+  }
+  function _writeSessionLog(endCell) {
+    if (!_sessionLog.length) return 0
+    pushUndo()
+    const origin = Math.min(..._sessionLog.map(e => e.cell))
+    let placed = 0
+    const byTrack = new Map()
+    for (const e of _sessionLog) {
+      if (!byTrack.has(e.trackId)) byTrack.set(e.trackId, [])
+      byTrack.get(e.trackId).push(e)
+    }
+    for (const [trackId, evs] of byTrack) {
+      evs.sort((a, b) => a.cell - b.cell)
+      evs.forEach((e, i) => {
+        if (!e.patternId) return
+        const from = e.cell - origin
+        const to = (i + 1 < evs.length ? evs[i + 1].cell : endCell) - origin
+        const len = _patternCells(e.patternId)
+        for (let c = from; c < to; c += len) { placeClip(trackId, c, e.patternId, Math.min(len, to - c)); placed++ }
+      })
+    }
+    _sessionLog = []
+    return placed
+  }
+
+  // Lay the scenes end to end in the playlist (scene order = song order).
+  function sessionScenesToPlaylist() {
+    pushUndo()
+    let cell = 0
+    for (const sc of sessionScenes) {
+      const slots = playlistTracks.map(t => [t.id, getSessionSlot(t.id, sc.id)]).filter(([, sl]) => sl)
+      if (!slots.length) continue
+      const len = Math.max(...slots.map(([, sl]) => _patternCells(sl.patternId)))
+      for (const [tid, sl] of slots) {
+        const plen = _patternCells(sl.patternId)
+        for (let c = 0; c < len; c += plen) placeClip(tid, cell + c, sl.patternId, Math.min(plen, len - c))
+      }
+      cell += len
+    }
+    return cell
+  }
+
+  function _resetSessionPlayback() {
+    _sceneRun = null; _pendingScene = null
+    for (const k of Object.keys(sessionPlaying)) delete sessionPlaying[k]
+    for (const k of Object.keys(sessionQueued)) delete sessionQueued[k]
+    sessionActive.value = false
+    if (sessionRecording.value) { sessionRecording.value = false; _writeSessionLog(sessionCell.value + 1) }
+  }
+
   function getClipsForCell(cell) {
+    if (sessionActive.value) return _sessionClipsForCell(cell)
     if (!usePlaylist.value) {
       // Channel-rack mode: single "virtual" clip with no boundary
       return [{ patternId: currentPatternId.value, clipOffset: 0, clipWidth: 0x7FFFFFFF, slipOffset: 0 }]
     }
     const playingTrackIds = new Set(playlistTracks.filter(t => !t.muted).map(t => t.id))
-    const cellMod = cell % PLAYLIST_CELLS
+    const cellMod = cell % playlistCells.value
     return playlistClips
       .filter(c => {
         const w = c.width || 1
@@ -4067,7 +4717,10 @@ export function useStudio() {
   function getPatternsForCell(cell) { return getClipsForCell(cell).map(c => c.patternId) }
 
   function scheduleStep(step, baseWhen, cell) {
-    noteQueue.push({ step, time: baseWhen, cell: cell % PLAYLIST_CELLS, isSong: usePlaylist.value })
+    if (usePlaylist.value && !sessionActive.value && automationClips.length) {
+      _applyAutomationAt((cell % playlistCells.value) + step / totalSteps.value)
+    }
+    noteQueue.push({ step, time: baseWhen, cell: cell % playlistCells.value, absCell: cell, isSong: usePlaylist.value && !sessionActive.value })
     syncVolumes()
     const secPerBeat = 60 / bpm.value
     const secPerStep = secPerBeat / 4                 // Δstep (a 16th note)
@@ -4089,23 +4742,27 @@ export function useStudio() {
             ? ch.loopLength : null
           const s = loopLen !== null ? step % loopLen : step
           if (d.steps[s]) {
-            const vel      = d.stepVelocities?.[s] ?? 0.8
+            // Groove pool: per-step timing + velocity feel.
+            const gr       = grooveAt(ch.params, s * TICKS_PER_STEP)
+            const t        = Math.max(audioCtx.currentTime, when + gr.dt * secPerStep)
+            const vel      = (d.stepVelocities?.[s] ?? 0.8) * gr.vel
             const pitchOff = d.stepPitches?.[s]    ?? 0
+            const fxNotes  = applyNoteFx(ch.params, (ch.params.pitch ?? 60) + pitchOff, vel, SCALE_DEFS)
+            if (!fxNotes.length) return   // dropped by the channel's chance
             // Cut-self: a 2 ms fade-out/in de-clicks the choke.
             if (cutGains[ci]) {
               const cg = cutGains[ci].gain
-              cg.cancelScheduledValues(when)
-              cg.setValueAtTime(cg.value, when)
-              cg.linearRampToValueAtTime(0.0001, when + 0.002)
-              cg.linearRampToValueAtTime(1.0,    when + 0.004)
+              cg.cancelScheduledValues(t)
+              cg.setValueAtTime(cg.value, t)
+              cg.linearRampToValueAtTime(0.0001, t + 0.002)
+              cg.linearRampToValueAtTime(1.0,    t + 0.004)
             }
-            const basePitch = (ch.params.pitch ?? 60) + pitchOff
-            if (ch.params.arpEnabled && ch.type === 'audiofile') {
+            if (ch.params.arpEnabled) {
               // Per-step ratchet/arp: the arp fills one step (lower the rate for rolls).
-              _scheduleArp(audioCtx, ch, [basePitch], when, secPerStep, cutDest, { ...ch.params, velocity: vel })
+              _scheduleArp(audioCtx, ch, fxNotes.map(n => n.pitch), t, secPerStep, cutDest, { ...ch.params, velocity: fxNotes[0].velocity })
             } else {
-              ch.fn(audioCtx, when, { ...ch.params, pitch: basePitch, velocity: vel }, cutDest)
-              registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
+              for (const n of fxNotes) ch.fn(audioCtx, t, { ...ch.params, pitch: n.pitch, velocity: n.velocity }, cutDest)
+              registerVoice(t, (ch.params.release ?? ch.params.decay ?? 0.2) + 0.1)
             }
           }
         } else {
@@ -4125,25 +4782,30 @@ export function useStudio() {
           const _stepNotes = _byStep?.get(patternStep)
           if (_stepNotes) {
             const rawParams = toRaw(ch.params)
-            const arpOn = ch.params.arpEnabled && ch.type === 'audiofile'
+            const arpOn = !!ch.params.arpEnabled
             // Arp: group notes that start on the same tick into a chord, then
             // arpeggiate each chord across its (longest) note length.
             const arpGroups = arpOn ? new Map() : null
             for (const note of _stepNotes) {
               if (note.muted) continue
-              const noteWhen    = when + (note.startTick - stepStartTick) * secPerTick
+              // Per-note chance: a note with chance < 1 plays only that often.
+              if (note.chance != null && note.chance < 1 && Math.random() >= note.chance) continue
+              const gr          = grooveAt(rawParams, note.startTick)
+              const noteWhen    = Math.max(audioCtx.currentTime, when + (note.startTick - stepStartTick) * secPerTick + gr.dt * (60 / bpm.value) / 4)
               const nominalGate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
               const ticksToEnd  = clipEndTick - note.startTick
               const gate = ticksToEnd > 0
                 ? Math.min(nominalGate, Math.max(0.01, ticksToEnd * secPerTick - 0.005))
                 : nominalGate
+              const fxNotes = applyNoteFx(rawParams, note.pitch + masterPitchSemis.value, (note.velocity ?? 1) * gr.vel, SCALE_DEFS)
+              if (!fxNotes.length) continue
               if (arpOn) {
                 let g = arpGroups.get(note.startTick)
-                if (!g) { g = { when: noteWhen, span: 0, pitches: [], vel: note.velocity ?? 1 }; arpGroups.set(note.startTick, g) }
-                g.pitches.push(note.pitch + masterPitchSemis.value)
+                if (!g) { g = { when: noteWhen, span: 0, pitches: [], vel: fxNotes[0].velocity }; arpGroups.set(note.startTick, g) }
+                for (const n of fxNotes) g.pitches.push(n.pitch)
                 if (gate > g.span) g.span = gate
               } else {
-                ch.fn(audioCtx, noteWhen, { ...rawParams, pitch: note.pitch + masterPitchSemis.value, velocity: note.velocity ?? 1, gate }, dest)
+                for (const n of fxNotes) ch.fn(audioCtx, noteWhen, { ...rawParams, pitch: n.pitch, velocity: n.velocity, gate }, dest)
                 registerVoice(noteWhen, gate + 0.12)
               }
             }
@@ -4199,12 +4861,13 @@ export function useStudio() {
     // can capture a continuous take beyond the pattern boundary.
     const infiniteRecord = !loopRecord.value && recordArmed.value && !usePlaylist.value
     // Otherwise: loop region → pattern-length override → auto-length.
+    const barMode = usePlaylist.value || sessionActive.value
     const loopEndTick = infiniteRecord
       ? null
-      : (loopRegion.value?.endTick ?? (usePlaylist.value ? steps * TICKS_PER_STEP : getPatternLengthTicks(currentPatternId.value)))
+      : (loopRegion.value?.endTick ?? (barMode ? steps * TICKS_PER_STEP : getPatternLengthTicks(currentPatternId.value)))
     const effectiveSteps = infiniteRecord
       ? 0x3FFFFFFF   // ~1 billion — playhead never wraps during recording
-      : (usePlaylist.value ? steps : Math.max(steps, Math.ceil(loopEndTick / TICKS_PER_STEP)))
+      : (sessionActive.value ? steps : usePlaylist.value ? steps : Math.max(steps, Math.ceil(loopEndTick / TICKS_PER_STEP)))
     // Buffer-deadline miss: if the next event is already in the past, the
     // scheduler fell behind its window → register a dropout (underrun).
     if (nextNoteTime < audioCtx.currentTime - 0.001) audioUnderruns.value++
@@ -4223,15 +4886,17 @@ export function useStudio() {
     if (countInStepsLeft > 0) return   // still counting in — skip note scheduling
 
     while (nextNoteTime < audioCtx.currentTime + LOOK_AHEAD) {
+      // Session launches land on bar boundaries.
+      if (schedStep % steps === 0) _sessionBarBoundary(schedCell)
       // Pass base grid time — per-channel swing applied inside scheduleStep
-      scheduleStep(schedStep % effectiveSteps, nextNoteTime, schedCell)
+      scheduleStep(schedStep % (sessionActive.value ? steps : effectiveSteps), nextNoteTime, schedCell)
       // Metronome: one click per beat (4 steps/beat), accent on the downbeat (always at totalSteps boundary).
       if (metronomeOn.value && schedStep % 4 === 0) {
         scheduleMetroClick(nextNoteTime, metroAccent.value && schedStep % steps === 0)
       }
       nextNoteTime += secPerStep
       schedStep++
-      if (schedStep % effectiveSteps === 0 && usePlaylist.value) schedCell++
+      if (sessionActive.value ? schedStep % steps === 0 : (schedStep % effectiveSteps === 0 && usePlaylist.value)) schedCell++
     }
     scheduleAudioClips()
     // Audio processing load = compute time of this block / its time-window deadline.
@@ -4253,7 +4918,7 @@ export function useStudio() {
   }
 
   function scheduleAudioClips() {
-    if (!usePlaylist.value || !audioCtx) return
+    if (!usePlaylist.value || sessionActive.value || !audioCtx) return
     const now        = audioCtx.currentTime
     const horizon    = now + LOOK_AHEAD + 0.5   // wider window; clips scheduled once
     const secPerCell = getSecPerCell()
@@ -4336,7 +5001,7 @@ export function useStudio() {
   // No-op in PAT mode (the playlist playhead is frozen during pattern play).
   function seekTo(targetCell) {
     if (!usePlaylist.value) return
-    const cell = Math.max(0, Math.min(PLAYLIST_CELLS - 1, Math.floor(targetCell)))
+    const cell = Math.max(0, Math.min(playlistCells.value - 1, Math.floor(targetCell)))
     displayCell.value      = cell
     playbackStartCell.value = cell
     if (!isPlaying.value || !audioCtx) return
@@ -4365,6 +5030,7 @@ export function useStudio() {
         beatTick.value++
       } else {
         displayStep.value = entry.step
+        sessionCell.value = entry.absCell
         if (entry.isSong) displayCell.value = entry.cell
         // Emit a beat pulse when the audio-locked playhead crosses a beat. This is
         // read off the look-ahead queue (already latency-compensated) so the visual
@@ -4446,6 +5112,8 @@ export function useStudio() {
   }
 
   function stopPlay() {
+    _resetSessionPlayback()
+    _autoLast.clear()
     finalizeRecordedNotes()
     isPlaying.value = false
     transportState.value = 'stopped'
@@ -4474,6 +5142,10 @@ export function useStudio() {
   // realtime capture path records them through the live graph instead.
   const _WORKLET_TYPES = new Set(['wasm', 'custom', 'subterra'])
   function _offlineRenderable(ch) { return !_WORKLET_TYPES.has(ch?.type) }
+  // VST channels make no sound in the Web-Audio graph (their fn only forwards MIDI
+  // to the native host), so they're excluded from BOTH the offline render and the
+  // realtime worklet capture, and bounced natively instead (renderVstToBuffer).
+  function _isVst(ch) { return ch?.type === 'vst' }
 
   // ── Shared render scheduler ────────────────────────────────────────────────────
   //   Flattens a pattern- or song-render into a flat, channel-tagged event list
@@ -4554,14 +5226,17 @@ export function useStudio() {
             const loopLen = ch.loopEnabled && ch.loopLength > 0 && ch.loopLength < stepsPerCell ? ch.loopLength : null
             const s = loopLen !== null ? step % loopLen : step
             if (!d.steps[s]) return
-            const vel      = d.stepVelocities?.[s] ?? 0.8
+            const gr       = grooveAt(ch.params, s * TICKS_PER_STEP)
+            const t        = Math.max(START, when + gr.dt * secPerStep)
+            const vel      = (d.stepVelocities?.[s] ?? 0.8) * gr.vel
             const pitchOff = d.stepPitches?.[s]    ?? 0
-            if (ch.cutSelf) events.push({ kind: 'cut', ci, when })
-            const basePitch = (ch.params.pitch ?? 60) + pitchOff
-            if (ch.params.arpEnabled && ch.type === 'audiofile') {
-              events.push({ kind: 'arp', ci, cut: true, when, span: secPerStep, pitches: [basePitch], baseParams: { ...ch.params, velocity: vel } })
+            const fxNotes  = applyNoteFx(ch.params, (ch.params.pitch ?? 60) + pitchOff, vel, SCALE_DEFS)
+            if (!fxNotes.length) return
+            if (ch.cutSelf) events.push({ kind: 'cut', ci, when: t })
+            if (ch.params.arpEnabled) {
+              events.push({ kind: 'arp', ci, cut: true, when: t, span: secPerStep, pitches: fxNotes.map(n => n.pitch), baseParams: { ...ch.params, velocity: fxNotes[0].velocity } })
             } else {
-              events.push({ kind: 'note', ci, cut: true, when, params: { ...ch.params, pitch: basePitch, velocity: vel } })
+              for (const n of fxNotes) events.push({ kind: 'note', ci, cut: true, when: t, params: { ...ch.params, pitch: n.pitch, velocity: n.velocity } })
             }
           } else {
             const patternStep = clipOffset * stepsPerCell + step + slipOffset
@@ -4571,21 +5246,25 @@ export function useStudio() {
             const byStep    = offByStep(patternId, ch.id)
             const stepNotes = byStep?.get(patternStep)
             if (!stepNotes) return
-            const arpOn = ch.params.arpEnabled && ch.type === 'audiofile'
+            const arpOn = !!ch.params.arpEnabled
             const arpGroups = arpOn ? new Map() : null
             for (const note of stepNotes) {
               if (note.muted) continue
-              const noteWhen    = when + (note.startTick - stepStartTick) * secPerTick
+              if (note.chance != null && note.chance < 1 && Math.random() >= note.chance) continue
+              const gr          = grooveAt(ch.params, note.startTick)
+              const noteWhen    = Math.max(START, when + (note.startTick - stepStartTick) * secPerTick + gr.dt * secPerStep)
               const nominalGate = Math.max(0.05, (note.durationTicks ?? TICKS_PER_STEP) * secPerTick - 0.02)
               const ticksToEnd  = clipEndTick - note.startTick
               const gate = ticksToEnd > 0 ? Math.min(nominalGate, Math.max(0.01, ticksToEnd * secPerTick - 0.005)) : nominalGate
+              const fxNotes = applyNoteFx(ch.params, note.pitch + masterPitch, (note.velocity ?? 1) * gr.vel, SCALE_DEFS)
+              if (!fxNotes.length) continue
               if (arpOn) {
                 let g = arpGroups.get(note.startTick)
-                if (!g) { g = { when: noteWhen, span: 0, pitches: [], vel: note.velocity ?? 1 }; arpGroups.set(note.startTick, g) }
-                g.pitches.push(note.pitch + masterPitch)
+                if (!g) { g = { when: noteWhen, span: 0, pitches: [], vel: fxNotes[0].velocity }; arpGroups.set(note.startTick, g) }
+                for (const n of fxNotes) g.pitches.push(n.pitch)
                 if (gate > g.span) g.span = gate
               } else {
-                events.push({ kind: 'note', ci, cut: false, when: noteWhen, params: { ...ch.params, pitch: note.pitch + masterPitch, velocity: note.velocity ?? 1, gate } })
+                for (const n of fxNotes) events.push({ kind: 'note', ci, cut: false, when: noteWhen, params: { ...ch.params, pitch: n.pitch, velocity: n.velocity, gate } })
               }
             }
             if (arpGroups) for (const g of arpGroups.values())
@@ -4612,7 +5291,10 @@ export function useStudio() {
       sampleRate = 44100,
       tail = 3.5,
       normalize = true,
+      onlyChannelIds = null,   // render just these channels (bounce)
+      bypassMixer = false,     // …straight to the master, skipping mixer inserts
     } = opts
+    const only = onlyChannelIds ? new Set(onlyChannelIds) : null
 
     const bpmV         = bpm.value
     const secPerStep   = (60 / bpmV) / 4
@@ -4634,7 +5316,7 @@ export function useStudio() {
     // Resolve playlist audio clips (song mode only — the playlist owns them).
     const playingTracks = new Set(playlistTracks.filter(t => !t.muted).map(t => t.id))
     const audioClips = []
-    if (mode === 'song') {
+    if (mode === 'song' && !only) {
       for (const clip of playlistClips) {
         if (clip.type !== 'audio' || clip.muted || !playingTracks.has(clip.trackId)) continue
         const buf = getWarpedClipBuf(clip)
@@ -4673,9 +5355,7 @@ export function useStudio() {
       const eqHigh = offCtx.createBiquadFilter()
       const gain   = offCtx.createGain()
       const panner = offCtx.createStereoPanner()
-      eqLow.type  = 'lowshelf';  eqLow.frequency.value  = 80;   eqLow.gain.value  = mt.eq.low
-      eqMid.type  = 'peaking';   eqMid.frequency.value  = 1000; eqMid.Q.value = 1; eqMid.gain.value = mt.eq.mid
-      eqHigh.type = 'highshelf'; eqHigh.frequency.value = 8000; eqHigh.gain.value = mt.eq.high
+      _applyEqParams({ eqLow, eqMid, eqHigh }, mt.eq)
       gain.gain.value  = mt.muted ? 0 : mt.volume
       panner.pan.value = mt.pan
       eqLow.connect(eqMid); eqMid.connect(eqHigh)
@@ -4687,8 +5367,7 @@ export function useStudio() {
       })
       const phase = offCtx.createGain(); phase.gain.value = mt.phaseInvert ? -1 : 1
       tail.connect(phase); phase.connect(gain); gain.connect(panner)
-      panner.connect(masterGainOff)
-      return { id: mt.id, eqLow, panner, sendGains: {} }
+      return { id: mt.id, output: mt.output ?? null, eqLow, gain, panner, sendGains: {} }
     })
     const insertById = id => inserts.find(n => n.id === id)
     // Post-fader send taps into the return buses.
@@ -4705,6 +5384,11 @@ export function useStudio() {
         node.sendGains[rtnId] = sg
       }
     })
+    // Track outputs: the master, or another insert the track is routed into.
+    for (const node of inserts) {
+      const target = node.output ? insertById(node.output) : null
+      node.panner.connect(target && target !== node ? target.eqLow : masterGainOff)
+    }
     const insertDest = mtIdx => (mtIdx >= 1 && inserts[mtIdx - 1]) ? inserts[mtIdx - 1].eqLow : masterGainOff
 
     // Pre-decode GM soundfonts into THIS offline context.
@@ -4718,9 +5402,11 @@ export function useStudio() {
 
     // Per-channel routing: fn → [cut] → gain(vol) → pan → insert FX → mixer/master.
     const gainNode = new Array(rawChannels.length).fill(null)
+    const panNode  = new Array(rawChannels.length).fill(null)
     const cutNode  = new Array(rawChannels.length).fill(null)
     rawChannels.forEach((ch, ci) => {
-      if (ch.muted || !_offlineRenderable(ch)) return
+      if (ch.muted || !_offlineRenderable(ch) || _isVst(ch)) return
+      if (only && !only.has(ch.id)) return
       const g = offCtx.createGain(); g.gain.value = ch.volume ?? 1
       const p = offCtx.createStereoPanner(); p.pan.value = ch.pan ?? 0
       g.connect(p)
@@ -4730,10 +5416,17 @@ export function useStudio() {
         let h; try { h = createEffect(offCtx, fx) } catch (_) { h = null }
         if (h) { tail.connect(h.input); tail = h.output }
       })
-      tail.connect(insertDest(ch.mixerTrack || 0))
+      tail.connect(bypassMixer ? masterGainOff : insertDest(ch.mixerTrack || 0))
       gainNode[ci] = g
+      panNode[ci]  = p
       if (ch.cutSelf) { const cg = offCtx.createGain(); cg.gain.value = 1; cg.connect(g); cutNode[ci] = cg }
     })
+
+    // Song automation (tempo excepted: renders run at a constant tempo).
+    if (mode === 'song' && automationClips.length) {
+      _renderAutomation(events, { master: masterGainOff, inserts, chGain: gainNode, chPan: panNode },
+        { secPerStep, START, steps: stepsPerCell })
+    }
 
     // Dispatch the schedule into the offline graph.
     for (const ev of events) {
@@ -4899,6 +5592,121 @@ export function useStudio() {
     return buf
   }
 
+  // ── Native VST bounce (export) ─────────────────────────────────────────────────
+  //   VST instrument channels make no sound in the Web-Audio graph, so their notes
+  //   are bounced by the native host: we compile the same schedule, hand each VST
+  //   channel a frame-stamped note list to the native host (`renderVst` IPC), and get
+  //   back interleaved-stereo float32 PCM. Each channel's buffer is summed
+  //   at its volume/pan into one stereo buffer, which RenderModal mixes alongside
+  //   the offline (Web-Audio) and realtime (worklet) renders — sample-aligned
+  //   because all three share `_compileRenderSchedule`.
+  const _vstRenderPending = new Map()   // reqId → { resolve, reject, timer }
+  let   _vstRenderSeq     = 0
+  if (isDesktop) {
+    onHostMessage((msg) => {
+      const reqId = msg.payload?.reqId
+      if (!reqId || !_vstRenderPending.has(reqId)) return
+      const p = _vstRenderPending.get(reqId)
+      if (msg.type === 'vstRenderResult') { _vstRenderPending.delete(reqId); clearTimeout(p.timer); p.resolve(msg.payload) }
+      else if (msg.type === 'vstRenderError') { _vstRenderPending.delete(reqId); clearTimeout(p.timer); p.reject(new Error(msg.payload?.message || 'VST render failed.')) }
+    })
+  }
+
+  function _requestVstRender(channelId, sampleRate, totalFrames, notes) {
+    const reqId = 'vr-' + (++_vstRenderSeq)
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        _vstRenderPending.delete(reqId)
+        reject(new Error('VST render timed out.'))
+      }, 5 * 60 * 1000)
+      _vstRenderPending.set(reqId, { resolve, reject, timer })
+      sendToHost('renderVst', { reqId, channelId, sampleRate, totalFrames, notes })
+    })
+  }
+
+  // Interleaved-stereo float32 PCM → AudioBuffer, scaled by volume/pan. The host
+  // hands bounces back as a one-shot file URL (`res.url`); `res.pcm` (base64) is
+  // the older inline form.
+  async function _fetchVstPcm(res) {
+    if (res?.url) {
+      const r = await fetch(res.url)
+      if (!r.ok) throw new Error('Bounce fetch failed: ' + r.status)
+      return new Float32Array(await r.arrayBuffer())
+    }
+    const bin = atob(res?.pcm || '')
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return new Float32Array(bytes.buffer)
+  }
+
+  function _pcmToBuffer(f32, sampleRate, volume, pan) {
+    const frames = Math.floor(f32.length / 2)
+    if (frames <= 0) return null
+    const buf = new AudioBuffer({ length: frames, numberOfChannels: 2, sampleRate })
+    const L = buf.getChannelData(0), R = buf.getChannelData(1)
+    const gL = (volume ?? 1) * (pan <= 0 ? 1 : 1 - pan)
+    const gR = (volume ?? 1) * (pan >= 0 ? 1 : 1 + pan)
+    for (let i = 0; i < frames; i++) { L[i] = f32[i * 2] * gL; R[i] = f32[i * 2 + 1] * gR }
+    return buf
+  }
+
+  async function renderVstToBuffer(opts = {}) {
+    if (!isDesktop) return null
+    const { mode = 'song', patternId: renderPatId = currentPatternId.value, bars = 2,
+            sampleRate = 44100, tail = 3.5 } = opts
+
+    const rawChannels = toRaw(channels)
+    const hasVst = rawChannels.some(c => !c.muted && _isVst(c) && c.vstPath)
+    if (!hasVst) return null
+
+    const { events } = _compileRenderSchedule({ mode, patternId: renderPatId, bars })
+    const defaultGate = (60 / bpm.value) / 4   // one step — fallback for step-mode notes
+
+    // Collect per-VST-channel frame-stamped note lists.
+    const byChannel = new Map()   // ci → { channelId, volume, pan, notes:[] }
+    let lastEndFrame = 0
+    for (const ev of events) {
+      const ch = rawChannels[ev.ci]
+      if (!ch || ch.muted || !_isVst(ch) || !ch.vstPath || ev.kind !== 'note') continue
+      const pitch = Math.max(0, Math.min(127, Math.round(ev.params?.pitch ?? 60)))
+      const vel   = Math.max(1, Math.min(127, Math.round((ev.params?.velocity ?? 1) * 127)))
+      const gate  = ev.params?.gate ?? defaultGate
+      const s = Math.max(0, Math.round(ev.when * sampleRate))
+      const e = Math.max(s + 1, Math.round((ev.when + gate) * sampleRate))
+      if (e > lastEndFrame) lastEndFrame = e
+      let entry = byChannel.get(ev.ci)
+      if (!entry) { entry = { channelId: ch.id, volume: ch.volume ?? 1, pan: ch.pan ?? 0, notes: [] }; byChannel.set(ev.ci, entry) }
+      entry.notes.push({ p: pitch, v: vel, s, e })
+    }
+    if (!byChannel.size) return null
+
+    // Run long enough to capture note tails (delay/reverb ring past noteOff).
+    const totalFrames = lastEndFrame + Math.ceil(tail * sampleRate)
+
+    // Bounce each channel natively, then sum at volume/pan.
+    const buffers = []
+    for (const entry of byChannel.values()) {
+      try {
+        const res = await _requestVstRender(entry.channelId, sampleRate, totalFrames, entry.notes)
+        const buf = _pcmToBuffer(await _fetchVstPcm(res), sampleRate, entry.volume, entry.pan)
+        if (buf) buffers.push(buf)
+      } catch (err) {
+        console.error('[vst-render]', entry.channelId, err)
+      }
+    }
+    if (!buffers.length) return null
+    if (buffers.length === 1) return buffers[0]
+
+    const len = Math.max(...buffers.map(b => b.length))
+    const out = new AudioBuffer({ length: len, numberOfChannels: 2, sampleRate })
+    const oL = out.getChannelData(0), oR = out.getChannelData(1)
+    for (const b of buffers) {
+      const bl = b.getChannelData(0), br = b.getChannelData(1)
+      for (let i = 0; i < b.length; i++) { oL[i] += bl[i]; oR[i] += br[i] }
+    }
+    return out
+  }
+
   // ── Keyboard live play ────────────────────────────────────────────────────────
   const pressedKeys     = new Set()
   const pressedKeyPitch = new Map()  // key code → MIDI pitch (so keyUp knows what to stop)
@@ -5013,7 +5821,33 @@ export function useStudio() {
   // sustain=true → held voice that lasts until stopNote (live keyboard / piano keys).
   // sustain=false → brief one-shot audition (note drawing) with the instrument's
   // own natural decay; never leaves a voice open.
+  // Live notes that note FX expanded (chords): source key → pitches played.
+  const _liveFxNotes = new Map()
+
   function playNote(ch, pitch, sustain = true) {
+    if (ch && hasNoteFx(ch.params)) {
+      const key = ch.id + ':' + pitch
+      for (const p of _liveFxNotes.get(key) ?? []) _stopNoteRaw(ch, p)
+      const notes = applyNoteFx(ch.params, pitch, 1, SCALE_DEFS)
+      _liveFxNotes.set(key, notes.map(n => n.pitch))
+      for (const n of notes) _playNoteRaw(ch, n.pitch, sustain, n.velocity)
+      return
+    }
+    _playNoteRaw(ch, pitch, sustain, 1)
+  }
+
+  function stopNote(ch, pitch) {
+    const key = ch && (ch.id + ':' + pitch)
+    const derived = key && _liveFxNotes.get(key)
+    if (derived) {
+      _liveFxNotes.delete(key)
+      for (const p of derived) _stopNoteRaw(ch, p)
+      return
+    }
+    _stopNoteRaw(ch, pitch)
+  }
+
+  function _playNoteRaw(ch, pitch, sustain = true, velocity = 1) {
     if (!audioCtx) initAudio()
     const ci   = channels.indexOf(ch)
     const dest = (ci >= 0 && trackGains[ci]) ? trackGains[ci] : audioCtx.destination
@@ -5024,6 +5858,17 @@ export function useStudio() {
     // Retrigger: release any voice already sounding for this exact key first.
     _releaseLiveVoice(key, when)
 
+    // VST2 instrument (native host): forward the note over IPC; audio comes from
+    // the native engine, not the Web Audio graph.
+    if (ch.type === 'vst') {
+      sendToHost('vstNoteOn', { id: ch.id, pitch: p, velocity: Math.max(1, Math.round(velocity * 127)) })
+      // One-shot audition (drawing a note): auto-release so it doesn't hang.
+      // Held notes (sustain=true, live keyboard) are released by stopNote on key-up.
+      if (!sustain) setTimeout(() => sendToHost('vstNoteOff', { id: ch.id, pitch: p }), 250)
+      registerVoice(when, 0.2)
+      return
+    }
+
     // Continuous built-in synths (sawtooth + FM): sustain the note open-ended via a
     // generous gate, routed through a dedicated release-gain so note-off applies a
     // controllable release tail regardless of the instrument's internal envelope.
@@ -5031,7 +5876,7 @@ export function useStudio() {
       const relGain = audioCtx.createGain()
       relGain.gain.value = 1
       relGain.connect(dest)
-      ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1, gate: HOLD_MAX, hold: true }, relGain)
+      ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity, gate: HOLD_MAX, hold: true }, relGain)
       const relTime = Math.max(0.06, Math.min(2.5, ch.params.release ?? ch.params.decay ?? 0.4))
       liveVoices.set(key, {
         release(t) {
@@ -5051,7 +5896,7 @@ export function useStudio() {
     // Continuous GM voices: loop-sustain the sample until note-off (node.stop runs
     // the ADSR release).
     if (sustain && ch.sustains && ch.type === 'gm') {
-      const node = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1, hold: true }, dest)
+      const node = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity, hold: true }, dest)
       if (node) {
         liveVoices.set(key, {
           release(t) {
@@ -5064,8 +5909,8 @@ export function useStudio() {
       return
     }
 
-    // Arp-enabled sampler: feed the live arp clock instead of one held voice.
-    if (ch.type === 'audiofile' && ch.params?.arpEnabled) {
+    // Arp-enabled channel: feed the live arp clock instead of one held voice.
+    if (ch.params?.arpEnabled) {
       _liveArpNoteOn(ch, pitch)
       registerVoice(when, 0.2)
       return
@@ -5075,7 +5920,7 @@ export function useStudio() {
     // be released on note-off (a looping sample would otherwise ring forever). This
     // is what lets the live keyboard audition the sampler with its current settings.
     if (ch.type === 'audiofile') {
-      const voice = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1 }, dest)
+      const voice = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity }, dest)
       if (voice && voice.src) {
         const entry = {
           release(t) {
@@ -5102,19 +5947,21 @@ export function useStudio() {
     }
 
     // Plucked / percussive / one-shot voices: fire-and-forget, natural decay.
-    ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity: 1 }, dest)
+    ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity }, dest)
     registerVoice(when, (ch.params.release ?? ch.params.decay ?? 0.35) + 0.15)
   }
 
   // Stop an active note. Continuous built-in synths (sawtooth/FM/GM) release their
   // held voice here; plugin channels (WASM/JS/Custom/SUBTERRA) get a noteOff message.
   // Plucked/percussive Web-Audio voices self-stop, so this is a no-op for them.
-  function stopNote(ch, pitch) {
+  function _stopNoteRaw(ch, pitch) {
     if (!ch || !audioCtx) return
     const t = audioCtx.currentTime + 0.005
-    if (ch.type === 'audiofile' && ch.params?.arpEnabled) _liveArpNoteOff(ch, pitch)
+    if (ch.params?.arpEnabled) _liveArpNoteOff(ch, pitch)
     _releaseLiveVoice(ch.id + ':' + pitch, t)
-    if (ch.type === 'wasm') {
+    if (ch.type === 'vst') {
+      sendToHost('vstNoteOff', { id: ch.id, pitch: pitch + masterPitchSemis.value })
+    } else if (ch.type === 'wasm') {
       const node = wasmNodes.get(ch.id)
       if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
     } else if (ch.type === 'custom') {
@@ -5161,6 +6008,7 @@ export function useStudio() {
     pressedKeys.clear()
     pressedKeyPitch.clear()
     _liveArp.clear()
+    if (isDesktop) sendToHost('vstAllNotesOff', {})
     if (!audioCtx) return
 
     const t = audioCtx.currentTime
@@ -5211,6 +6059,8 @@ export function useStudio() {
     const _tag = e.target.tagName
     const _slider = _tag === 'INPUT' && e.target.type === 'range'
     if (!_slider && (_tag === 'INPUT' || _tag === 'SELECT' || _tag === 'TEXTAREA')) return
+    // Space = play / stop, from anywhere (and never "clicks" a focused button).
+    if (e.code === 'Space') { e.preventDefault(); togglePlay(); return }
     // Octave shift moved off [ and ] (now note keys) to - and =
     if (e.code === 'Minus')  { kbOctave.value = Math.max(0, kbOctave.value - 1); return }
     if (e.code === 'Equal')  { kbOctave.value = Math.min(8, kbOctave.value + 1); return }
@@ -5528,6 +6378,78 @@ export function useStudio() {
     channels.push(ch)
     if (audioCtx) rebuildGains()
     selectedChannelId.value = ch.id
+  }
+
+  // ── VST2 plugin channels (native desktop host) ──────────────────────────────
+  //   Each VST channel maps to ONE plugin instance in the native host, keyed by the
+  //   channel id, so many plugins (mixed 32/64-bit) run at once. The play fn
+  //   forwards notes over IPC; audio comes from the native engine, not Web Audio,
+  //   so ctx/dest are ignored.
+  function makeVstPlayFn(channelId) {
+    return function playVstNote(ctx, time, { pitch = 60, velocity = 1, gate = null } = {}, _dest) {
+      const delayMs = Math.max(0, (time - ctx.currentTime) * 1000)
+      const vel = Math.max(1, Math.min(127, Math.round((velocity ?? 1) * 127)))
+      const send = (offsetMs, fn) => {
+        const d = delayMs + offsetMs
+        if (d <= 4) fn(); else setTimeout(fn, d)
+      }
+      send(0, () => sendToHost('vstNoteOn', { id: channelId, pitch, velocity: vel }))
+      if (gate !== null) send(gate * 1000, () => sendToHost('vstNoteOff', { id: channelId, pitch }))
+    }
+  }
+
+  function addVstChannel(name = 'VST', path = '', id = undefined) {
+    const ch = makeChannel({
+      ...(id ? { id } : {}),     // adopt the host's id for console-driven loads
+      name:    (name || 'VST').toUpperCase().slice(0, 14),
+      color:   '#1abc9c',
+      type:    'vst',
+      mode:    'piano',
+      vstPath: path,
+      knobs:   [],
+      params:  {},
+    })
+    ch.fn = makeVstPlayFn(ch.id)   // bind the play fn to the now-known channel id
+    channels.push(ch)
+    if (audioCtx) rebuildGains()
+    selectedChannelId.value = ch.id
+    return ch
+  }
+
+  // Create the VST channel immediately (so a slot appears), then ask the host to
+  // pick a .dll and load it INTO that channel id. Mixed bitness is fine: 64-bit
+  // loads in-process, 32-bit via the bridge — both keyed by this id.
+  function addVstPlugin() {
+    if (!isDesktop) return
+    const ch = addVstChannel('VST', '')
+    ch._vstLoading = true          // dropped again if the pick is cancelled / fails
+    sendToHost('pickVst', { id: ch.id })
+  }
+
+  // Toggle a specific channel's plugin editor window (native host renders the GUI).
+  function openVstEditor(id) {
+    if (isDesktop && id) sendToHost('openVstEditor', { id })
+  }
+
+  // Host → UI: a plugin finished loading, failed, or the picker was cancelled.
+  if (isDesktop) {
+    onHostMessage((msg) => {
+      const id = msg.payload?.id
+      if (msg.type === 'vstLoaded') {
+        const ch = id && channels.find(c => c.id === id)
+        if (ch) {
+          ch.name = (msg.payload.name || ch.name || 'VST').toUpperCase().slice(0, 14)
+          ch.vstPath = msg.payload.path || ch.vstPath
+          ch._vstLoading = false
+        } else {
+          addVstChannel(msg.payload?.name, msg.payload?.path, id)   // console-driven load
+        }
+      } else if (msg.type === 'vstError' || msg.type === 'vstCancelled') {
+        // Drop a placeholder channel that never managed to load a plugin.
+        const ch = id && channels.find(c => c.id === id)
+        if (ch && ch._vstLoading) removeChannel(ch.id)
+      }
+    })
   }
 
   // Called from the UI when the user uploads a .wasm file.
@@ -5912,6 +6834,8 @@ export function useStudio() {
   function removeChannel(id) {
     const idx = channels.findIndex(c => c.id === id)
     if (idx < 0 || channels.length <= 1) return
+    // Free the native plugin instance (in-process host or 32-bit bridge process).
+    if (channels[idx]?.type === 'vst') sendToHost('vstUnload', { id })
     // Clean up Custom Synth node
     if (customSynthNodes.has(id)) {
       try { customSynthNodes.get(id).disconnect() } catch (_) {}
@@ -6203,10 +7127,21 @@ export function useStudio() {
     for (const key of Object.keys(mod.params)) delete ch.params[key]
   }
 
-  function saveProject(name = 'project') {
-    projectName.value = name
-    projectDirty.value = false   // saved → clean
-    const project = {
+  // Desktop: snapshot each plugin's sound (its state chunk) so reopening the
+  // project brings the same patch back, not just the same plugin.
+  async function _collectVstStates() {
+    const vstStates = {}
+    if (isDesktop) {
+      for (const ch of channels) {
+        if (ch.type === 'vst' && ch.vstPath) vstStates[ch.id] = (await getVstState(ch.id)) ?? ch.vstState
+      }
+    }
+    return vstStates
+  }
+
+  // Plain-JSON snapshot of the whole project (audio buffers excluded).
+  function _serializeProject(vstStates = {}) {
+    return {
       version: 1,
       bpm:        bpm.value,
       totalSteps: totalSteps.value,
@@ -6237,6 +7172,8 @@ export function useStudio() {
         instrumentType: ch.instrumentType ?? '',
         sampleSpec:     ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
         sampleName:     ch.sampleName,
+        vstPath:        ch.vstPath,
+        vstState:       vstStates[ch.id] ?? ch.vstState,
       })),
       channelGroups: channelGroups.map(g => ({ ...g })),
       patterns:      patterns.map(p => ({ ...p })),
@@ -6262,6 +7199,12 @@ export function useStudio() {
         return out
       })(),
       patternLengthOverrides: { ...patternLengthOverrides },
+      session: {
+        scenes: sessionScenes.map(sc => ({ ...sc })),
+        slots: JSON.parse(JSON.stringify(sessionSlots)),
+        quantize: sessionQuantize.value,
+        follow: sessionFollow.value,
+      },
       currentPatternId: currentPatternId.value,
       playlistTracks:   playlistTracks.map(t => ({ ...t })),
       playlistClips:    playlistClips.map(c => ({ ...c })),
@@ -6279,9 +7222,36 @@ export function useStudio() {
         fxSlots:     (mt.fxSlots ?? []).map(fx => fx ? { ...fx } : null),
         phaseInvert: mt.phaseInvert ?? false,
         sends:       { ...(mt.sends ?? {}) },
+        output:      mt.output ?? null,
         sidechain:   { ...(mt.sidechain ?? { source: null, amount: 0, attack: 0.01, release: 0.18 }) },
       })),
     }
+  }
+
+  // Where the open project lives on disk (desktop) — Save writes back there.
+  const projectPath = ref(null)
+  const PROJECT_FILTER = { name: 'Freaky Loops project', ext: ['freak'] }
+  const baseName = f => f.replace(/^.*[\\/]/, '').replace(/\.(freak|json)$/i, '')
+
+  async function saveProject(name = 'project', { saveAs = false } = {}) {
+    const vstStates = await _collectVstStates()
+    const project = _serializeProject(vstStates)
+    if (isDesktop) {
+      const res = await saveFileNative({
+        path: saveAs ? null : projectPath.value,
+        suggestedName: (name || 'project') + '.freak',
+        data: JSON.stringify(project, null, 2),
+        filter: PROJECT_FILTER,
+      })
+      if (!res || res.cancelled) return false
+      if (res.error) { alert(res.error); return false }
+      projectPath.value  = res.path
+      projectName.value  = baseName(res.name)
+      projectDirty.value = false
+      return true
+    }
+    projectName.value = name
+    projectDirty.value = false   // saved → clean
 
     const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' })
     const url  = URL.createObjectURL(blob)
@@ -6290,6 +7260,40 @@ export function useStudio() {
     a.download = name + '.freak'
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  // Desktop: Open… through the native dialog (or a recent file's path).
+  async function openProjectNative(path = null) {
+    const res = await openFileNative({ path, filter: { name: 'Projects', ext: ['freak', 'flp', 'zip'] } })
+    if (!res || res.cancelled) return false
+    if (res.error) { alert(res.error); return false }
+    if (res.binary) {
+      try {
+        const blob = await (await fetch(hostFileUrl(res.path))).blob()
+        await importProjectFiles([{ path: res.name, name: res.name, file: blob }], { path: res.path })
+      } catch (err) {
+        console.error('[FreakyLoops] Import failed:', err)
+        alert('Could not open ' + res.name + ': ' + err.message)
+        return false
+      }
+      return true
+    }
+    try {
+      _applyProject(JSON.parse(res.data))
+    } catch (err) {
+      console.error('[FreakyLoops] Failed to load project:', err)
+      alert('Failed to load project. The file may be corrupted or in an unsupported format.')
+      return false
+    }
+    projectPath.value  = res.path
+    projectName.value  = baseName(res.name)
+    projectDirty.value = false
+    return true
+  }
+
+  // Desktop window title follows the project name and its unsaved state.
+  if (isDesktop) {
+    watch([projectName, projectDirty], ([n, dirty]) => setWindowTitle(`${n || 'Untitled'}${dirty ? ' *' : ''} — Freaky Loops Studio`), { immediate: true })
   }
 
   function loadProjectFile(file) {
@@ -6308,8 +7312,369 @@ export function useStudio() {
     reader.readAsText(file)
   }
 
+  // ── Pattern-project import (.flp, or a .zip package holding one) ─────────────
+  //   1. The Rust reader (WebAssembly) parses the file in a few milliseconds.
+  //   2. Samples and plugins are located: on desktop by the host's file index
+  //      (any drive, moved folders, %Root% placeholders), on the web from files
+  //      dropped alongside the project or packed in the same .zip.
+  //   3. The project is mapped onto ours and loaded like a saved project.
+  //   4. Every sample is fetched and decoded once, in parallel, and attached.
+  const importState = reactive({ busy: false, stage: '', report: null })
+
+  // Attach a decoded sample to an imported sampler channel.
+  function _attachImportedSample(chId, buf, fileName) {
+    const ch = channels.find(c => c.id === chId)
+    if (!ch) return
+    const fromFile = { ...ch.params }
+    ch.params = { ..._samplerDefaults(buf), ...fromFile, warpEnabled: false }
+    audioFileBufs.set(ch.id, buf)
+    warpedSampleBufs.delete(ch.id)
+    _buildSamplerDerivedBufs(ch.id, buf)
+    ch.fn = makeAudioFileFn(ch.id)
+    ch.sampleName = fileName
+    ch.audioFileMissing = false
+    audioFileVersions[ch.id] = (audioFileVersions[ch.id] ?? 0) + 1
+  }
+
+  // Attach a decoded sample to an imported audio clip, trimmed to the region
+  // the project used.
+  function _attachImportedClip(job, buf, fileName) {
+    const clip = playlistClips.find(c => c.id === job.id)
+    if (!clip) return
+    const dur = buf.duration || 1
+    clip.startOffset = Math.max(0, Math.min(0.999, (job.startSec ?? 0) / dur))
+    clip.endOffset = Math.max(clip.startOffset + 0.001, Math.min(1, ((job.startSec ?? 0) + (job.lenSec ?? dur)) / dur))
+    clip.sampleName = fileName
+    clip.audioFileMissing = false
+    audioClipBufs.set(clip.id, buf)
+    audioClipVersions[clip.id] = (audioClipVersions[clip.id] ?? 0) + 1
+  }
+
+  /**
+   * Import a pattern-project. `bytes`: the .flp contents. Options:
+   *   name  — project name; path — where it lives on disk (desktop: samples
+   *   beside it are found first); files — [{ path, name, file }] dropped or
+   *   unzipped with it.
+   * Resolves to the import report (also kept in importState.report).
+   */
+  async function importPatternProject(bytes, { name = 'Imported project', path = null, files = [] } = {}) {
+    initAudio()
+    const t0 = performance.now()
+    importState.busy = true
+    importState.report = null
+    importState.stage = 'Reading the project…'
+    try {
+      const P = await parsePatternProject(bytes)
+      if (P.error) throw new Error(P.error)
+      const tParse = performance.now() - t0
+
+      // What the file refers to.
+      const samples = new Set()
+      for (const c of P.channels) {
+        if (c.sample) samples.add(c.sample)
+        for (const sp of c.plugin?.paths ?? []) if (AUDIO_EXT.test(sp)) samples.add(sp)
+      }
+      const vsts = P.channels.filter(c => c.plugin?.vst).map(c => c.plugin.vst)
+      // Built-in generators of the original app, by name (a VST build may be installed).
+      const natives = [...new Set(P.channels
+        .filter(c => c.kind === 'generator' && !c.plugin?.vst && c.plugin?.internal && !(c.plugin.paths ?? []).length)
+        .map(c => c.plugin.internal))]
+
+      // Files that came with the project (a dropped folder or the .zip),
+      // matched by name, ranked by how much of the stored path they share.
+      const byName = new Map()
+      for (const f of files) {
+        const k = f.name.toLowerCase()
+        if (!byName.has(k)) byName.set(k, [])
+        byName.get(k).push(f)
+      }
+      const fromFiles = stored => {
+        const list = byName.get(importBaseName(stored).toLowerCase())
+        if (!list) return null
+        const tail = stored.toLowerCase().split(/[\\/]/).reverse()
+        const score = f => { const t = f.path.toLowerCase().split('/').reverse(); let n = 0; while (n < t.length && t[n] === tail[n]) n++; return n }
+        return list.reduce((a, b) => (score(b) > score(a) ? b : a))
+      }
+
+      importState.stage = `Finding ${samples.size} samples${vsts.length ? ` and ${vsts.length} plugins` : ''}…`
+      const resolved = new Map()      // stored path → { file, name } | { url, path, name }
+      for (const sp of samples) { const f = fromFiles(sp); if (f) resolved.set(sp, { file: f.file, name: f.name }) }
+      let plugins = []
+      if (isDesktop) {
+        const ask = [...samples].filter(sp => !resolved.has(sp))
+        const r = await resolveAssetsNative({
+          project: path, samples: ask,
+          plugins: [...vsts.map(v => ({ name: v.name, path: v.path, vendor: v.vendor })), ...natives.map(n => ({ name: n, path: '' }))],
+        })
+        for (const [sp, hit] of Object.entries(r?.samples ?? {})) if (hit) resolved.set(sp, { url: hostFileUrl(hit), path: hit, name: importBaseName(hit) })
+        plugins = r?.plugins ?? []
+      }
+      const vstHit = new Map(vsts.map((v, i) => [v, plugins[i] ?? null]))
+      const nativeHit = new Map(natives.map((n, i) => [n, plugins[vsts.length + i] ?? null]))
+
+      const { project, jobs, report, usePlaylist: songMode } = mapPatternProject(P, {
+        desktop: isDesktop,
+        resolveVst: v => vstHit.get(v),
+        resolveNative: n => nativeHit.get(n),
+        lib: {
+          fmPresets: FM_PRESETS, drumPresets: _DRUM_IMPORT, gmParams: makeGMParams, gmKnobs, gmColor: gmChannelColor, gmSustains,
+          makeEffect, effectDefs: EFFECT_DEFS,
+        },
+      })
+      _applyProject(project)
+      usePlaylist.value = songMode
+      projectName.value = name.replace(/\.(flp|zip)$/i, '')
+      projectPath.value = null          // Save writes our own format, never over the original
+      projectDirty.value = true
+      mainView.value = songMode ? 'playlist' : 'sequencer'
+
+      // Decode every distinct sample once, all in parallel.
+      importState.stage = `Loading ${jobs.samples.length} samples…`
+      const decoded = new Map()
+      const decode = sp => {
+        if (!decoded.has(sp)) {
+          const src = resolved.get(sp)
+          decoded.set(sp, !src ? Promise.resolve(null) : (async () => {
+            const ab = src.file ? await src.file.arrayBuffer() : await (await fetch(src.url)).arrayBuffer()
+            return await decodeSampleFile(audioCtx, ab)
+          })().catch(err => { console.warn('[import] could not decode', sp, err); return null }))
+        }
+        return decoded.get(sp)
+      }
+      const missing = new Set()
+      _missingJobs = []
+      await Promise.all(jobs.samples.map(async j => {
+        const buf = await decode(j.path)
+        if (!buf) { missing.add(j.path); _missingJobs.push(j); return }
+        const fileName = resolved.get(j.path)?.name ?? importBaseName(j.path)
+        if (j.kind === 'channel') _attachImportedSample(j.id, buf, fileName)
+        else _attachImportedClip(j, buf, fileName)
+      }))
+      if (audioCtx) { rebuildGains(); buildMixerInserts() }
+
+      report.samplesTotal = decoded.size
+      report.samplesFound = decoded.size - missing.size
+      report.samplesMissing = [...missing]
+      report.parseMs = Math.round(tParse)
+      report.ms = Math.round(performance.now() - t0)
+      report.name = projectName.value
+      importState.report = report
+      return report
+    } finally {
+      importState.busy = false
+      importState.stage = ''
+    }
+  }
+
+  // Samples the last import couldn't find, kept so they can be located later.
+  let _missingJobs = []
+
+  /**
+   * Look for the last import's missing samples in a folder: on desktop one
+   * picked in the native dialog (and remembered for future imports), on the
+   * web the files of a folder the user chose ([{ path, name, file }]).
+   * Returns how many were found.
+   */
+  async function locateMissingSamples(files = null) {
+    if (!_missingJobs.length) return 0
+    const paths = [...new Set(_missingJobs.map(j => j.path))]
+    const hits = new Map()
+    if (files) {
+      const byName = new Map(files.map(f => [f.name.toLowerCase(), f]))
+      for (const sp of paths) { const f = byName.get(importBaseName(sp).toLowerCase()); if (f) hits.set(sp, { file: f.file, name: f.name }) }
+    } else if (isDesktop) {
+      const folder = await pickFolderNative('Where are the samples?')
+      if (!folder) return 0
+      importState.busy = true
+      importState.stage = 'Searching the folder…'
+      try {
+        const r = await resolveAssetsNative({ folders: [folder], samples: paths })
+        for (const [sp, hit] of Object.entries(r?.samples ?? {})) if (hit) hits.set(sp, { url: hostFileUrl(hit), name: importBaseName(hit) })
+      } finally { importState.busy = false; importState.stage = '' }
+    }
+    let found = 0
+    const still = []
+    await Promise.all(_missingJobs.map(async j => {
+      const src = hits.get(j.path)
+      let buf = null
+      if (src) {
+        try {
+          const ab = src.file ? await src.file.arrayBuffer() : await (await fetch(src.url)).arrayBuffer()
+          buf = await decodeSampleFile(audioCtx, ab)
+        } catch (err) { console.warn('[import] could not decode', j.path, err) }
+      }
+      if (!buf) { still.push(j); return }
+      found++
+      if (j.kind === 'channel') _attachImportedSample(j.id, buf, src.name)
+      else _attachImportedClip(j, buf, src.name)
+    }))
+    _missingJobs = still
+    const rep = importState.report
+    if (rep) {
+      const left = new Set(still.map(j => j.path))
+      rep.samplesMissing = rep.samplesMissing.filter(sp => left.has(sp))
+      rep.samplesFound = rep.samplesTotal - rep.samplesMissing.length
+    }
+    return found
+  }
+
+  /**
+   * Import from picked or dropped files: a .flp (plus any samples/folders that
+   * came with it) or a .zip package. `entries`: [{ path, name, file }], where
+   * `file` is anything with arrayBuffer() (File, Blob).
+   */
+  async function importProjectFiles(entries, { path = null } = {}) {
+    const all = [...entries]
+    // Unpack zips: their contents count as files dropped with the project.
+    for (const e of entries.filter(e => /\.zip$/i.test(e.name))) {
+      try {
+        for (const z of await readZip(e.file)) {
+          if (/\.(flp|sf2)$/i.test(z.name) || AUDIO_EXT.test(z.name)) {
+            all.push({ path: z.path, name: z.name, file: { arrayBuffer: async () => (await z.blob()).arrayBuffer() } })
+          }
+        }
+      } catch (err) { console.warn('[import] unreadable zip', e.name, err) }
+    }
+    const projects = all.filter(e => /\.flp$/i.test(e.name)).sort((a, b) => a.path.split('/').length - b.path.split('/').length)
+    if (!projects.length) throw new Error('No .flp project was found in what was opened.')
+    const main = projects[0]
+    const bytes = await main.file.arrayBuffer()
+    return importPatternProject(bytes, { name: main.name, path, files: all.filter(e => e !== main) })
+  }
+
+  // ── Autosave + recovery ────────────────────────────────────────────────────────
+  //   While the project has unsaved edits it's snapshotted to localStorage every
+  //   minute and when the window closes, so a crash or an accidental reload never
+  //   loses work: File → Recover last autosave brings it back.
+  const AUTOSAVE_KEY = 'fls-autosave'
+  function _readAutosaveMeta() {
+    try { return JSON.parse(localStorage.getItem(AUTOSAVE_KEY + '-meta') || 'null') } catch (_) { return null }
+  }
+  const autosaveInfo = ref(_readAutosaveMeta())
+  function autosaveNow() {
+    try {
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(_serializeProject()))
+      const meta = { time: Date.now(), name: projectName.value }
+      localStorage.setItem(AUTOSAVE_KEY + '-meta', JSON.stringify(meta))
+      autosaveInfo.value = meta
+    } catch (_) { /* quota or private mode — autosave is best effort */ }
+  }
+  setInterval(() => { if (projectDirty.value) autosaveNow() }, 60_000)
+  window.addEventListener('beforeunload', () => { if (projectDirty.value) autosaveNow() })
+
+  function recoverAutosave() {
+    let raw = null
+    try { raw = localStorage.getItem(AUTOSAVE_KEY) } catch (_) {}
+    if (!raw) return false
+    try {
+      _applyProject(JSON.parse(raw))
+      projectName.value  = (autosaveInfo.value?.name || 'Untitled') + ' (recovered)'
+      projectDirty.value = true
+      return true
+    } catch (err) {
+      console.error('[FreakyLoops] Autosave recovery failed:', err)
+      return false
+    }
+  }
+
+  // Fresh session. The current state is autosaved first, so this is undoable
+  // through File → Recover last autosave.
+  function newProject() {
+    if (projectDirty.value && !confirm('Start a new project? Unsaved changes are kept in the autosave.')) return
+    if (projectDirty.value) autosaveNow()
+    projectDirty.value = false
+    location.reload()
+  }
+
+  // ── MIDI file export ───────────────────────────────────────────────────────────
+  //   Standard MIDI File (type 1, 480 PPQ): a tempo/meter track plus one track per
+  //   channel with notes. Built from the render schedule, so the file matches what
+  //   plays — song arrangement or current pattern, swing included. Drum channels
+  //   go to MIDI channel 10 on their General MIDI notes.
+  const GM_DRUM_NOTE = { kick: 36, snare: 38, hihat: 42, clash: 49 }
+  function exportMidi({ mode = usePlaylist.value ? 'song' : 'pattern', bars = 1 } = {}) {
+    const PPQ = 480
+    const { events, START } = _compileRenderSchedule({ mode, bars })
+    const ticksPerSec = PPQ * bpm.value / 60
+    const toTick = sec => Math.max(0, Math.round((sec - START) * ticksPerSec))
+    const rawChannels = toRaw(channels)
+    const defaultGate = (60 / bpm.value) / 4 * 0.9
+
+    const perChannel = new Map()   // ci → [{ on, off, pitch, vel }]
+    for (const ev of events) {
+      if (ev.kind === 'cut') continue
+      const ch = rawChannels[ev.ci]
+      if (!ch) continue
+      const isDrum = ch.type === 'drum'
+      const vel = Math.max(1, Math.min(127, Math.round(((ev.kind === 'arp' ? ev.baseParams?.velocity : ev.params?.velocity) ?? 1) * 127)))
+      const pitches = isDrum ? [GM_DRUM_NOTE[ch.instrumentType] ?? 38] : (ev.kind === 'arp' ? ev.pitches : [ev.params?.pitch ?? 60])
+      const gate = ev.kind === 'arp' ? ev.span : (ev.params?.gate ?? defaultGate)
+      const on = toTick(ev.when), off = Math.max(on + 1, toTick(ev.when + gate))
+      if (!perChannel.has(ev.ci)) perChannel.set(ev.ci, [])
+      for (const p of pitches) perChannel.get(ev.ci).push({ on, off, pitch: Math.max(0, Math.min(127, Math.round(p))), vel })
+    }
+
+    const vlq = n => { const b = [n & 0x7f]; while ((n >>= 7)) b.unshift((n & 0x7f) | 0x80); return b }
+    const text = (type, str) => { const bytes = [...new TextEncoder().encode(str)]; return [0xff, type, ...vlq(bytes.length), ...bytes] }
+    const chunk = (id, data) => [...new TextEncoder().encode(id), (data.length >>> 24) & 255, (data.length >>> 16) & 255, (data.length >>> 8) & 255, data.length & 255, ...data]
+
+    const usPerQuarter = Math.round(60_000_000 / bpm.value)
+    const tracks = [[
+      0, ...text(0x03, projectName.value || 'Freaky Loops'),
+      0, 0xff, 0x51, 0x03, (usPerQuarter >> 16) & 255, (usPerQuarter >> 8) & 255, usPerQuarter & 255,
+      0, 0xff, 0x58, 0x04, 4, 2, 24, 8,
+      0, 0xff, 0x2f, 0x00,
+    ]]
+    let nextMidiCh = 0
+    for (const [ci, notes] of perChannel) {
+      const ch = rawChannels[ci]
+      let midiCh = 9
+      if (ch.type !== 'drum') { if (nextMidiCh === 9) nextMidiCh++; midiCh = nextMidiCh++ % 16 }
+      const evs = []
+      for (const n of notes) {
+        evs.push({ t: n.on, d: [0x90 | midiCh, n.pitch, n.vel] })
+        evs.push({ t: n.off, d: [0x80 | midiCh, n.pitch, 0] })
+      }
+      evs.sort((a, b) => a.t - b.t || (a.d[0] & 0xf0) - (b.d[0] & 0xf0))   // offs before ons
+      const data = [0, ...text(0x03, ch.name || 'Channel')]
+      let last = 0
+      for (const e of evs) { data.push(...vlq(e.t - last), ...e.d); last = e.t }
+      data.push(0, 0xff, 0x2f, 0x00)
+      tracks.push(data)
+    }
+
+    const bytes = [
+      ...chunk('MThd', [0, 1, 0, tracks.length, (PPQ >> 8) & 255, PPQ & 255]),
+      ...tracks.flatMap(t => chunk('MTrk', t)),
+    ]
+    const summary = { tracks: tracks.length - 1, notes: [...perChannel.values()].reduce((n, l) => n + l.length, 0) }
+    if (isDesktop) {
+      saveFileNative({ suggestedName: (projectName.value || 'project') + '.mid', base64: bytesToBase64(new Uint8Array(bytes)), filter: { name: 'MIDI file', ext: ['mid'] } })
+        .then(res => { if (res?.error) alert(res.error) })
+      return summary
+    }
+    const blob = new Blob([new Uint8Array(bytes)], { type: 'audio/midi' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = (projectName.value || 'project') + '.mid'
+    a.click()
+    URL.revokeObjectURL(url)
+    return { tracks: tracks.length - 1, notes: [...perChannel.values()].reduce((n, l) => n + l.length, 0) }
+  }
+
   function _applyProject(p) {
     if (isPlaying.value) pausePlay()
+    _resetSessionPlayback()
+    if (p.session) {
+      sessionScenes.splice(0, sessionScenes.length, ...(p.session.scenes ?? []).map(sc => ({ ...sc })))
+      if (!sessionScenes.length) sessionScenes.push({ id: 'sc1', name: 'Scene 1' })
+      _sceneSeq = sessionScenes.length + 1
+      for (const k of Object.keys(sessionSlots)) delete sessionSlots[k]
+      Object.assign(sessionSlots, p.session.slots ?? {})
+      sessionQuantize.value = p.session.quantize ?? 1
+      sessionFollow.value = !!p.session.follow
+    }
 
     bpm.value        = p.bpm        ?? 120
     totalSteps.value = p.totalSteps ?? 16
@@ -6356,21 +7721,33 @@ export function useStudio() {
       // it from the saved program number instead of the (meaningless) fnKey.
       fn:             ch.params?.gmProgram != null
                         ? makeGMPlayFn(ch.params.gmProgram)
-                        : ch.type === 'sample' && ch.sampleSpec
-                          ? makeSampleFn(ch.sampleSpec)
-                          : (ch.type === 'audiofile' || ch.type === 'chop' || ch.type === 'forge')
-                            ? () => {}  // buffers not serialized; user must reload
-                            : (FN_FROM_KEY[ch.fnKey] ?? playMelodicNote),
+                        : ch.type === 'vst'
+                          ? makeVstPlayFn(ch.id)
+                          : ch.type === 'sample' && ch.sampleSpec
+                            ? makeSampleFn(ch.sampleSpec)
+                            : (ch.type === 'audiofile' || ch.type === 'chop' || ch.type === 'forge')
+                              ? () => {}  // buffers not serialized; user must reload
+                              : (FN_FROM_KEY[ch.fnKey] ?? playMelodicNote),
       activeModules:    [...(ch.activeModules ?? [])],
       effects:          (ch.effects ?? []).map(e => ({ ...e })),
       instrumentType:   ch.instrumentType ?? '',
       sampleSpec:       ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
       sampleName:       ch.sampleName,
+      vstPath:          ch.vstPath,
+      vstState:         ch.vstState,
       // Buffers are not serializable; mark missing so the UI can prompt reload.
       audioFileMissing: (ch.type === 'audiofile' || ch.type === 'chop') ? true : undefined,
       deckAMissing: ch.type === 'forge' && ch.params?.deckAName ? true : undefined,
       deckBMissing: ch.type === 'forge' && ch.params?.deckBName ? true : undefined,
     })))
+
+    // Desktop: re-instantiate each saved VST plugin into the native host by id,
+    // so multi-plugin projects come back with their instruments loaded.
+    if (isDesktop) {
+      for (const ch of channels) {
+        if (ch.type === 'vst' && ch.vstPath) sendToHost('loadVst', { id: ch.id, path: ch.vstPath, state: ch.vstState })
+      }
+    }
 
     // Channel groups
     channelGroups.splice(0, channelGroups.length, ...(p.channelGroups ?? []).map(g => ({ ...g })))
@@ -6428,8 +7805,21 @@ export function useStudio() {
     })))
 
     // Mixer
-    ;(p.mixerTracks ?? []).forEach((mt, i) => {
-      if (!mixerTracks[i]) return
+    // Projects may carry extra insert tracks (or fewer than this session has).
+    const savedMx = p.mixerTracks ?? []
+    const baseMx  = 1 + NUM_MX_INSERTS + NUM_MX_RETURNS
+    if (mixerTracks.length > Math.max(baseMx, savedMx.length)) mixerTracks.splice(Math.max(baseMx, savedMx.length))
+    ;savedMx.forEach((mt, i) => {
+      if (!mixerTracks[i]) {
+        mixerTracks.push({
+          id: mt.id || 'mx' + i, name: mt.name, kind: mt.kind || 'insert', color: mt.color || COLORS[i % COLORS.length],
+          volume: 1, pan: 0, muted: false, _soloed: false, eq: { low: 0, mid: 0, high: 0 },
+          fxSlots: [], phaseInvert: false, sends: {}, output: null,
+          sidechain: { source: null, amount: 0, attack: 0.01, release: 0.18 },
+        })
+      }
+      if (mt.id) mixerTracks[i].id = mt.id
+      mixerTracks[i].output      = mt.output ?? null
       mixerTracks[i].name        = mt.name        ?? mixerTracks[i].name
       mixerTracks[i].color       = mt.color        ?? mixerTracks[i].color
       mixerTracks[i].volume      = mt.volume       ?? 1.0
@@ -6476,6 +7866,7 @@ export function useStudio() {
     // Channels
     channels, selectedChannelId, selectedChannel,
     soloChannel, addChannel, addFMChannel, addGMChannel, addWasmChannel, loadWasmForChannel,
+    addVstPlugin, addVstChannel, openVstEditor,
     addCustomSynthChannel, getCustomSynthNode,
     addSubterraChannel, getSubterraNode,
     GM_CATEGORIES, GM_CAT_COLORS, GM_INSTRUMENTS,
@@ -6522,7 +7913,7 @@ export function useStudio() {
     addPlaylistTrack, removePlaylistTrack, soloPlaylistTrack,
     placeClip, removeClip, moveClip, resizeClip, splitClip, setSlipOffset, makeUniqueClip, consolidateTrack,
     addTimeMarker, removeTimeMarker,
-    PLAYLIST_CELLS,
+    PLAYLIST_CELLS: playlistCells, playlistCells,
     // Track groups/lock/ops
     groupTrackWithAbove, ungroupTrack, toggleTrackCollapse, setTrackLocked,
     clonePlaylistTrack, movePlaylistTrackUp, movePlaylistTrackDown, setTrackColor, autoNameTrack,
@@ -6534,6 +7925,7 @@ export function useStudio() {
     playlists, currentPlaylistId, switchPlaylist, clonePlaylist, addPlaylist, renamePlaylist, deletePlaylist, mergePlaylist,
     // Automation
     automationClips, addAutomationClip, removeAutomationClip,
+    automationTargets, automationLabel, automationValueAt, createAutomationClipFor,
     addAutoNode, removeAutoNode, resizeAutomationClip,
     // Utilities
     getUnusedPatternIds, transposePatternNotes, selectSourcePattern, muteAllClipsOnTrack,
@@ -6551,7 +7943,7 @@ export function useStudio() {
     normalizeAudioFile, buildLoopXfade, snapToZero,
     processSampleAudio, detectSamplePitch,
     undoSampleEdit, canUndoSampleEdit, sampleHistoryDepth,
-    detectSampleSlices, setSampleSlices, clearSampleSlices, sliceSamplerToSequencer,
+    detectSampleSlices, setSampleSlices, clearSampleSlices, sliceSamplerToSequencer, audioToMidi, bounceChannelToSampler,
     setSamplerWarp, redetectSampleBpm,
     addSampleWarpMarker, updateSampleWarpMarker, removeSampleWarpMarker, clearSampleWarpMarkers,
     getSamplerZones, addSamplerZone, removeSamplerZone, updateSamplerZone,
@@ -6608,17 +8000,27 @@ export function useStudio() {
     addMixerTrackFx, removeMixerTrackFx, updateMixerTrackFxParam,
     toggleMixerTrackFxEnabled, moveMixerTrackFxSlot,
     setMixerSend, setMixerSidechain, NUM_MX_RETURNS, returnTrackIdxStart,
+    addMixerInsert, setMixerTrackOutput, setMixerEqBand, getMixerEqNodes,
     // Scale snap
     snapScale,
     // Pattern length (infinite canvas)
     getPatternLengthTicks, setPatternLengthOverride, clearPatternLengthOverride,
     // Loop region (red ruler selection — temporary playback override)
     loopRegion, setLoopRegion, clearLoopRegion,
-    // Project save / load
-    saveProject, loadProjectFile,
-    // Render / export: faithful offline render (+ real-time capture for plugins)
+    // Session view (clip launcher)
+    sessionScenes, sessionSlots, sessionPlaying, sessionQueued, sessionActive, sessionQuantize, sessionRecording,
+    getSessionSlot, setSessionSlot, moveSessionSlot, addSessionScene, removeSessionScene, renameSessionScene,
+    captureSessionScene, launchSessionSlot, launchSessionScene, stopSessionTrack, stopAllSessionClips,
+    sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist, sessionFollow, cycleSceneLoops,
+    // Project save / load / autosave / MIDI export
+    saveProject, loadProjectFile, newProject, importPatternProject, importProjectFiles, importState, locateMissingSamples, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
+    projectPath, openProjectNative,
+    // Render / export: faithful offline render (+ real-time capture for plugins,
+    // + native bounce for VST instrument channels)
     renderProjectToBuffer,
     renderRealtimeToBuffer,
+    renderVstToBuffer,
+    isDesktop,
     // Drum modules
     addDrumModule, removeDrumModule,
   }

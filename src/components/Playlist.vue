@@ -178,16 +178,17 @@
 
         <!-- Automation params tab -->
         <div v-else class="picker-list">
-          <div class="picker-section">CHANNEL PARAMS</div>
-          <div
-            v-for="entry in autoParamOptions" :key="entry.key"
-            class="picker-item"
-            :class="{ selected: pickerAutoParam === entry.key }"
-            @click="pickerAutoParam = entry.key"
-          >
-            <span class="picker-dot" :style="{ background: entry.color }" />
-            <span class="picker-name">{{ entry.label }}</span>
-          </div>
+          <template v-for="(entry, ei) in autoParamOptions" :key="entry.key">
+            <div v-if="ei === 0 || autoParamOptions[ei - 1].section !== entry.section" class="picker-section">{{ entry.section }}</div>
+            <div
+              class="picker-item"
+              :class="{ selected: pickerAutoParam === entry.key }"
+              @click="pickerAutoParam = entry.key"
+            >
+              <span class="picker-dot" :style="{ background: entry.color }" />
+              <span class="picker-name">{{ entry.label }}</span>
+            </div>
+          </template>
         </div>
 
         <div class="picker-actions">
@@ -395,9 +396,9 @@
                   :style="autoClipStyle(auto)"
                   @mousedown.stop="onAutoClipMouseDown($event, auto, track)"
                   @contextmenu.prevent.stop="removeAutomationClip(auto.id)"
-                  :title="auto.targetParam + ' automation — right-click to remove'"
+                  :title="automationLabel(auto) + ' automation — wheel over a point bends the curve, right-click removes the clip'"
                 >
-                  <span class="auto-label">{{ auto.targetParam }}</span>
+                  <span class="auto-label">{{ automationLabel(auto) }}</span>
                   <svg
                     class="auto-graph"
                     :viewBox="`0 0 ${(auto.width || 1) * cellWidth} ${getTrackH(track) - 18}`"
@@ -412,6 +413,7 @@
                       r="5"
                       class="auto-node"
                       @mousedown.stop="onNodeDragStart($event, auto, ni)"
+                      @wheel.prevent.stop="onNodeWheel($event, node)"
                       @contextmenu.prevent.stop="removeAutoNode(auto.id, ni)"
                     />
                   </svg>
@@ -535,9 +537,13 @@
       <template v-if="isAudioClip(clipMenu.clip)">
         <div class="ctx-item" @click="ctxAudioClipReload">
           ♪ Load audio file…
-          <input ref="audioClipFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif"
+          <input ref="audioClipFileInput" type="file" accept=".wav,.mp3,.ogg,.flac,.aiff,.aif,.wv"
             style="display:none" @change="onAudioClipFileInputChange" />
         </div>
+        <div class="ctx-sep" />
+        <!-- ── Audio → MIDI ── -->
+        <div class="ctx-item" @click.stop="ctxToMidi('melody')"><span>♪ Melody to MIDI</span><span class="ctx-hint">new synth</span></div>
+        <div class="ctx-item" @click.stop="ctxToMidi('drums')"><span>◉ Drums to MIDI</span><span class="ctx-hint">kick / snare / hat</span></div>
         <div class="ctx-sep" />
         <!-- ── Warp (tempo follow) ── -->
         <div class="ctx-item" @click.stop="ctxToggleWarp">
@@ -788,6 +794,7 @@ const {
   insertTime, deleteTime, beatSliceClip, duplicateClips,
   playlists, currentPlaylistId, switchPlaylist, clonePlaylist, addPlaylist, renamePlaylist, deletePlaylist, mergePlaylist,
   addAutomationClip, removeAutomationClip, addAutoNode, removeAutoNode, resizeAutomationClip,
+  automationTargets, automationLabel, automationValueAt, audioToMidi,
   getUnusedPatternIds, getPatternLengthTicks,
   transposePatternNotes, selectSourcePattern, muteAllClipsOnTrack,
   addPattern, removePattern,
@@ -826,14 +833,8 @@ function highlightUnused() {
 }
 
 // Automation param options derived from channels
-const autoParamOptions = computed(() => {
-  const opts = []
-  channels.forEach(ch => {
-    opts.push({ key: ch.id + '_volume', label: ch.name + ' VOL', color: ch.color, channelId: ch.id, param: 'volume' })
-    opts.push({ key: ch.id + '_pan',    label: ch.name + ' PAN', color: ch.color, channelId: ch.id, param: 'pan'    })
-  })
-  return opts
-})
+// Channels (vol / pan / every knob), mixer tracks, master volume and tempo.
+const autoParamOptions = computed(() => automationTargets())
 
 // ── Computed visible tracks (respects group collapse) ─────────────────────────
 const visibleTracks = computed(() => {
@@ -1242,7 +1243,19 @@ watch(playlistClips,  redrawAllClipCanvases,   { deep: true })
 function autoPolyline(auto, track) {
   const W = (auto.width || 1) * cellWidth.value
   const H = getTrackH(track) - 18
-  return auto.nodes.map(n => `${n.x * W},${(1 - n.y) * H}`).join(' ')
+  const N = 96
+  const pts = []
+  for (let i = 0; i <= N; i++) {
+    const x = i / N
+    pts.push(`${x * W},${(1 - automationValueAt(auto, x)) * H}`)
+  }
+  return pts.join(' ')
+}
+
+// Mouse wheel over a point bends the segment that starts there.
+function onNodeWheel(e, node) {
+  const t = (node.tension ?? 0) + (e.deltaY < 0 ? 0.1 : -0.1)
+  node.tension = Math.max(-1, Math.min(1, Math.round(t * 10) / 10))
 }
 
 // ── Marker helpers ────────────────────────────────────────────────────────────
@@ -1359,7 +1372,7 @@ function updateHoverFromPickerDrag(e) {
 
   const patId = pickerDrag.value.patId
   const w     = patternWidthCells(patId)
-  const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor((relX / cellWidth.value) / w) * w))
+  const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS.value - w, Math.floor((relX / cellWidth.value) / w) * w))
   hoverGhost.value = { trackId: track.id, cell: snappedCell, width: w, color: patternColor(patId) }
 }
 
@@ -1404,7 +1417,7 @@ function onCellsMouseDown(e, track) {
   if (e.button !== 0) return
   const rect    = e.currentTarget.getBoundingClientRect()
   const rawCell = cellFromX(e.clientX - rect.left)
-  const cell    = Math.max(0, Math.min(PLAYLIST_CELLS - 1, Math.floor(rawCell)))
+  const cell    = Math.max(0, Math.min(PLAYLIST_CELLS.value - 1, Math.floor(rawCell)))
   const tool    = playlistTool.value
 
   // Select tool: start drag box on empty area
@@ -1454,7 +1467,7 @@ function onCellsMouseDown(e, track) {
     if (clip) { removeClip(clip.id); return }
     // Place at the snapped cell for pattern-width alignment
     const w = patternWidthCells(pickerPatternId.value)
-    const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell / w) * w))
+    const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS.value - w, Math.floor(rawCell / w) * w))
     placeClip(track.id, snappedCell, pickerPatternId.value)
     return
   }
@@ -1463,7 +1476,7 @@ function onCellsMouseDown(e, track) {
     hoverGhost.value = null
     // Snap first paint stroke to pattern-width grid (Step 15)
     const w = patternWidthCells(pickerPatternId.value)
-    const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell / w) * w))
+    const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS.value - w, Math.floor(rawCell / w) * w))
     placeClip(track.id, snappedCell, pickerPatternId.value)
     window.addEventListener('mouseup', stopPainting, { once: true })
   }
@@ -1522,7 +1535,7 @@ function onCellsMouseMove(e, track) {
   // Hover ghost: show exact pattern footprint while hovering with draw tool (Step 3)
   if (tool === 'draw' && clipFocusMode.value === 'pattern' && !isPainting) {
     const w    = patternWidthCells(pickerPatternId.value)
-    const cell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell)))
+    const cell = Math.max(0, Math.min(PLAYLIST_CELLS.value - w, Math.floor(rawCell)))
     hoverGhost.value = { trackId: track.id, cell, width: w, color: patternColor(pickerPatternId.value) }
   } else {
     hoverGhost.value = null
@@ -1532,7 +1545,7 @@ function onCellsMouseMove(e, track) {
   if (track.locked) return
   // Brush: snap to pattern-width multiples so clips chain without gaps (Step 15)
   const w         = patternWidthCells(pickerPatternId.value)
-  const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS - w, Math.floor(rawCell / w) * w))
+  const snappedCell = Math.max(0, Math.min(PLAYLIST_CELLS.value - w, Math.floor(rawCell / w) * w))
   placeClip(track.id, snappedCell, pickerPatternId.value)
 }
 
@@ -1542,7 +1555,7 @@ function stopPainting()   { isPainting = false }
 function onCellsRightClick(e, track) {
   if (clipFocusMode.value === 'automation') return
   const rect = e.currentTarget.getBoundingClientRect()
-  const cell = Math.max(0, Math.min(PLAYLIST_CELLS - 1, Math.floor(cellFromX(e.clientX - rect.left))))
+  const cell = Math.max(0, Math.min(PLAYLIST_CELLS.value - 1, Math.floor(cellFromX(e.clientX - rect.left))))
   const clip = playlistClips.find(c => c.trackId === track.id && cell >= c.cell && cell < c.cell + (c.width || 1))
   if (clip) removeClip(clip.id)
 }
@@ -1631,7 +1644,7 @@ function onDragMove(e) {
   const track  = trackAtRelY(relY)
   if (!track) return
   const relX = e.clientX - tlRect.left + tl.scrollLeft - 140
-  const cell = Math.max(0, Math.min(PLAYLIST_CELLS - (draggingClip.value.width || 1), Math.floor(cellFromX(relX))))
+  const cell = Math.max(0, Math.min(PLAYLIST_CELLS.value - (draggingClip.value.width || 1), Math.floor(cellFromX(relX))))
   dragGhost.value = { trackId: track.id, cell, width: draggingClip.value.width || 1, color: clipColor(draggingClip.value) }
 }
 
@@ -1891,6 +1904,14 @@ async function onAudioClipFileInputChange(e) {
   }
   clipMenu.value = null
 }
+async function ctxToMidi(mode) {
+  const c = clipMenu.value?.clip
+  clipMenu.value = null
+  if (!c) return
+  const res = await audioToMidi({ clipId: c.id }, mode)
+  if (res?.error) alert(res.error)
+}
+
 function ctxToggleWarp() {
   const c = clipMenu.value?.clip
   if (c) setClipWarp(c.id, { warpEnabled: !c.warpEnabled })
@@ -2147,7 +2168,7 @@ function onMarkerMouseDown(e, marker) {
   const onMove = (me) => {
     if (!timelineRef.value) return
     const dx       = me.clientX - startX
-    const newCell  = Math.max(0, Math.min(PLAYLIST_CELLS - 1, origCell + Math.round(dx / cellWidth.value)))
+    const newCell  = Math.max(0, Math.min(PLAYLIST_CELLS.value - 1, origCell + Math.round(dx / cellWidth.value)))
     marker.cell    = newCell
   }
   window.addEventListener('mousemove', onMove)
@@ -2263,7 +2284,7 @@ function onRulerMouseDown(e, cell) {
       if (!timelineRef.value) return
       const tl  = timelineRef.value
       const relX = me.clientX - tl.getBoundingClientRect().left + tl.scrollLeft - HEADER_W
-      const c2   = Math.max(0, Math.min(PLAYLIST_CELLS, Math.floor(relX / cellWidth.value)))
+      const c2   = Math.max(0, Math.min(PLAYLIST_CELLS.value, Math.floor(relX / cellWidth.value)))
       const s = Math.min(loopDragStart, c2), end = Math.max(loopDragStart + 1, c2 + 1)
       setLoopRegion(s * TICKS, end * TICKS)
     }
@@ -2278,7 +2299,7 @@ function onRulerMouseDown(e, cell) {
 }
 
 function setPlayheadCell(cell) {
-  const c = Math.max(0, Math.min(PLAYLIST_CELLS - 1, cell))
+  const c = Math.max(0, Math.min(PLAYLIST_CELLS.value - 1, cell))
   if (isPlaying.value) {
     seekTo(c)   // live scrub: flushes scheduler and resumes from new position
   } else {
@@ -2400,14 +2421,14 @@ const renderedClipCount = computed(() => {
   return n
 })
 
-const totalTimelineWidth = computed(() => PLAYLIST_CELLS * cellWidth.value)
+const totalTimelineWidth = computed(() => PLAYLIST_CELLS.value * cellWidth.value)
 
 function minimapClipStyle(clip) {
   const total = playlistTracks.length || 1
   const tIdx  = playlistTracks.findIndex(t => t.id === clip.trackId)
   return {
-    left:       (clip.cell / PLAYLIST_CELLS * 100) + '%',
-    width:      ((clip.width || 1) / PLAYLIST_CELLS * 100) + '%',
+    left:       (clip.cell / PLAYLIST_CELLS.value * 100) + '%',
+    width:      ((clip.width || 1) / PLAYLIST_CELLS.value * 100) + '%',
     top:        (tIdx / total * 100) + '%',
     height:     (1 / total * 100) + '%',
     background: clipColor(clip),
@@ -2419,8 +2440,8 @@ function minimapAutoStyle(auto) {
   const total = playlistTracks.length || 1
   const tIdx  = playlistTracks.findIndex(t => t.id === auto.trackId)
   return {
-    left:    (auto.cell / PLAYLIST_CELLS * 100) + '%',
-    width:   ((auto.width || 1) / PLAYLIST_CELLS * 100) + '%',
+    left:    (auto.cell / PLAYLIST_CELLS.value * 100) + '%',
+    width:   ((auto.width || 1) / PLAYLIST_CELLS.value * 100) + '%',
     top:     (tIdx / total * 100) + '%',
     height:  (1 / total * 100) + '%',
     background: '#4ecdc4',
@@ -2612,7 +2633,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .pl-cull-spacer { width: 100%; flex-shrink: 0; pointer-events: none; }
 .cull-stat {
-  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #50506e;
+  font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted);
   padding: 0 8px; align-self: center; white-space: nowrap;
 }
 .playlist {
@@ -2629,7 +2650,7 @@ onBeforeUnmount(() => {
 .focus-btn {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   width: 38px; height: 32px; border-radius: 5px; border: 1px solid var(--border);
-  background: transparent; cursor: pointer; transition: all 0.1s; color: #404060; gap: 1px;
+  background: transparent; cursor: pointer; transition: all 0.1s; color: var(--text-muted); gap: 1px;
 }
 .focus-btn:hover  { border-color: #4a4a6a; color: #8080b0; }
 .focus-btn.active { border-color: #4ecdc4; background: #0a1a1a; color: #4ecdc4; }
@@ -2640,21 +2661,21 @@ onBeforeUnmount(() => {
   width: 28px; height: 28px; border-radius: 5px; border: 1px solid var(--border);
   background: transparent; cursor: pointer; font-size: 13px;
   display: flex; align-items: center; justify-content: center;
-  transition: all 0.1s; color: #50506a;
+  transition: all 0.1s; color: var(--text-muted);
 }
 .tool-btn:hover  { border-color: #4a4a6a; color: #9090b8; }
 .tool-btn.active { border-color: #e74c3c; background: #1a0808; color: #e74c3c; }
 .divider { width: 1px; height: 22px; background: var(--border-subtle); flex-shrink: 0; }
-.tb-label { font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700; letter-spacing: 0.15em; color: #404058; }
+.tb-label { font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700; letter-spacing: 0.15em; color: var(--text-muted); }
 .tb-select {
   background: var(--bg-control); border: 1px solid var(--border); color: var(--text-muted);
   padding: 3px 6px; border-radius: 4px; font-family: 'Rajdhani', sans-serif; font-size: 11px; cursor: pointer; outline: none;
 }
 .zoom-slider { width: 70px; accent-color: #e74c3c; cursor: pointer; }
-.tb-val { font-family: 'Share Tech Mono', monospace; font-size: 10px; color: #40405a; min-width: 30px; }
+.tb-val { font-family: 'Share Tech Mono', monospace; font-size: 10px; color: var(--text-muted); min-width: 30px; }
 .use-pl-toggle {
   display: flex; align-items: center; gap: 5px; cursor: pointer;
-  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.1em; color: #50506a;
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.1em; color: var(--text-muted);
 }
 .use-pl-toggle input { accent-color: #4ecdc4; cursor: pointer; }
 .tb-right { margin-left: auto; display: flex; gap: 5px; }
@@ -2701,19 +2722,19 @@ onBeforeUnmount(() => {
 .ptab {
   flex: 1; padding: 7px 4px; background: transparent; border: none;
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.12em; color: #30304a; cursor: pointer; transition: all 0.1s;
+  letter-spacing: 0.12em; color: var(--text-muted); cursor: pointer; transition: all 0.1s;
   border-bottom: 2px solid transparent;
 }
 .ptab:hover { color: #6060a0; }
 .ptab.active { color: #4ecdc4; border-bottom-color: #4ecdc4; }
 .picker-sort-select {
   background: transparent; border: none; border-left: 1px solid var(--border-subtle);
-  color: #40405a; font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
+  color: var(--text-muted); font-family: 'Rajdhani', sans-serif; font-size: 8px; font-weight: 700;
   cursor: pointer; padding: 0 4px; min-width: 0; outline: none;
 }
 .picker-sort-select:hover { color: #7070a0; }
 .picker-list { flex: 1; overflow-y: auto; }
-.picker-section { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: #252535; padding: 6px 10px 3px; letter-spacing: 0.1em; }
+.picker-section { font-family: 'Share Tech Mono', monospace; font-size: 8px; color: var(--text-muted); padding: 6px 10px 3px; letter-spacing: 0.1em; }
 .picker-item {
   display: flex; flex-direction: column; gap: 3px;
   padding: 5px 8px 6px;
@@ -2763,7 +2784,7 @@ onBeforeUnmount(() => {
 .picker-action-btn {
   width: 100%; padding: 5px; background: transparent; border: 1px dashed var(--border);
   border-radius: 4px; font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.1em; color: #404058; cursor: pointer; transition: all 0.1s;
+  letter-spacing: 0.1em; color: var(--text-muted); cursor: pointer; transition: all 0.1s;
 }
 .picker-action-btn:hover { border-color: #f39c12; color: #f39c12; }
 .picker-hint { padding: 6px 10px 8px; font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted); line-height: 1.6; border-top: 1px solid var(--border-subtle); }
@@ -2777,7 +2798,7 @@ onBeforeUnmount(() => {
   width: 140px; min-width: 140px; position: sticky; left: 0; z-index: 11;
   background: var(--bg-deeper); border-right: 1px solid var(--border-subtle);
   font-family: 'Rajdhani', sans-serif; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.15em; color: #252540; display: flex; align-items: center; padding-left: 10px;
+  letter-spacing: 0.15em; color: var(--text-muted); display: flex; align-items: center; padding-left: 10px;
 }
 .ruler-cell {
   border-right: 1px solid var(--bg-base); flex-shrink: 0; position: relative;
@@ -2786,7 +2807,7 @@ onBeforeUnmount(() => {
 .ruler-cell:hover   { background: #0e0e20; }
 .ruler-cell.beat4   { border-left: 2px solid var(--border-subtle); }
 .ruler-cell.playing { background: rgba(255,255,255,0.06); }
-.ruler-num { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: #35355a; }
+.ruler-num { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted); }
 .time-marker {
   position: absolute; top: 0; left: 0; right: 0;
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
@@ -2817,7 +2838,7 @@ onBeforeUnmount(() => {
 .track-indent { width: 12px; flex-shrink: 0; }
 .track-collapse-btn {
   width: 14px; height: 14px; flex-shrink: 0; background: transparent; border: none;
-  color: #505070; cursor: pointer; font-size: 8px; padding: 0; line-height: 1;
+  color: var(--text-muted); cursor: pointer; font-size: 8px; padding: 0; line-height: 1;
   display: flex; align-items: center; justify-content: center; border-radius: 2px; transition: color 0.1s;
 }
 .track-collapse-btn:hover { color: #9090c0; }
@@ -3001,7 +3022,7 @@ onBeforeUnmount(() => {
 .add-track-btn {
   width: 100%; height: 100%; background: transparent; border: none;
   font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
-  letter-spacing: 0.08em; color: #303048; cursor: pointer; transition: color 0.1s;
+  letter-spacing: 0.08em; color: var(--text-muted); cursor: pointer; transition: color 0.1s;
 }
 .add-track-btn:hover { color: #4ecdc4; }
 
@@ -3093,7 +3114,7 @@ onBeforeUnmount(() => {
 /* ── Quick zoom buttons ──────────────────────────────────────────────────────── */
 .zoom-quick-btns { display: flex; align-items: flex-end; gap: 2px; }
 .zoom-q {
-  background: transparent; border: none; color: #303050;
+  background: transparent; border: none; color: var(--text-muted);
   cursor: pointer; padding: 0 2px; font-size: 10px; transition: color 0.1s;
   line-height: 1; display: flex; align-items: flex-end;
 }
@@ -3108,7 +3129,7 @@ onBeforeUnmount(() => {
 .loop-btn {
   font-family: 'Rajdhani', sans-serif; font-size: 10px; font-weight: 700;
   letter-spacing: 0.1em; padding: 4px 10px; border: 1px solid var(--border);
-  border-radius: 5px; background: transparent; color: #404058; cursor: pointer; transition: all 0.12s;
+  border-radius: 5px; background: transparent; color: var(--text-muted); cursor: pointer; transition: all 0.12s;
 }
 .loop-btn:hover  { border-color: #27ae60; color: #27ae60; }
 .loop-btn.active { border-color: #27ae60; background: #0a1a0e; color: #27ae60; }

@@ -6,6 +6,8 @@
       <span class="mx-title">MIXER</span>
       <span class="mx-hint">Route channels via the TRACK selector in the Channel Rack</span>
       <div class="mx-spacer" />
+      <button class="mx-hdr-btn" @click.stop="onAddInsert"
+        v-hint="'Add an insert track (before the return buses).'">+ INSERT</button>
       <button class="mx-hdr-btn" :class="{ active: fxPanelOpen }"
         @click.stop="fxPanelOpen = !fxPanelOpen" title="Show/hide FX Inspector">
         FX
@@ -166,6 +168,14 @@
 
             <!-- Sends + sidechain (insert tracks only) -->
             <div v-if="track.kind !== 'return' && returnTracks.length" class="mx-sends">
+              <div class="mx-send-row">
+                <span class="mx-send-lbl" :class="{ 'sc-on': !!track.output }"
+                  title="Output — send this track to the master, or into another insert (a bus)">OUT</span>
+                <select class="mx-sc-sel" :value="track.output ?? ''" @change="onOutput(i + 1, $event)" @mousedown.stop>
+                  <option value="">Master</option>
+                  <option v-for="s in insertTracks" :key="s.id" :value="s.id" v-show="s.id !== track.id">{{ s.name }}</option>
+                </select>
+              </div>
               <div v-for="rtn in returnTracks" :key="rtn.id" class="mx-send-row">
                 <span class="mx-send-lbl" :style="{ color: rtn.color }"
                   :title="'Send to ' + rtn.name">{{ rtn.name.replace('RETURN ', '►') }}</span>
@@ -302,6 +312,8 @@
           <button class="mx-fx-panel-close" @click="fxPanelOpen = false">✕</button>
         </div>
 
+        <EqGraph v-if="selectedTrack >= 1" :key="'eq' + selectedTrack" :track-idx="selectedTrack" />
+
         <div class="mx-fx-list">
           <div
             v-for="(slot, si) in (currentFxTrack?.fxSlots ?? [])"
@@ -399,6 +411,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../store/studio.js'
+import EqGraph from './EqGraph.vue'
 
 const {
   channels, mixerTracks, EFFECT_DEFS,
@@ -408,7 +421,21 @@ const {
   addMixerTrackFx, removeMixerTrackFx, updateMixerTrackFxParam,
   toggleMixerTrackFxEnabled, moveMixerTrackFxSlot,
   setMixerSend, setMixerSidechain,
+  addMixerInsert, setMixerTrackOutput,
 } = useStudio()
+
+function onAddInsert() {
+  const idx = addMixerInsert()
+  if (idx > 0) selectTrack(idx)
+}
+
+function onOutput(trackIdx, e) {
+  const target = e.target.value || null
+  if (!setMixerTrackOutput(trackIdx, target)) {
+    alert('That routing would feed the track back into itself.')
+    e.target.value = mixerTracks[trackIdx]?.output ?? ''
+  }
+}
 
 const EQ_BANDS = [
   { key: 'low',  label: 'L' },
@@ -513,7 +540,8 @@ const PARAM_LABELS = {
   drive: 'Drive', tone: 'Tone', size: 'Size', decay: 'Decay',
   mix: 'Mix', time: 'Time', feedback: 'Feedback', rate: 'Rate',
   depth: 'Depth', threshold: 'Threshold', ratio: 'Ratio', value: 'Gain',
-  width: 'Width',
+  width: 'Width', cutoff: 'Cutoff', reso: 'Resonance', low: 'Low', mid: 'Mid', high: 'High',
+  midfreq: 'Mid freq', bits: 'Crush', release: 'Release', gain: 'Makeup', smooth: 'Smooth', division: 'Time',
 }
 function paramLabel(key) { return PARAM_LABELS[key] ?? key }
 
@@ -584,8 +612,13 @@ function updateMeters() {
   const dt  = Math.min(0.1, (now - lastT) / 1000); lastT = now
   const decay = Math.pow(10, -(DECAY_DB_S * dt) / 20)
   if (!meterBufs) meterBufs = Array(NUM_TRACKS).fill(null)
+  // Grow the meter state when insert tracks are added.
+  const nTracks = mixerTracks.length
+  while (peakLevels.value.length < nTracks) {
+    peakLevels.value.push(0); peakHolds.value.push(0); clipped.value.push(false); holdTimers.push(0); clipTimers.push(0)
+  }
 
-  for (let i = 0; i < NUM_TRACKS; i++) {
+  for (let i = 0; i < nTracks; i++) {
     const an = getMixerAnalyser(i)
     if (!an) continue
     if (!meterBufs[i] || meterBufs[i].length !== an.fftSize) meterBufs[i] = new Float32Array(an.fftSize)
@@ -620,15 +653,15 @@ function dbToPct(v) {
   const db = 20 * Math.log10(v)
   return Math.max(0, Math.min(100, (db - DB_MIN) / (DB_MAX - DB_MIN) * 100))
 }
-function peakPct(idx)     { return dbToPct(peakLevels.value[idx]).toFixed(1) }
-function peakHoldPct(idx) { return dbToPct(peakHolds.value[idx]).toFixed(1) }
+function peakPct(idx)     { return dbToPct(peakLevels.value[idx] ?? 0).toFixed(1) }
+function peakHoldPct(idx) { return dbToPct(peakHolds.value[idx] ?? 0).toFixed(1) }
 function peakColor(level) {
   if (level > 0.9)  return '#e74c3c'
   if (level > 0.55) return '#f39c12'
   return '#2ecc71'
 }
 function peakDb(idx) {
-  const v = peakLevels.value[idx]
+  const v = peakLevels.value[idx] ?? 0
   if (v <= 0.001) return '-∞'
   return (20 * Math.log10(v)).toFixed(1)
 }
@@ -984,8 +1017,8 @@ function panLabel(p) {
 
 /* ── FX Inspector Panel ─────────────────────────────────────────────────── */
 .mx-fx-panel {
-  width: 220px;
-  min-width: 220px;
+  width: 260px;
+  min-width: 260px;
   background: #0c0f14;
   border-left: 1px solid var(--border-subtle);
   display: flex;

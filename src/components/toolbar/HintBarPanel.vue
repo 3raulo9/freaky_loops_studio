@@ -33,13 +33,13 @@ const { extendedHudOpen } = useStudio()
   color: #2ecc71; line-height: 1; flex-shrink: 0;
   filter: drop-shadow(0 0 4px #2ecc7155);
 }
-.tb-hintbar--idle .tb-hintbar-icon { color: #2a2a40; filter: none; }
+.tb-hintbar--idle .tb-hintbar-icon { color: var(--text-muted); filter: none; }
 .tb-hintbar-text {
   font-family: 'Share Tech Mono', monospace; font-size: 10px;
   color: #8a8ab0; letter-spacing: 0.02em; line-height: 1.1;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.tb-hintbar--idle .tb-hintbar-text { color: #3a3a55; }
+.tb-hintbar--idle .tb-hintbar-text { color: var(--text-muted); }
 .tb-hintbar--hud { border-color: #2ecc7155; }
 .tb-hintbar--hud .tb-hintbar-icon { color: #2ecc71; filter: drop-shadow(0 0 5px #2ecc7166); }
 </style>
