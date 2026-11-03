@@ -1,5 +1,6 @@
 //! One loaded VST2 plugin instance: load/open, MIDI in, audio out (live and
-//! offline), editor plumbing and state chunks.
+//! offline), editor plumbing and state chunks. [`Hosted`] is what the host
+//! needs from any plugin format; VST3 lives in [`crate::vst3`].
 //!
 //! Threading model (standard for VST2 hosts): open/close/editor calls happen on
 //! the UI thread; `process*` runs on the audio thread (or a render thread). All
@@ -16,6 +17,38 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const BLOCK_SIZE: usize = 512;
+
+/// A loaded plugin of any format, as the host drives it.
+pub trait Hosted: crate::engine::AudioSource {
+    fn info(&self) -> &PluginInfo;
+    fn path(&self) -> &str;
+    fn note_on(&self, pitch: i32, velocity: i32);
+    fn note_off(&self, pitch: i32);
+    fn all_notes_off(&self);
+    /// Peak output level since the last call (for UI meters).
+    fn take_peak(&self) -> f32;
+    fn render_offline(&self, notes: &[RenderNote], sample_rate: f32, total_frames: usize, live_rate: f32) -> Vec<f32>;
+    fn set_live_sample_rate(&self, sample_rate: f32);
+    fn save_state(&self) -> PluginState;
+    fn load_state(&self, state: &PluginState);
+    fn editor_rect(&self) -> Option<(i32, i32)>;
+    /// Attach the editor to `parent` (an HWND); false when there is none.
+    fn editor_open(&self, parent: isize) -> bool;
+    fn editor_idle(&self);
+    fn editor_close(&self);
+    /// Identity the editor registry uses to route resize requests.
+    fn editor_key(&self) -> usize;
+}
+
+/// Load a plugin by path: `.vst3` bundles/files as VST3, anything else as VST2.
+/// `class_id` (32 hex chars) picks the class inside a multi-plugin VST3.
+pub fn load_any(path: &str, sample_rate: f32, class_id: Option<&str>) -> Result<std::sync::Arc<dyn Hosted>, String> {
+    if crate::vst3::is_vst3_path(path) {
+        Ok(crate::vst3::Vst3Plugin::load(path, sample_rate, class_id)?)
+    } else {
+        Ok(Plugin::load(path, sample_rate)?)
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct PluginInfo {
@@ -418,13 +451,24 @@ impl Plugin {
 pub enum PluginState {
     Chunk(Vec<u8>),
     Params(Vec<f32>),
+    /// VST3: the processor's and the controller's own state streams.
+    Vst3 { component: Vec<u8>, controller: Vec<u8> },
 }
 
 impl PluginState {
-    /// Tagged byte form: `C` + chunk, or `P` + packed f32 parameters.
+    /// Tagged byte form: `C` + chunk, `P` + packed f32 parameters, or
+    /// `3` + component length (u32 LE) + component + controller.
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             PluginState::Chunk(b) => [b"C".as_slice(), b].concat(),
+            PluginState::Vst3 { component, controller } => {
+                let mut out = Vec::with_capacity(5 + component.len() + controller.len());
+                out.push(b'3');
+                out.extend_from_slice(&(component.len() as u32).to_le_bytes());
+                out.extend_from_slice(component);
+                out.extend_from_slice(controller);
+                out
+            }
             PluginState::Params(p) => {
                 let mut out = Vec::with_capacity(1 + p.len() * 4);
                 out.push(b'P');
@@ -440,8 +484,65 @@ impl PluginState {
         match bytes.split_first()? {
             (b'C', rest) => Some(PluginState::Chunk(rest.to_vec())),
             (b'P', rest) => Some(PluginState::Params(rest.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())),
+            (b'3', rest) => {
+                let n = u32::from_le_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+                let component = rest.get(4..4 + n)?.to_vec();
+                Some(PluginState::Vst3 { component, controller: rest[4 + n..].to_vec() })
+            }
             _ => None,
         }
+    }
+}
+
+impl Hosted for Plugin {
+    fn info(&self) -> &PluginInfo {
+        &self.info
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn note_on(&self, pitch: i32, velocity: i32) {
+        Plugin::note_on(self, pitch, velocity)
+    }
+    fn note_off(&self, pitch: i32) {
+        Plugin::note_off(self, pitch)
+    }
+    fn all_notes_off(&self) {
+        Plugin::all_notes_off(self)
+    }
+    fn take_peak(&self) -> f32 {
+        Plugin::take_peak(self)
+    }
+    fn render_offline(&self, notes: &[RenderNote], sample_rate: f32, total_frames: usize, live_rate: f32) -> Vec<f32> {
+        Plugin::render_offline(self, notes, sample_rate, total_frames, live_rate)
+    }
+    fn set_live_sample_rate(&self, sample_rate: f32) {
+        Plugin::set_live_sample_rate(self, sample_rate)
+    }
+    fn save_state(&self) -> PluginState {
+        Plugin::save_state(self)
+    }
+    fn load_state(&self, state: &PluginState) {
+        Plugin::load_state(self, state)
+    }
+    fn editor_rect(&self) -> Option<(i32, i32)> {
+        Plugin::editor_rect(self)
+    }
+    fn editor_open(&self, parent: isize) -> bool {
+        if !self.info.has_editor {
+            return false;
+        }
+        Plugin::editor_open(self, parent);
+        true
+    }
+    fn editor_idle(&self) {
+        Plugin::editor_idle(self)
+    }
+    fn editor_close(&self) {
+        Plugin::editor_close(self)
+    }
+    fn editor_key(&self) -> usize {
+        self.effect as usize
     }
 }
 
@@ -467,7 +568,7 @@ impl ProcState {
 
 impl Drop for Plugin {
     fn drop(&mut self) {
-        crate::editor::forget_effect(self.effect);
+        crate::editor::forget(self.effect as usize);
         let _guard = self.proc.lock().unwrap_or_else(|p| p.into_inner());
         self.suspend();
         self.dispatch(EFF_CLOSE, 0, 0, std::ptr::null_mut(), 0.0);

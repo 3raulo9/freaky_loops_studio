@@ -66,6 +66,8 @@ pub enum VstState {
     Chunk(Vec<u8>),
     /// Plain parameter values (plugins without chunk support).
     Params(Vec<f32>),
+    /// VST3: the processor's and the controller's state streams.
+    Vst3 { component: Vec<u8>, controller: Vec<u8> },
     /// Present but not understood (kept so nothing is silently dropped).
     Raw(Vec<u8>),
 }

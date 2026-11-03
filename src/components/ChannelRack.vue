@@ -82,7 +82,7 @@
         <span class="op-dot" style="background:#7b2fff"/>⬡ WASM Plugin
       </div>
       <div v-if="isDesktop" class="op-item" @click="addVstPlugin(); closeAllMenus()">
-        <span class="op-dot" style="background:#1abc9c"/>⬡ VST Plugin (.dll)
+        <span class="op-dot" style="background:#1abc9c"/>⬡ VST Plugin (.dll / .vst3)
       </div>
       <div class="op-item" @click="addChopChannel(); closeAllMenus()">
         <span class="op-dot" style="background:#e67e22"/>⚡ CHOP Slicer

@@ -195,11 +195,18 @@ export function mapPatternProject(P, env) {
     if (pl.vst) {
       const hit = env.desktop ? env.resolveVst(pl.vst) : null
       if (hit) {
+        // A VST2 and a VST3 build save different states: only pass the state on
+        // when the installed build is the one the project used.
+        const sameFormat = (hit.format ?? 'vst2') === (pl.vst.format ?? 'vst2')
+        const state = sameFormat ? pl.vst.state ?? undefined : undefined
         channels.push({
-          ...base, type: 'vst', vstPath: hit.path, vstState: pl.vst.state ?? undefined,
+          ...base, type: 'vst', vstPath: hit.path, vstState: state,
+          vstClassId: hit.format === 'vst3' && sameFormat && pl.vst.guid ? pl.vst.guid : undefined,
           instrumentType: 'vst', params: { pitch: 60 }, knobs: [], fnKey: 'melodic', sustains: true,
         })
-        report.plugins.push({ name: pl.vst.name || name, status: pl.vst.state ? 'loaded with its settings' : 'loaded', path: hit.path })
+        const status = !sameFormat ? `loaded (${hit.format === 'vst3' ? 'VST3' : 'VST2'} build, default sound)`
+          : state ? 'loaded with its settings' : 'loaded'
+        report.plugins.push({ name: pl.vst.name || name, status, path: hit.path })
         continue
       }
       report.plugins.push({ name: pl.vst.name || name, status: env.desktop ? 'not installed — stand-in used' : 'needs the desktop app — stand-in used', path: pl.vst.path })

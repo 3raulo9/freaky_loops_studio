@@ -8,8 +8,10 @@
 //!   3. a file index of the usual places (home folders, Program Files, other
 //!      drives), matching by file name and ranking by how many trailing path
 //!      components agree with the stored path.
-//! Plugins: the stored DLL path, then the index by file name, then by plugin
-//! name; every candidate must export a VST2 entry point before it's offered.
+//! Plugins: the stored path, then the index by file name, then by plugin
+//! name; every candidate must export a VST2 or VST3 entry point before it's
+//! offered. The format the project used wins; the other format of the same
+//! plugin is the fallback (it loads, but starts from its default sound).
 //!
 //! The index lists only audio and plugin files, is built by several threads,
 //! and is cached in %APPDATA%\FreakyLoopsStudio\file-index.txt so later
@@ -356,8 +358,8 @@ pub fn resolve(p: &Value) -> Value {
         .iter()
         .map(|q| {
             let path = q.get("path").and_then(Value::as_str).unwrap_or("");
-            let pb = PathBuf::from(path);
-            (!path.is_empty() && pb.is_file() && fls_native::pe::is_vst2(&pb)).then_some((pb, "original location"))
+            let pb = PathBuf::from(path.trim_end_matches(['\\', '/']));
+            (!path.is_empty() && is_plugin(&pb)).then_some((pb, "original location"))
         })
         .collect();
 
@@ -400,7 +402,11 @@ pub fn resolve(p: &Value) -> Value {
     let out_plugins: Vec<Value> = plug_hits
         .into_iter()
         .map(|h| match h {
-            Some((p, how)) => json!({ "path": p.to_string_lossy(), "arch": fls_native::pe::arch(&p.to_string_lossy()), "how": how }),
+            Some((p, how)) => json!({
+                "path": p.to_string_lossy(), "how": how,
+                "arch": match plugin_arch(&p) { fls_native::pe::Arch::X86 => "x86", fls_native::pe::Arch::X64 => "x64", fls_native::pe::Arch::Arm64 => "arm64", _ => "unknown" },
+                "format": if is_vst3_name(&p) { "vst3" } else { "vst2" },
+            }),
             None => Value::Null,
         })
         .collect();
@@ -409,35 +415,57 @@ pub fn resolve(p: &Value) -> Value {
     json!({ "samples": out_samples, "plugins": out_plugins, "ms": ms, "freshWalk": fresh })
 }
 
+fn is_vst3_name(p: &Path) -> bool {
+    p.extension().map_or(false, |e| e.eq_ignore_ascii_case("vst3"))
+}
+
+/// A loadable plugin: a VST2 DLL, or a VST3 bundle/file with a factory.
+fn is_plugin(p: &Path) -> bool {
+    if is_vst3_name(p) {
+        fls_native::vst3::is_vst3(p)
+    } else {
+        p.extension().map_or(false, |e| e.eq_ignore_ascii_case("dll")) && p.is_file() && fls_native::pe::is_vst2(p)
+    }
+}
+
+fn plugin_arch(p: &Path) -> fls_native::pe::Arch {
+    let bin = if is_vst3_name(p) { fls_native::vst3::module_path(&p.to_string_lossy()) } else { Some(p.to_path_buf()) };
+    bin.map_or(fls_native::pe::Arch::Unknown, |b| fls_native::pe::detect(&b.to_string_lossy()))
+}
+
 fn find_plugin(idx: &FileIndex, q: &Value) -> Option<(PathBuf, &'static str)> {
-    let path = q.get("path").and_then(Value::as_str).unwrap_or("");
+    let path = q.get("path").and_then(Value::as_str).unwrap_or("").trim_end_matches(['\\', '/']);
     let name = q.get("name").and_then(Value::as_str).unwrap_or("");
-    let ok = |p: &PathBuf| p.extension().map_or(false, |e| e.eq_ignore_ascii_case("dll")) && p.is_file() && fls_native::pe::is_vst2(p);
+    let want_vst3 = q.get("format").and_then(Value::as_str) == Some("vst3") || is_vst3_name(Path::new(path));
+    let x64 = |p: &PathBuf| plugin_arch(p) == fls_native::pe::Arch::X64;
     // Same file name as the stored path (moved install, other drive).
     if !path.is_empty() {
         if let Some(c) = idx.by_name.get(&file_name_lower(path)) {
             let comps = components(path);
-            let mut v: Vec<&PathBuf> = c.iter().filter(|p| ok(p)).collect();
+            let mut v: Vec<&PathBuf> = c.iter().filter(|p| is_plugin(p)).collect();
             // Prefer 64-bit builds, then the closest folder structure.
-            v.sort_by_key(|p| (fls_native::pe::detect(&p.to_string_lossy()) != fls_native::pe::Arch::X64, std::cmp::Reverse(suffix_score(&comps, p))));
+            v.sort_by_key(|p| (!x64(p), std::cmp::Reverse(suffix_score(&comps, p))));
             if let Some(p) = v.first() {
                 return Some(((*p).clone(), "same file elsewhere"));
             }
         }
     }
-    // By plugin name: "<name>.dll", or any DLL whose name matches ignoring punctuation.
+    // By plugin name: "<name>.dll" / "<name>.vst3", matched ignoring punctuation.
+    // Same format first; a 32-bit VST3 can't load, so it never qualifies.
     if !name.is_empty() {
         let want = normalize_name(name);
+        let stem = |n: &str| n.trim_end_matches(".dll").trim_end_matches(".vst3").to_string();
         let mut v: Vec<&PathBuf> = idx
             .by_name
             .iter()
-            .filter(|(n, _)| n.ends_with(".dll") && normalize_name(n.trim_end_matches(".dll")) == want)
+            .filter(|(n, _)| (n.ends_with(".dll") || n.ends_with(".vst3")) && normalize_name(&stem(n)) == want)
             .flat_map(|(_, ps)| ps.iter())
-            .filter(|p| ok(p))
+            .filter(|p| is_plugin(p) && !(is_vst3_name(p) && !x64(p)))
             .collect();
-        v.sort_by_key(|p| fls_native::pe::detect(&p.to_string_lossy()) != fls_native::pe::Arch::X64);
+        v.sort_by_key(|p| (is_vst3_name(p) != want_vst3, !x64(p)));
         if let Some(p) = v.first() {
-            return Some(((*p).clone(), "matched by name"));
+            let how = if is_vst3_name(p) == want_vst3 { "matched by name" } else { "other format (default sound)" };
+            return Some(((*p).clone(), how));
         }
     }
     None

@@ -586,6 +586,29 @@ fn read_vst_records(d: &[u8]) -> Option<Vst> {
     (known > 0 && (!v.path.is_empty() || !v.name.is_empty())).then_some(v)
 }
 
+/// VST3 instances keep an 80-byte header, then `(id u32, size u64, bytes)`
+/// records: 3 = the processor's state, 2 = the controller's, 4 = the
+/// parameter-id table the file uses for automation.
+fn vst3_state(b: &[u8]) -> Option<VstState> {
+    if b.len() < 80 || u32_at(b, 0)? != 1 || u32_at(b, 8)? != 64 {
+        return None;
+    }
+    let (mut component, mut controller) = (None, Vec::new());
+    let mut i = 80;
+    while i < b.len() {
+        let id = u32_at(b, i)?;
+        let n = usize::try_from(u64_at(b, i + 4)?).ok()?;
+        let body = b.get(i + 12..(i + 12).checked_add(n)?)?;
+        match id {
+            3 => component = Some(body.to_vec()),
+            2 => controller = body.to_vec(),
+            _ => {}
+        }
+        i += 12 + n;
+    }
+    Some(VstState::Vst3 { component: component?, controller })
+}
+
 /// The host keeps a short header in front of the plugin's own data:
 /// `marker i32 (<0), flags u8, program i32, chunk size u32, …`. Flag bit 3
 /// means the plugin saved a chunk (it ends the record); otherwise a count and
@@ -594,6 +617,9 @@ fn read_vst_records(d: &[u8]) -> Option<Vst> {
 fn vst_state(b: &[u8]) -> VstState {
     if b.is_empty() {
         return VstState::None;
+    }
+    if let Some(s) = vst3_state(b) {
+        return s;
     }
     if b.len() >= 13 && i32_at(b, 0).map_or(false, |m| m < 0) {
         if b[4] & 0x08 != 0 {
@@ -701,14 +727,25 @@ fn plugin_json(j: &mut Json, k: &str, pl: &Plugin) {
                     }
                     j.str("state", &base64(&b));
                 }
+                VstState::Vst3 { component, controller } => {
+                    // Same tagged form as the desktop host: '3' + u32 length + both streams.
+                    let mut b = Vec::with_capacity(5 + component.len() + controller.len());
+                    b.push(b'3');
+                    b.extend_from_slice(&(component.len() as u32).to_le_bytes());
+                    b.extend_from_slice(component);
+                    b.extend_from_slice(controller);
+                    j.str("state", &base64(&b));
+                }
                 VstState::Raw(_) => j.null("state"),
             }
+            j.str("format", if v.path.trim_end_matches(['\\', '/']).to_ascii_lowercase().ends_with(".vst3") || matches!(v.state, VstState::Vst3 { .. }) { "vst3" } else { "vst2" });
             j.str(
                 "stateKind",
                 match v.state {
                     VstState::None => "none",
                     VstState::Chunk(_) => "chunk",
                     VstState::Params(_) => "params",
+                    VstState::Vst3 { .. } => "vst3",
                     VstState::Raw(_) => "unknown",
                 },
             );

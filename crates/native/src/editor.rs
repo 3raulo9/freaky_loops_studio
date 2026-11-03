@@ -7,28 +7,33 @@
 //! take mouse input while keyboard focus stays in the DAW, so QWERTY note entry
 //! and transport keys keep working while you tweak a sound.
 
-use crate::plugin::Plugin;
+use crate::plugin::Hosted;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// effect pointer → editor HWND, for `audioMasterSizeWindow` requests.
+/// Plugin editor key → editor HWND, for resize requests from the plugin
+/// (`audioMasterSizeWindow` in VST2, `IPlugFrame::resizeView` in VST3).
 fn registry() -> &'static Mutex<HashMap<usize, isize>> {
     static R: OnceLock<Mutex<HashMap<usize, isize>>> = OnceLock::new();
     R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-pub(crate) fn forget_effect(effect: *mut crate::ffi::AEffect) {
+pub(crate) fn forget(key: usize) {
     if let Ok(mut r) = registry().lock() {
-        r.remove(&(effect as usize));
+        r.remove(&key);
     }
 }
 
 #[cfg(windows)]
 pub use win::EditorWindow;
 
-#[cfg(windows)]
 pub(crate) fn resize_for_effect(effect: *mut crate::ffi::AEffect, width: i32, height: i32) -> bool {
-    let hwnd = registry().lock().ok().and_then(|r| r.get(&(effect as usize)).copied());
+    resize_for(effect as usize, width, height)
+}
+
+#[cfg(windows)]
+pub(crate) fn resize_for(key: usize, width: i32, height: i32) -> bool {
+    let hwnd = registry().lock().ok().and_then(|r| r.get(&key).copied());
     match hwnd {
         Some(h) if width > 0 && height > 0 => {
             win::resize_client(h as _, width, height);
@@ -39,7 +44,7 @@ pub(crate) fn resize_for_effect(effect: *mut crate::ffi::AEffect, width: i32, he
 }
 
 #[cfg(not(windows))]
-pub(crate) fn resize_for_effect(_: *mut crate::ffi::AEffect, _: i32, _: i32) -> bool {
+pub(crate) fn resize_for(_: usize, _: i32, _: i32) -> bool {
     false
 }
 
@@ -57,14 +62,14 @@ mod win {
     const EX_STYLE: u32 = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
 
     struct Ctx {
-        plugin: Arc<Plugin>,
+        plugin: Arc<dyn Hosted>,
         on_close: Box<dyn Fn()>,
     }
 
     pub struct EditorWindow {
         hwnd: HWND,
         ctx: *mut Ctx,
-        plugin: Arc<Plugin>,
+        plugin: Arc<dyn Hosted>,
     }
 
     fn wide(s: &str) -> Vec<u16> {
@@ -127,15 +132,16 @@ mod win {
     impl EditorWindow {
         /// Open `plugin`'s editor in a new window owned by `owner` (may belong
         /// to another process), placed at screen position (`x`, `y`).
-        pub fn open(plugin: Arc<Plugin>, owner: isize, x: i32, y: i32, on_close: Box<dyn Fn()>) -> Result<EditorWindow, String> {
-            if !plugin.info.has_editor {
-                return Err(format!("{} has no custom UI.", plugin.info.name));
+        pub fn open(plugin: Arc<dyn Hosted>, owner: isize, x: i32, y: i32, on_close: Box<dyn Fn()>) -> Result<EditorWindow, String> {
+            let name = plugin.info().name.clone();
+            if !plugin.info().has_editor {
+                return Err(format!("{name} has no custom UI."));
             }
             ensure_class();
             let (w, h) = plugin.editor_rect().unwrap_or((480, 320));
             let (ow, oh) = outer_size(w.max(120), h.max(60));
             let class = wide(CLASS);
-            let title = wide(&plugin.info.name);
+            let title = wide(&name);
             let hwnd = unsafe {
                 CreateWindowExW(
                     EX_STYLE,
@@ -161,15 +167,23 @@ mod win {
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             }
             if let Ok(mut r) = registry().lock() {
-                r.insert(plugin.effect_ptr() as usize, hwnd as isize);
+                r.insert(plugin.editor_key(), hwnd as isize);
             }
-            plugin.editor_open(hwnd as isize);
+            if !plugin.editor_open(hwnd as isize) {
+                super::forget(plugin.editor_key());
+                unsafe {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                    DestroyWindow(hwnd);
+                    drop(Box::from_raw(ctx));
+                }
+                return Err(format!("{name} could not open its UI."));
+            }
             // Many plugins only know their size once the editor is open.
             if let Some((w, h)) = plugin.editor_rect() {
                 resize_client(hwnd, w, h);
             }
             unsafe { SetTimer(hwnd, IDLE_TIMER, 30, None) };
-            crate::log::write(&format!("editor opened: {} ({}x{})", plugin.info.name, w, h));
+            crate::log::write(&format!("editor opened: {name} ({w}x{h})"));
             Ok(EditorWindow { hwnd, ctx, plugin })
         }
 
@@ -183,7 +197,7 @@ mod win {
             unsafe {
                 KillTimer(self.hwnd, IDLE_TIMER);
                 self.plugin.editor_close();
-                super::forget_effect(self.plugin.effect_ptr());
+                super::forget(self.plugin.editor_key());
                 SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
                 DestroyWindow(self.hwnd);
                 drop(Box::from_raw(self.ctx));

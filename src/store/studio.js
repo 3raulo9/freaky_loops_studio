@@ -5858,7 +5858,7 @@ export function useStudio() {
     // Retrigger: release any voice already sounding for this exact key first.
     _releaseLiveVoice(key, when)
 
-    // VST2 instrument (native host): forward the note over IPC; audio comes from
+    // VST instrument (native host): forward the note over IPC; audio comes from
     // the native engine, not the Web Audio graph.
     if (ch.type === 'vst') {
       sendToHost('vstNoteOn', { id: ch.id, pitch: p, velocity: Math.max(1, Math.round(velocity * 127)) })
@@ -6380,7 +6380,7 @@ export function useStudio() {
     selectedChannelId.value = ch.id
   }
 
-  // ── VST2 plugin channels (native desktop host) ──────────────────────────────
+  // ── VST plugin channels (native desktop host) ──────────────────────────────
   //   Each VST channel maps to ONE plugin instance in the native host, keyed by the
   //   channel id, so many plugins (mixed 32/64-bit) run at once. The play fn
   //   forwards notes over IPC; audio comes from the native engine, not Web Audio,
@@ -6417,7 +6417,7 @@ export function useStudio() {
   }
 
   // Create the VST channel immediately (so a slot appears), then ask the host to
-  // pick a .dll and load it INTO that channel id. Mixed bitness is fine: 64-bit
+  // pick a .dll / .vst3 and load it INTO that channel id. Mixed bitness is fine: 64-bit
   // loads in-process, 32-bit via the bridge — both keyed by this id.
   function addVstPlugin() {
     if (!isDesktop) return
@@ -7173,6 +7173,7 @@ export function useStudio() {
         sampleSpec:     ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
         sampleName:     ch.sampleName,
         vstPath:        ch.vstPath,
+        vstClassId:     ch.vstClassId,
         vstState:       vstStates[ch.id] ?? ch.vstState,
       })),
       channelGroups: channelGroups.map(g => ({ ...g })),
@@ -7404,7 +7405,7 @@ export function useStudio() {
         const ask = [...samples].filter(sp => !resolved.has(sp))
         const r = await resolveAssetsNative({
           project: path, samples: ask,
-          plugins: [...vsts.map(v => ({ name: v.name, path: v.path, vendor: v.vendor })), ...natives.map(n => ({ name: n, path: '' }))],
+          plugins: [...vsts.map(v => ({ name: v.name, path: v.path, vendor: v.vendor, format: v.format })), ...natives.map(n => ({ name: n, path: '' }))],
         })
         for (const [sp, hit] of Object.entries(r?.samples ?? {})) if (hit) resolved.set(sp, { url: hostFileUrl(hit), path: hit, name: importBaseName(hit) })
         plugins = r?.plugins ?? []
@@ -7734,6 +7735,7 @@ export function useStudio() {
       sampleSpec:       ch.sampleSpec ? { ...ch.sampleSpec } : undefined,
       sampleName:       ch.sampleName,
       vstPath:          ch.vstPath,
+      vstClassId:       ch.vstClassId,
       vstState:         ch.vstState,
       // Buffers are not serializable; mark missing so the UI can prompt reload.
       audioFileMissing: (ch.type === 'audiofile' || ch.type === 'chop') ? true : undefined,
@@ -7745,7 +7747,7 @@ export function useStudio() {
     // so multi-plugin projects come back with their instruments loaded.
     if (isDesktop) {
       for (const ch of channels) {
-        if (ch.type === 'vst' && ch.vstPath) sendToHost('loadVst', { id: ch.id, path: ch.vstPath, state: ch.vstState })
+        if (ch.type === 'vst' && ch.vstPath) sendToHost('loadVst', { id: ch.id, path: ch.vstPath, state: ch.vstState, classId: ch.vstClassId })
       }
     }
 

@@ -47,6 +47,18 @@ pub fn set_transport(tempo: f64, playing: bool, numerator: u16, denominator: u16
     TIME_SIG.store(((numerator.max(1) as u32) << 16) | denominator.max(1) as u32, Ordering::Relaxed);
 }
 
+/// Current transport: (tempo, playing, sample position, numerator, denominator).
+pub fn transport() -> (f64, bool, u64, i32, i32) {
+    let sig = TIME_SIG.load(Ordering::Relaxed);
+    (
+        f64::from_bits(TEMPO.load(Ordering::Relaxed)),
+        PLAYING.load(Ordering::Relaxed),
+        SAMPLE_POS.load(Ordering::Relaxed),
+        (sig >> 16) as i32,
+        (sig & 0xffff) as i32,
+    )
+}
+
 /// Advance the transport clock by one audio callback's worth of frames.
 pub fn advance_transport(frames: usize) {
     if PLAYING.load(Ordering::Relaxed) {

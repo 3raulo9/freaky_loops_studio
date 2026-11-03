@@ -155,7 +155,7 @@ fn main() {
                 UiCmd::ToggleEditor if editor.is_some() => editor = None,
                 UiCmd::ToggleEditor => {
                     let tid = ui_tid;
-                    match EditorWindow::open(plugin.clone(), owner, 160, 120, Box::new(move || post(tid, UiCmd::CloseEditor))) {
+                    match EditorWindow::open(plugin.clone() as Arc<dyn fls_native::Hosted>, owner, 160, 120, Box::new(move || post(tid, UiCmd::CloseEditor))) {
                         Ok(w) => editor = Some(w),
                         Err(e) => send(json!({ "t": "error", "message": e })),
                     }

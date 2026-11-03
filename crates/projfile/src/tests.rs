@@ -254,6 +254,42 @@ fn reads_parameter_states() {
     assert!(matches!(vst_state(&old), VstState::Params(p) if p == vec![0.75]));
 }
 
+/// VST3 state as the file stores it: 80-byte header, then records.
+fn vst3_blob(component: &[u8], controller: Option<&[u8]>) -> Vec<u8> {
+    let mut b = vec![0u8; 80];
+    b[0] = 1;
+    b[4] = 1;
+    b[8] = 64;
+    b[16] = 1;
+    let mut rec = |id: u32, body: &[u8]| {
+        b.extend_from_slice(&id.to_le_bytes());
+        b.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        b.extend_from_slice(body);
+    };
+    rec(3, component);
+    if let Some(c) = controller {
+        rec(2, c);
+    }
+    rec(4, &[1, 0, 0, 0, 7, 0, 0, 0]);
+    b
+}
+
+#[test]
+fn reads_vst3_states() {
+    match vst_state(&vst3_blob(b"proc", Some(b"ctl"))) {
+        VstState::Vst3 { component, controller } => {
+            assert_eq!(component, b"proc");
+            assert_eq!(controller, b"ctl");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(vst_state(&vst3_blob(b"only", None)), VstState::Vst3 { controller, .. } if controller.is_empty()));
+    // A record running past the end is not a VST3 state.
+    let mut bad = vst3_blob(b"proc", None);
+    bad.truncate(bad.len() - 3);
+    assert!(matches!(vst_state(&bad), VstState::Raw(_)));
+}
+
 #[test]
 fn rejects_and_survives_garbage() {
     assert!(parse(b"RIFF....").is_err());

@@ -88,7 +88,7 @@
           <div class="mb-about">
             <div class="mb-about-logo">⬡ FREAKY<em>LOOPS</em> STUDIO</div>
             <div>Pattern-based music workstation — synthesis, sampling, arrangement and mixing.</div>
-            <div class="mb-about-meta">{{ isDesktop ? 'Desktop app · native Rust audio engine + VST2 host' : 'Web app · Web Audio engine' }}</div>
+            <div class="mb-about-meta">{{ isDesktop ? 'Desktop app · native Rust audio engine + VST2/VST3 host' : 'Web app · Web Audio engine' }}</div>
           </div>
         </div>
       </div>
@@ -171,7 +171,7 @@ const MENUS = [
       { label: 'Subterra bass', action: addSubterraChannel },
       { label: 'Forge deep slicer', action: addForgeChannel },
       { label: 'WASM / JS plugin', action: addWasmChannel },
-      ...(isDesktop ? [{ label: 'VST plugin (.dll)…', action: addVstPlugin }] : []),
+      ...(isDesktop ? [{ label: 'VST plugin (.dll / .vst3)…', action: addVstPlugin }] : []),
       { sep: true },
       { label: 'Pattern', key: 'F4', action: addPattern },
       { label: 'Playlist track', action: addPlaylistTrack },

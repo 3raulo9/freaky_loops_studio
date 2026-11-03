@@ -53,14 +53,15 @@ export function testTone(on = true, freq = 440) {
 // Every VST call carries the channel id so the native host can keep many plugin
 // instances (mixed 32/64-bit) alive at once, one per Channel Rack VST channel.
 
-/** Open the native file picker for channel `id`, then load the chosen .dll into it. */
+/** Open the native file picker for channel `id`, then load the chosen plugin into it. */
 export function pickVst(id) {
   sendToHost('pickVst', { id })
 }
 
-/** Load a VST2 .dll by absolute path into channel `id` (optionally restoring a saved state). */
-export function loadVst(id, path, state = undefined) {
-  sendToHost('loadVst', { id, path, state })
+/** Load a VST2 .dll or VST3 by absolute path into channel `id` (optionally restoring a saved state;
+ *  `classId` picks the class inside a multi-plugin VST3). */
+export function loadVst(id, path, state = undefined, classId = undefined) {
+  sendToHost('loadVst', { id, path, state, classId })
 }
 
 /** Play / release a note on channel `id`'s plugin instance. */

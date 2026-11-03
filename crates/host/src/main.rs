@@ -1,7 +1,7 @@
 //! Freaky Loops Studio desktop app.
 //!
 //! A native window hosts the Vue UI in a webview; this process runs the audio
-//! engine and VST2 plugins. The UI and host exchange JSON control messages
+//! engine and VST2/VST3 plugins. The UI and host exchange JSON control messages
 //! (`{type, payload}`) — audio never crosses the bridge. 64-bit plugins load
 //! in-process; 32-bit plugins run in the bridge helper process.
 
@@ -16,7 +16,7 @@ use base64::Engine as _;
 use bridge_client::BridgeClient;
 use fls_native::editor::EditorWindow;
 use fls_native::pe::Arch;
-use fls_native::{bounce, host_callback, log, AudioSource, Engine, Plugin, PluginState};
+use fls_native::{bounce, host_callback, log, AudioSource, Engine, Hosted, PluginState};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,7 +53,7 @@ enum UserEvent {
 }
 
 enum Kind {
-    InProc { plugin: Arc<Plugin>, source: Arc<dyn AudioSource>, editor: Option<EditorWindow> },
+    InProc { plugin: Arc<dyn Hosted>, source: Arc<dyn AudioSource>, editor: Option<EditorWindow> },
     Bridge(BridgeClient),
 }
 
@@ -121,19 +121,23 @@ impl App {
             }
             "pickVst" => {
                 let id = id.unwrap_or_else(new_id);
-                let mut dlg = rfd::FileDialog::new().set_title("Select a VST2 plugin (.dll)").add_filter("VST2 plugin", &["dll"]).set_parent(&self.window);
+                let mut dlg = rfd::FileDialog::new()
+                    .set_title("Select a plugin (.dll or .vst3)")
+                    .add_filter("VST plugin", &["dll", "vst3"])
+                    .set_parent(&self.window);
                 if let Some(dir) = default_vst_dir() {
                     dlg = dlg.set_directory(dir);
                 }
                 match dlg.pick_file() {
-                    Some(path) => self.load_vst(&id, &path.to_string_lossy(), None),
+                    Some(path) => self.load_vst(&id, &vst3_bundle_of(&path.to_string_lossy()), None, None),
                     None => self.send("vstCancelled", json!({ "id": id })),
                 }
             }
             "loadVst" => match str_of(&p, "path").filter(|s| !s.trim().is_empty()) {
                 Some(path) => {
                     let state = str_of(&p, "state").and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
-                    self.load_vst(&id.unwrap_or_else(new_id), path, state)
+                    let class_id = str_of(&p, "classId").map(str::to_string);
+                    self.load_vst(&id.unwrap_or_else(new_id), path, state, class_id.as_deref())
                 }
                 None => self.vst_error(id.as_deref(), "No plugin path provided."),
             },
@@ -267,15 +271,22 @@ impl App {
 
     /// Load `path` into channel `id`, routing by the DLL's architecture.
     /// Whatever was on that id is torn down first (replace in place).
-    fn load_vst(&mut self, id: &str, path: &str, state: Option<Vec<u8>>) {
+    /// `class_id` picks the class inside a multi-plugin VST3.
+    fn load_vst(&mut self, id: &str, path: &str, state: Option<Vec<u8>>, class_id: Option<&str>) {
         if let Some(old) = self.instances.remove(id) {
             self.teardown(old);
         }
         self.next_gen += 1;
         let gen = self.next_gen;
-        let arch = fls_native::pe::detect(path);
+        let is_vst3 = fls_native::vst3::is_vst3_path(path);
+        let binary = if is_vst3 { fls_native::vst3::module_path(path).map(|m| m.to_string_lossy().into_owned()).unwrap_or_default() } else { path.to_string() };
+        let arch = fls_native::pe::detect(&binary);
         log::write(&format!("loadVst id={id} arch={arch:?} path={path}"));
 
+        if arch == Arch::X86 && is_vst3 {
+            self.vst_error(Some(id), "32-bit VST3 plugins aren't supported — use its 64-bit or VST2 version.");
+            return;
+        }
         if arch == Arch::X86 {
             let proxy = self.proxy.clone();
             let cid = id.to_string();
@@ -295,18 +306,19 @@ impl App {
             return;
         }
 
-        match Plugin::load(path, self.engine.sample_rate() as f32) {
+        match fls_native::load_any(path, self.engine.sample_rate() as f32, class_id) {
             Ok(plugin) => {
                 if let Some(s) = state.as_deref().and_then(PluginState::from_bytes) {
                     plugin.load_state(&s);
                 }
                 let source: Arc<dyn AudioSource> = plugin.clone();
                 self.engine.add_source(source.clone());
-                let i = plugin.info.clone();
+                let i = plugin.info().clone();
                 self.send(
                     "vstLoaded",
                     json!({ "id": id, "name": i.name, "vendor": i.vendor, "path": path, "inputs": i.inputs, "outputs": i.outputs,
-                            "canReplacing": i.can_replacing, "isSynth": i.is_synth, "hasEditor": i.has_editor, "bits": 64 }),
+                            "canReplacing": i.can_replacing, "isSynth": i.is_synth, "hasEditor": i.has_editor, "bits": 64,
+                            "format": if is_vst3 { "vst3" } else { "vst2" } }),
                 );
                 self.instances.insert(id.into(), Instance { path: path.into(), gen, kind: Kind::InProc { plugin, source, editor: None }, pending_render: None });
             }
@@ -469,6 +481,17 @@ impl App {
             }
         }
     }
+}
+
+/// A file picked inside a VST3 bundle (`X.vst3/Contents/x86_64-win/X.vst3`)
+/// stands for the bundle itself.
+fn vst3_bundle_of(picked: &str) -> String {
+    let p = std::path::Path::new(picked);
+    p.ancestors()
+        .skip(1)
+        .find(|a| a.is_dir() && a.extension().map_or(false, |e| e.eq_ignore_ascii_case("vst3")))
+        .map(|a| a.to_string_lossy().into_owned())
+        .unwrap_or_else(|| picked.to_string())
 }
 
 fn now_ms() -> u64 {
