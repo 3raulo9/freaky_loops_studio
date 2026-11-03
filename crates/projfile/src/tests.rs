@@ -3,32 +3,32 @@
 
 use super::*;
 
-struct W {
+pub(crate) struct W {
     b: Vec<u8>,
     unicode: bool,
 }
 
 impl W {
-    fn new(version: &str) -> W {
+    pub(crate) fn new(version: &str) -> W {
         let mut w = W { b: Vec::new(), unicode: parse_version(version) >= Ver(11, 5, 0) };
         w.data(E_VERSION, &[version.as_bytes(), b"\0"].concat());
         w
     }
-    fn byte(&mut self, id: u8, v: u8) -> &mut Self {
+    pub(crate) fn byte(&mut self, id: u8, v: u8) -> &mut Self {
         self.b.extend_from_slice(&[id, v]);
         self
     }
-    fn word(&mut self, id: u8, v: u16) -> &mut Self {
+    pub(crate) fn word(&mut self, id: u8, v: u16) -> &mut Self {
         self.b.push(id);
         self.b.extend_from_slice(&v.to_le_bytes());
         self
     }
-    fn dword(&mut self, id: u8, v: u32) -> &mut Self {
+    pub(crate) fn dword(&mut self, id: u8, v: u32) -> &mut Self {
         self.b.push(id);
         self.b.extend_from_slice(&v.to_le_bytes());
         self
     }
-    fn data(&mut self, id: u8, d: &[u8]) -> &mut Self {
+    pub(crate) fn data(&mut self, id: u8, d: &[u8]) -> &mut Self {
         self.b.push(id);
         let mut n = d.len();
         loop {
@@ -45,7 +45,7 @@ impl W {
         self.b.extend_from_slice(d);
         self
     }
-    fn text(&mut self, id: u8, s: &str) -> &mut Self {
+    pub(crate) fn text(&mut self, id: u8, s: &str) -> &mut Self {
         let d: Vec<u8> = if self.unicode {
             s.encode_utf16().chain([0]).flat_map(|u| u.to_le_bytes()).collect()
         } else {
@@ -53,7 +53,7 @@ impl W {
         };
         self.data(id, &d)
     }
-    fn file(&self, ppq: u16) -> Vec<u8> {
+    pub(crate) fn file(&self, ppq: u16) -> Vec<u8> {
         let mut f = b"FLhd".to_vec();
         f.extend_from_slice(&6u32.to_le_bytes());
         f.extend_from_slice(&0i16.to_le_bytes());
@@ -66,7 +66,7 @@ impl W {
     }
 }
 
-fn note(pos: u32, ch: u16, len: u32, key: u16, vel: u8, slide: bool) -> Vec<u8> {
+pub(crate) fn note(pos: u32, ch: u16, len: u32, key: u16, vel: u8, slide: bool) -> Vec<u8> {
     let mut r = Vec::new();
     r.extend_from_slice(&pos.to_le_bytes());
     r.extend_from_slice(&(0x4000u16 | if slide { 8 } else { 0 }).to_le_bytes());
@@ -78,7 +78,7 @@ fn note(pos: u32, ch: u16, len: u32, key: u16, vel: u8, slide: bool) -> Vec<u8> 
     r
 }
 
-fn item(pos: u32, len: u32, track: u16, max_track: u16, idx: u16, size: usize, muted: bool) -> Vec<u8> {
+pub(crate) fn item(pos: u32, len: u32, track: u16, max_track: u16, idx: u16, size: usize, muted: bool) -> Vec<u8> {
     let mut r = Vec::new();
     r.extend_from_slice(&pos.to_le_bytes());
     r.extend_from_slice(&PATTERN_BASE.to_le_bytes());
@@ -95,7 +95,7 @@ fn item(pos: u32, len: u32, track: u16, max_track: u16, idx: u16, size: usize, m
     r
 }
 
-fn vst_blob(path: &str, chunk: &[u8]) -> Vec<u8> {
+pub(crate) fn vst_blob(path: &str, chunk: &[u8]) -> Vec<u8> {
     let mut b = 12u32.to_le_bytes().to_vec();
     let mut rec = |id: u32, body: &[u8]| {
         b.extend_from_slice(&id.to_le_bytes());

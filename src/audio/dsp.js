@@ -112,6 +112,31 @@ export async function parsePatternProject(bytes) {
   }
 }
 
+/**
+ * Re-emit a pattern-project file with `edits` applied (see crates/projfile
+ * write.rs for the format). Untouched parts are copied byte for byte.
+ * → { bytes: Uint8Array } or { error }.
+ */
+export async function writePatternProject(bytes, edits) {
+  await dspReady
+  if (!ex?.fls_write_project) return { error: 'Saving project files needs WebAssembly, which is unavailable here.' }
+  const src = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+  const json = new TextEncoder().encode(JSON.stringify(edits ?? {}))
+  const fp = ex.fls_alloc_bytes(src.length)
+  const ep = ex.fls_alloc_bytes(json.length)
+  try {
+    new Uint8Array(ex.memory.buffer, fp, src.length).set(src)
+    new Uint8Array(ex.memory.buffer, ep, json.length).set(json)
+    const len = ex.fls_write_project(fp, src.length, ep, json.length)
+    const out = new Uint8Array(ex.memory.buffer, ex.fls_result_ptr(), len).slice()
+    if (out[0] !== 1) return { error: new TextDecoder().decode(out.subarray(1)) || 'The project could not be written.' }
+    return { bytes: out.subarray(1) }
+  } finally {
+    ex.fls_free_bytes(fp, src.length)
+    ex.fls_free_bytes(ep, json.length)
+  }
+}
+
 /** Decode a WavPack (.wv) file → { channels, sampleRate, frames, data: Float32Array[] } or null. */
 export async function decodeWavPack(bytes) {
   await dspReady

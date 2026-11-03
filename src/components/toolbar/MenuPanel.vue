@@ -105,6 +105,7 @@ const S = useStudio()
 const {
   canUndo, canRedo, undoAction, redoAction, panicAll, clearAll,
   saveProject, loadProjectFile, newProject, autosaveInfo, recoverAutosave, exportMidi, importMidiFile,
+  savePatternProject, flpSourceName,
   addChannel, addCustomSynthChannel, addSubterraChannel, addWasmChannel, addForgeChannel, addVstPlugin,
   addPattern, duplicatePattern, removePattern, splitByChannel, findNextEmptyPattern, currentPatternId, patterns,
   addPlaylistTrack, activateWindow, renderModalOpen, themeModalOpen, midiRouterOpen,
@@ -149,6 +150,8 @@ const MENUS = [
       { label: 'Audio (WAV / MP3 / OGG)…', key: 'Ctrl+R', action: () => { renderModalOpen.value = true } },
       { label: 'MIDI file — song', action: () => exportMidi({ mode: 'song' }) },
       { label: 'MIDI file — current pattern', action: () => exportMidi({ mode: 'pattern' }) },
+      { label: flpSourceName.value ? `Pattern project (.flp) — save back…` : 'Pattern project (.flp) — open one first',
+        action: savePatternProject, disabled: () => !flpSourceName.value },
     ],
   },
   {

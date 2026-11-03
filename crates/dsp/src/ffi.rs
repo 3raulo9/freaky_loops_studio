@@ -141,6 +141,31 @@ pub unsafe extern "C" fn fls_parse_project(ptr: *const u8, len: usize) -> usize 
     r.len()
 }
 
+/// Re-emit the project file at `file_ptr` with the edits (JSON) at
+/// `edits_ptr` applied. The result buffer holds a status byte — 1 then the
+/// new file, or 0 then an error message — and the return value is its length.
+///
+/// # Safety
+/// Both pointers hold their stated number of readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn fls_write_project(file_ptr: *const u8, file_len: usize, edits_ptr: *const u8, edits_len: usize) -> usize {
+    let file = std::slice::from_raw_parts(file_ptr, file_len);
+    let edits = String::from_utf8_lossy(std::slice::from_raw_parts(edits_ptr, edits_len));
+    let mut r = RESULT.lock().unwrap_or_else(|e| e.into_inner());
+    r.clear();
+    match fls_projfile::write::write(file, &edits) {
+        Ok(bytes) => {
+            r.push(1);
+            r.extend_from_slice(&bytes);
+        }
+        Err(e) => {
+            r.push(0);
+            r.extend_from_slice(e.as_bytes());
+        }
+    }
+    r.len()
+}
+
 #[no_mangle]
 pub extern "C" fn fls_result_ptr() -> *const u8 {
     RESULT.lock().map(|r| r.as_ptr()).unwrap_or(std::ptr::null())

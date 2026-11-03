@@ -600,6 +600,9 @@ dependencies = [
 [[package]]
 name = "fls-projfile"
 version = "0.3.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "foldhash"

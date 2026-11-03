@@ -15,6 +15,7 @@
 pub mod events;
 pub mod model;
 pub mod text;
+pub mod write;
 
 use events::{Event, Events, DATA, DWORD, TEXT, WORD};
 pub use model::*;
@@ -484,7 +485,7 @@ fn read_notes(d: &[u8]) -> Vec<Note> {
 /// (version 25). The first 32 bytes keep their layout. Every record carries
 /// the pattern base word at offset 4, so the true record size is the one
 /// where all records line up on it; the version decides only if that fails.
-fn read_playlist(d: &[u8], ver: Ver) -> Vec<Item> {
+fn playlist_record_size(d: &[u8], ver: Ver) -> usize {
     let valid = |size: usize| d.len() % size == 0 && d.chunks_exact(size).all(|r| u16_at(r, 4) == Some(PATTERN_BASE));
     let by_version = if ver >= Ver(25, 0, 0) {
         80
@@ -493,11 +494,11 @@ fn read_playlist(d: &[u8], ver: Ver) -> Vec<Item> {
     } else {
         32
     };
-    let size = [by_version, 80, 60, 32]
-        .into_iter()
-        .chain((36..=256).step_by(4))
-        .find(|&s| valid(s))
-        .unwrap_or(by_version);
+    [by_version, 80, 60, 32].into_iter().chain((36..=256).step_by(4)).find(|&s| valid(s)).unwrap_or(by_version)
+}
+
+fn read_playlist(d: &[u8], ver: Ver) -> Vec<Item> {
+    let size = playlist_record_size(d, ver);
     let max_track: i32 = if ver >= Ver(12, 9, 1) || ver == Ver(0, 0, 0) { 499 } else { 198 };
     d.chunks_exact(size)
         .map(|r| {
@@ -989,4 +990,4 @@ fn fnum(v: f32) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

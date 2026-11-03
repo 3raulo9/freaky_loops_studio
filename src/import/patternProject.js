@@ -105,6 +105,11 @@ export function mapPatternProject(P, env) {
     automationUnassigned: 0, notes: [],
   }
   const jobs = { samples: [] }
+  // How this app's ids map back to the file's, for saving back to it.
+  const link = {
+    ch: {}, foreign: [], pat: {}, mx: {}, clips: {}, autos: {}, items: {}, unmapped: [],
+    vstSameFormat: {}, arr: null, maxPat: 0, ppq: 0, scale: 1, barTicks: 0, tps: TPS,
+  }
 
   const ppq = P.ppq || 96
   const scale = TPQ / ppq
@@ -128,6 +133,7 @@ export function mapPatternProject(P, env) {
   }
   const mxOrder = [...used].filter(i => i === 0 || inserts.some(t => t.index === i)).sort((a, b) => a - b)
   const mxIndex = new Map(mxOrder.map((fl, i) => [fl, i]))      // file insert → our index
+  mxOrder.forEach((fl, i) => { link.mx['mx' + i] = fl })
   const mixerTracks = mxOrder.map((fl, i) => {
     const t = inserts.find(x => x.index === fl) ?? { name: '', volume: 1, pan: 0, slots: [], routes: [] }
     const fxSlots = []
@@ -198,6 +204,7 @@ export function mapPatternProject(P, env) {
         // A VST2 and a VST3 build save different states: only pass the state on
         // when the installed build is the one the project used.
         const sameFormat = (hit.format ?? 'vst2') === (pl.vst.format ?? 'vst2')
+        link.vstSameFormat[id] = sameFormat
         const state = sameFormat ? pl.vst.state ?? undefined : undefined
         channels.push({
           ...base, type: 'vst', vstPath: hit.path, vstState: state,
@@ -293,18 +300,21 @@ export function mapPatternProject(P, env) {
       byCh.get(id).push(n)
     }
     for (const r of pt.notes) {
-      const [chIid, pos, len, key, vel, , fine, , slide] = r
+      const [chIid, pos, len, key, vel, pan, fine, release, slide, modX, modY] = r
       if (vel === 0) continue
       const n = {
         pitch: clamp(key, 0, 127), startTick: Math.round(pos * scale),
         durationTicks: len > 0 ? Math.max(1, Math.round(len * scale)) : TPS,
         velocity: clamp(vel / 128, 0, 1), step: len === 0,
       }
+      // What the note carries beyond pitch/time/velocity, kept for saving back.
+      const extra = [pan ?? 64, fine ?? 120, release ?? 64, modX ?? 128, modY ?? 128, len === 0 ? 1 : 0]
+      if (extra.some((v, i) => v !== [64, 120, 64, 128, 128, 0][i])) n.flp = extra
       if (slide) n.slide = true
       if (fine != null && fine !== 120) n.fine = (fine - 120) / 100
       end = Math.max(end, n.startTick + n.durationTicks)
       const kids = layerChildren.get(chIid)
-      if (kids) for (const k of kids) add(k, { ...n })
+      if (kids) for (const k of kids) add(k, { ...n, layer: chIid })
       else add(chIid, n)
     }
     const declared = pt.length > 0 ? pt.length * scale : 0
@@ -312,6 +322,7 @@ export function mapPatternProject(P, env) {
     patLen.set(pid, len)
     patNotes.set(pid, byCh)
     patterns.push({ id: pid, name: pt.name || `Pattern ${pt.iid}`, color: pt.color || PALETTE[patterns.length % PALETTE.length] })
+    link.pat[pid] = pt.iid
   }
   if (!patterns.length) { patterns.push({ id: 'p1', name: 'Pattern 1', color: PALETTE[0] }); patNotes.set('p1', new Map()); patLen.set('p1', barTicks) }
   report.patterns = patterns.length
@@ -344,7 +355,10 @@ export function mapPatternProject(P, env) {
       } else {
         patternData[pid][id] = {
           steps: Array(32).fill(false),
-          pianoNotes: notes.map(n => ({ pitch: n.pitch, startTick: n.startTick, durationTicks: n.durationTicks, velocity: n.velocity, ...(n.slide ? { slide: true } : {}) })),
+          pianoNotes: notes.map(n => ({
+            pitch: n.pitch, startTick: n.startTick, durationTicks: n.durationTicks, velocity: n.velocity,
+            ...(n.slide ? { slide: true } : {}), ...(n.flp ? { flp: n.flp } : {}), ...(n.layer != null ? { flpLayer: n.layer } : {}),
+          })),
         }
       }
     }
@@ -373,14 +387,19 @@ export function mapPatternProject(P, env) {
   const ctrlBySource = new Map((P.controllers ?? []).map(r => [r[0], r]))
   const secPerTick = 60 / (P.tempo || 120) / ppq
 
-  for (const it of items) {
+  items.forEach((it, k) => {
+    const before = playlistClips.length + automationClips.length
+    placeItem(it, k)
+    if (playlistClips.length + automationClips.length === before) link.unmapped.push(k)
+  })
+  function placeItem(it, k) {
     const [pos, len, track, kind, ref, startOff, , muted] = it
-    if (len <= 0) continue
+    if (len <= 0) return
     const trackId = 'pt' + (track + 1)
     const sPos = pos * scale, sLen = len * scale
     if (kind === 0) {
       const pid = 'p' + ref
-      if (!patNotes.has(pid)) continue
+      if (!patNotes.has(pid)) return
       const plen = patLen.get(pid)
       // Long clips repeat their pattern: split at each repeat so every piece
       // plays from the right place. Mid-bar starts use a negative slip.
@@ -392,18 +411,22 @@ export function mapPatternProject(P, env) {
         const seg = Math.min(plen - inPat, stop - s)
         const cell = Math.floor(s / barTicks + 1e-9)
         const o = s - cell * barTicks
+        const id = 'c' + (++clipSeq)
+        link.clips[id] = k
         playlistClips.push({
-          id: 'c' + (++clipSeq), trackId, cell, width: Math.max(1, Math.ceil((o + seg) / barTicks - 1e-9)),
+          id, trackId, cell, width: Math.max(1, Math.ceil((o + seg) / barTicks - 1e-9)),
           patternId: pid, muted: !!muted, slipOffset: Math.round((inPat - o) / TPS),
         })
         s += seg; c += seg
       }
-      continue
+      return
     }
     const src = chByIid.get(ref)
-    if (!src) continue
+    if (!src) return
     if (src.kind === 'audioclip' || (src.kind === 'sampler' && src.sample)) {
       const id = 'c' + (++clipSeq)
+      link.clips[id] = k
+      link.items[k] = it
       playlistClips.push({
         id, trackId, type: 'audio', cell: sPos / barTicks, width: Math.max(1, Math.ceil(sLen / barTicks)),
         sampleName: baseName(src.sample) || src.name, color: src.color || tracks[track]?.color, volume: clamp(src.volume / 0.78, 0, 2),
@@ -424,8 +447,11 @@ export function mapPatternProject(P, env) {
       let nodes = (src.automation ?? []).map(p => ({ x: (p.pos - trimBeats) / lenBeats, y: clamp(tgt ? tgt.map(p.value) : p.value, 0, 1), tension: clamp(p.tension ?? 0, -1, 1) }))
       nodes = trimNodes(nodes)
       if (!nodes.length) nodes = [{ x: 0, y: 0.5, tension: 0 }, { x: 1, y: 0.5, tension: 0 }]
+      const aid = 'a' + (++autoSeq)
+      link.autos[aid] = k
+      link.items[k] = it
       automationClips.push({
-        id: 'a' + (++autoSeq), trackId, cell: sPos / barTicks, width: Math.max(0.25, sLen / barTicks),
+        id: aid, trackId, cell: sPos / barTicks, width: Math.max(0.25, sLen / barTicks),
         targetChannelId: tgt?.id ?? null, targetParam: tgt?.param ?? 'volume', nodes, name: src.name,
       })
       report.automationClips++
@@ -436,6 +462,12 @@ export function mapPatternProject(P, env) {
   const timeMarkers = (arr?.markers ?? []).filter(m => !m.signature && !m.kind).map((m, i) => ({
     id: 'm' + (i + 1), cell: (m.pos * scale) / barTicks, label: m.name || `Marker ${i + 1}`, color: PALETTE[i % PALETTE.length],
   }))
+
+  for (const [iid, id] of ourId) link.ch[id] = iid
+  link.foreign = P.channels.filter(c => !ourId.has(c.iid)).map(c => c.iid)
+  link.maxPat = (P.patterns ?? []).reduce((m, p) => Math.max(m, p.iid), 0)
+  link.arr = arr ? arr.iid : null
+  Object.assign(link, { ppq, scale, barTicks })
 
   const project = {
     version: 1,
@@ -454,7 +486,7 @@ export function mapPatternProject(P, env) {
     automationClips,
     mixerTracks,
   }
-  return { project, jobs, report, usePlaylist: playlistClips.length > 0 || automationClips.length > 0 }
+  return { project, jobs, report, link, usePlaylist: playlistClips.length > 0 || automationClips.length > 0 }
 }
 
 // Clamp a node list to the clip window [0, 1], interpolating the edges.

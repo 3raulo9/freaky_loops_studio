@@ -2,8 +2,9 @@ import { ref, reactive, computed, watch, toRaw } from 'vue'
 import { applyTheme } from '../themes.js'
 import { applyNoteFx, hasNoteFx } from '../noteFx.js'
 import { grooveAt } from '../grooves.js'
-import { dspReady, wasmTranscribe, parsePatternProject } from '../audio/dsp.js'
+import { dspReady, wasmTranscribe, parsePatternProject, writePatternProject } from '../audio/dsp.js'
 import { mapPatternProject, AUDIO_EXT, baseName as importBaseName } from '../import/patternProject.js'
+import { projectView, buildEdits } from '../import/patternProjectExport.js'
 import { readZip } from '../import/zip.js'
 import { decodeSampleFile } from '../audio/sampleDecode.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
@@ -7146,9 +7147,10 @@ export function useStudio() {
   }
 
   // Plain-JSON snapshot of the whole project (audio buffers excluded).
-  function _serializeProject(vstStates = {}) {
+  function _serializeProject(vstStates = {}, { withSource = true } = {}) {
     return {
       version: 1,
+      flpSource:  withSource && flpSource ? _flpSourceForSave() : undefined,
       bpm:        bpm.value,
       totalSteps: totalSteps.value,
       swing:      swing.value,
@@ -7267,6 +7269,70 @@ export function useStudio() {
     a.download = name + '.freak'
     a.click()
     URL.revokeObjectURL(url)
+  }
+
+  // ── Saving back to an imported pattern project ────────────────────────────
+  // The original file, the link from our ids to its ids, and a snapshot of
+  // the project as imported. Saving re-emits the original with only what
+  // changed since (crates/projfile write.rs) — the rest stays byte for byte.
+  let flpSource = null
+  const flpSourceName = ref(null)
+  function _setFlpSource(src) {
+    flpSource = src
+    flpSourceName.value = src?.name ?? null
+  }
+  function _flpState() {
+    return {
+      bpm: bpm.value, totalSteps: totalSteps.value, channels, patterns, patternData, patternLengthOverrides,
+      playlistTracks, playlistClips, automationClips, mixerTracks,
+    }
+  }
+  function _bytesToB64(bytes) {
+    let bin = ''
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000))
+    return btoa(bin)
+  }
+  function _b64ToBytes(b64) {
+    const bin = atob(b64)
+    const out = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+    return out
+  }
+  function _flpSourceForSave() {
+    const { name, path, link, snapshot } = flpSource
+    return { name, path, link, snapshot, b64: _bytesToB64(flpSource.bytes) }
+  }
+
+  /** The project as .flp bytes: the imported file with this session's edits. → { bytes, edits, notes } | { error } */
+  async function patternProjectBytes() {
+    if (!flpSource) return { error: 'Saving as .flp works for projects opened from a .flp file.' }
+    const vstStates = await _collectVstStates()
+    const now = projectView(_flpState(), flpSource.link, vstStates)
+    const { edits, notes } = buildEdits(flpSource.snapshot, now, flpSource.link)
+    const res = await writePatternProject(flpSource.bytes, edits)
+    return res.error ? res : { bytes: res.bytes, edits, notes }
+  }
+
+  /** Save the project as a pattern project (.flp), on top of the file it was imported from. */
+  async function savePatternProject() {
+    const res = await patternProjectBytes()
+    if (res.error) { alert(res.error); return false }
+    const { notes } = res
+    const fileName = (projectName.value || flpSource.name || 'project').replace(/\.(flp|zip)$/i, '') + '.flp'
+    if (isDesktop) {
+      const saved = await saveFileNative({ suggestedName: fileName, base64: _bytesToB64(res.bytes), filter: { name: 'Pattern project', ext: ['flp'] } })
+      if (!saved || saved.cancelled) return false
+      if (saved.error) { alert(saved.error); return false }
+    } else {
+      const url = URL.createObjectURL(new Blob([res.bytes], { type: 'application/octet-stream' }))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = fileName
+      a.click()
+      URL.revokeObjectURL(url)
+    }
+    if (notes.length) alert('Saved. Some things have no equivalent in the file:\n\n• ' + notes.join('\n• '))
+    return true
   }
 
   // Desktop: Open… through the native dialog (or a recent file's path).
@@ -7419,7 +7485,7 @@ export function useStudio() {
       const vstHit = new Map(vsts.map((v, i) => [v, plugins[i] ?? null]))
       const nativeHit = new Map(natives.map((n, i) => [n, plugins[vsts.length + i] ?? null]))
 
-      const { project, jobs, report, usePlaylist: songMode } = mapPatternProject(P, {
+      const { project, jobs, report, link, usePlaylist: songMode } = mapPatternProject(P, {
         desktop: isDesktop,
         resolveVst: v => vstHit.get(v),
         resolveNative: n => nativeHit.get(n),
@@ -7458,6 +7524,9 @@ export function useStudio() {
         else _attachImportedClip(j, buf, fileName)
       }))
       if (audioCtx) { rebuildGains(); buildMixerInserts() }
+
+      // Keep the original so it can be saved back with only the edits applied.
+      _setFlpSource({ bytes: bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes).slice(), name, path, link, snapshot: projectView(_flpState(), link) })
 
       report.samplesTotal = decoded.size
       report.samplesFound = decoded.size - missing.size
@@ -7560,7 +7629,8 @@ export function useStudio() {
   const autosaveInfo = ref(_readAutosaveMeta())
   function autosaveNow() {
     try {
-      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(_serializeProject()))
+      // Browser storage is small: a big original file isn't worth losing the autosave over.
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(_serializeProject({}, { withSource: (flpSource?.bytes.length ?? 0) < 1_500_000 })))
       const meta = { time: Date.now(), name: projectName.value }
       localStorage.setItem(AUTOSAVE_KEY + '-meta', JSON.stringify(meta))
       autosaveInfo.value = meta
@@ -7671,6 +7741,7 @@ export function useStudio() {
   }
 
   function _applyProject(p) {
+    _setFlpSource(p.flpSource?.b64 ? { ...p.flpSource, bytes: _b64ToBytes(p.flpSource.b64) } : null)
     if (isPlaying.value) pausePlay()
     _resetSessionPlayback()
     if (p.session) {
@@ -8021,6 +8092,7 @@ export function useStudio() {
     captureSessionScene, launchSessionSlot, launchSessionScene, stopSessionTrack, stopAllSessionClips,
     sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist, sessionFollow, cycleSceneLoops,
     // Project save / load / autosave / MIDI export
+    savePatternProject, patternProjectBytes, flpSourceName,
     saveProject, loadProjectFile, newProject, importPatternProject, importProjectFiles, importState, locateMissingSamples, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
     projectPath, openProjectNative,
     // Render / export: faithful offline render (+ real-time capture for plugins,
