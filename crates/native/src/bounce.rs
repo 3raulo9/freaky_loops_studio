@@ -43,3 +43,25 @@ pub fn write_pcm(tag: &str, pcm: &[f32]) -> std::io::Result<String> {
     std::fs::write(render_dir().join(&name), bytes)?;
     Ok(name)
 }
+
+/// Interleaved stereo f32 PCM as a 32-bit float WAV file.
+pub fn write_wav(path: &str, pcm: &[f32], rate: u32) -> std::io::Result<()> {
+    let bytes = (pcm.len() * 4) as u32;
+    let mut w = Vec::with_capacity(44 + bytes as usize);
+    w.extend_from_slice(b"RIFF");
+    w.extend_from_slice(&(36 + bytes).to_le_bytes());
+    w.extend_from_slice(b"WAVEfmt ");
+    w.extend_from_slice(&16u32.to_le_bytes());
+    w.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+    w.extend_from_slice(&2u16.to_le_bytes());
+    w.extend_from_slice(&rate.to_le_bytes());
+    w.extend_from_slice(&(rate * 8).to_le_bytes());
+    w.extend_from_slice(&8u16.to_le_bytes());
+    w.extend_from_slice(&32u16.to_le_bytes());
+    w.extend_from_slice(b"data");
+    w.extend_from_slice(&bytes.to_le_bytes());
+    for v in pcm {
+        w.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, w)
+}

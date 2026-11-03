@@ -397,7 +397,10 @@ pub fn resolve(p: &Value) -> Value {
         found.values().any(Option::is_none) || plug.iter().zip(&optional).any(|(h, &opt)| h.is_none() && !opt)
     };
     let mut fresh = false;
-    if missing(&found, &plug_hits) {
+    // Anything unresolved is looked up in the index; only required things
+    // (samples, plugins with a stored path) are worth a fresh walk.
+    let unresolved = found.values().any(Option::is_none) || plug_hits.iter().any(Option::is_none);
+    if unresolved {
         let (mut idx, walked) = index(false);
         fresh = walked;
         loop {

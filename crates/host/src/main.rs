@@ -2,8 +2,9 @@
 //!
 //! A native window hosts the Vue UI in a webview; this process runs the audio
 //! engine and VST2/VST3 plugins. The UI and host exchange JSON control messages
-//! (`{type, payload}`) — audio never crosses the bridge. 64-bit plugins load
-//! in-process; 32-bit plugins run in the bridge helper process.
+//! (`{type, payload}`); the UI's own audio streams in over the web bus
+//! (fls_native::webbus) so everything leaves through one native output.
+//! 64-bit plugins load in-process; 32-bit plugins run in the bridge helper.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -16,7 +17,8 @@ use base64::Engine as _;
 use bridge_client::BridgeClient;
 use fls_native::editor::EditorWindow;
 use fls_native::pe::Arch;
-use fls_native::{bounce, host_callback, log, AudioSource, Engine, Hosted, PluginState};
+use fls_native::webbus::WebBus;
+use fls_native::{bounce, host_callback, log, AudioSource, Engine, Hosted, PluginState, Strip};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,7 +55,7 @@ enum UserEvent {
 }
 
 enum Kind {
-    InProc { plugin: Arc<dyn Hosted>, source: Arc<dyn AudioSource>, editor: Option<EditorWindow> },
+    InProc { plugin: Arc<dyn Hosted>, source: Arc<dyn AudioSource>, strip: Arc<Strip>, editor: Option<EditorWindow> },
     Bridge(BridgeClient),
 }
 
@@ -68,6 +70,7 @@ struct Instance {
 struct App {
     window: Window,
     engine: Engine,
+    bus: Option<Arc<WebBus>>,
     proxy: EventLoopProxy<UserEvent>,
     instances: HashMap<String, Instance>,
     outbox: Vec<Value>,
@@ -111,6 +114,12 @@ impl App {
 
         match kind.as_str() {
             "ping" => {
+                // A freshly loaded page (reload, New project) owns no plugins yet:
+                // whatever the previous page loaded would otherwise keep running.
+                if p.get("fresh").and_then(Value::as_bool).unwrap_or(false) && !self.instances.is_empty() {
+                    log::write(&format!("new UI page: releasing {} plugin(s) from the previous one", self.instances.len()));
+                    self.shutdown();
+                }
                 let rate = self.engine.sample_rate();
                 self.send("pong", json!({ "version": VERSION, "engine": "rust", "sampleRate": rate, "time": now_ms() }));
             }
@@ -151,6 +160,32 @@ impl App {
                     Kind::InProc { plugin, .. } => plugin.note_off(pitch),
                     Kind::Bridge(b) if on => b.send(json!({ "t": "noteOn", "pitch": pitch, "vel": vel })),
                     Kind::Bridge(b) => b.send(json!({ "t": "noteOff", "pitch": pitch })),
+                }
+            }
+            "vstEvents" => self.on_vst_events(&p),
+            // Diagnostics: record the master output to a WAV file.
+            "captureStart" => {
+                let secs = p.get("seconds").and_then(Value::as_f64).unwrap_or(10.0) as f32;
+                self.engine.start_capture(secs, p.get("mute").and_then(Value::as_bool).unwrap_or(false));
+            }
+            "captureStop" => {
+                let path = str_of(&p, "path").map(str::to_string).unwrap_or_else(|| std::env::temp_dir().join("fls-capture.wav").to_string_lossy().into_owned());
+                let (frames, dropped) = match self.engine.stop_capture() {
+                    Some((pcm, dropped)) => {
+                        let _ = bounce::write_wav(&path, &pcm, self.engine.sample_rate());
+                        (pcm.len() / 2, dropped)
+                    }
+                    None => (0, 0),
+                };
+                self.send("captureDone", json!({ "path": path, "frames": frames, "dropped": dropped }));
+            }
+            "vstMix" => {
+                let Some(inst) = id.as_ref().and_then(|i| self.instances.get(i)) else { return };
+                let gain = p.get("gain").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+                let pan = p.get("pan").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                match &inst.kind {
+                    Kind::InProc { strip, .. } => strip.set_mix(gain, pan),
+                    Kind::Bridge(b) => b.send(json!({ "t": "mix", "gain": gain, "pan": pan })),
                 }
             }
             "vstAllNotesOff" => {
@@ -312,7 +347,7 @@ impl App {
                     plugin.load_state(&s);
                 }
                 let source: Arc<dyn AudioSource> = plugin.clone();
-                self.engine.add_source(source.clone());
+                let strip = self.engine.add_source(source.clone());
                 let i = plugin.info().clone();
                 self.send(
                     "vstLoaded",
@@ -320,7 +355,7 @@ impl App {
                             "canReplacing": i.can_replacing, "isSynth": i.is_synth, "hasEditor": i.has_editor, "bits": 64,
                             "format": if is_vst3 { "vst3" } else { "vst2" } }),
                 );
-                self.instances.insert(id.into(), Instance { path: path.into(), gen, kind: Kind::InProc { plugin, source, editor: None }, pending_render: None });
+                self.instances.insert(id.into(), Instance { path: path.into(), gen, kind: Kind::InProc { plugin, source, strip, editor: None }, pending_render: None });
             }
             Err(e) => {
                 let msg = if arch == Arch::Unknown { format!("{e} (not a Windows DLL?)") } else { e };
@@ -331,10 +366,10 @@ impl App {
 
     fn teardown(&mut self, inst: Instance) {
         match inst.kind {
-            Kind::InProc { plugin, source, editor } => {
+            Kind::InProc { plugin, source, strip, editor } => {
                 drop(editor);
                 self.engine.remove_source(&source);
-                drop(source);
+                drop((strip, source));
                 plugin.all_notes_off();
                 drop(plugin);
             }
@@ -458,12 +493,47 @@ impl App {
         }
     }
 
+    /// Timed MIDI from the UI's scheduler: `{ now, rate, lat, ev: [[id, frame, status, d1, d2]] }`,
+    /// frames on the UI audio context's clock. While the UI's audio streams in,
+    /// its frames map exactly onto the engine's; otherwise each event keeps its
+    /// distance from `now`, shifted so it lines up with the UI's own output.
+    fn on_vst_events(&mut self, p: &Value) {
+        let num = |k: &str| p.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+        let (now_web, web_rate, web_lat) = (num("now"), num("rate").max(1.0), num("lat"));
+        let eng_rate = self.engine.sample_rate() as f64;
+        let eng_now = self.engine.frame_now();
+        let native_lat = self.engine.stats().output_latency;
+        let Some(evs) = p.get("ev").and_then(Value::as_array) else { return };
+        for ev in evs {
+            let Some(a) = ev.as_array().filter(|a| a.len() == 5) else { continue };
+            let Some(inst) = a[0].as_str().and_then(|id| self.instances.get(id)) else { continue };
+            let web = a[1].as_f64().unwrap_or(0.0);
+            let d = [a[2].as_u64().unwrap_or(0) as u8, a[3].as_u64().unwrap_or(0) as u8, a[4].as_u64().unwrap_or(0) as u8];
+            let at = self.bus.as_ref().and_then(|b| b.engine_frame_for(web)).unwrap_or_else(|| {
+                let delay = (web - now_web) / web_rate + web_lat - native_lat;
+                eng_now + (delay.max(0.0) * eng_rate) as u64
+            });
+            match &inst.kind {
+                Kind::InProc { plugin, .. } => plugin.queue_midi(at, d),
+                Kind::Bridge(b) => b.send(json!({ "t": "midi", "d": d, "delay": at.saturating_sub(eng_now) })),
+            }
+        }
+    }
+
     fn on_meter_tick(&mut self) {
+        self.engine.poll();
+        let st = self.engine.stats();
+        self.send("audioStats", json!({
+            "device": st.device, "rate": st.rate, "period": st.period,
+            "load": (st.load * 1000.0).round() / 1000.0, "loadPeak": (st.load_peak * 1000.0).round() / 1000.0,
+            "late": st.late, "bus": st.bus_connected, "busUnderruns": st.bus_underruns,
+            "busLatency": (st.bus_latency * 10000.0).round() / 10000.0, "busMaxGap": (st.bus_max_gap * 10000.0).round() / 10000.0, "outputLatency": (st.output_latency * 10000.0).round() / 10000.0,
+        }));
         let peaks: Vec<(String, f32)> = self
             .instances
             .iter()
             .filter_map(|(id, inst)| match &inst.kind {
-                Kind::InProc { plugin, .. } => Some((id.clone(), plugin.take_peak())),
+                Kind::InProc { strip, .. } => Some((id.clone(), strip.take_peak())),
                 _ => None,
             })
             .filter(|(_, p)| *p > 0.0001)
@@ -536,12 +606,34 @@ fn main() {
         .build(&event_loop)
         .expect("failed to create the main window");
 
+    // The engine and the web bus come first: the UI needs the bus address and
+    // the engine's rate before its first line runs.
+    let device = files::setting("audioDevice").and_then(|v| v.as_str().map(str::to_string));
+    let engine = Engine::start_on(device.as_deref());
+    let bus = match WebBus::start() {
+        Ok(b) => {
+            engine.attach_bus(b.clone());
+            Some(b)
+        }
+        Err(e) => {
+            log::write(&format!("web bus unavailable ({e}); the UI plays through its own output"));
+            None
+        }
+    };
+    let audio_info = match &bus {
+        Some(b) => json!({ "port": b.port, "token": b.token, "rate": engine.sample_rate() }),
+        None => json!({ "rate": engine.sample_rate() }),
+    };
+    let init_script = format!("{INIT_SCRIPT}
+window.__flsHost.audio = {audio_info};
+");
+
     let ipc_proxy = proxy.clone();
     let url = start_url();
     log::write(&format!("loading UI from {url}"));
     let webview: WebView = WebViewBuilder::new()
         .with_url(&url)
-        .with_initialization_script(INIT_SCRIPT)
+        .with_initialization_script(&init_script)
         .with_ipc_handler(move |req| {
             let _ = ipc_proxy.send_event(UserEvent::Ipc(req.body().clone()));
         })
@@ -558,10 +650,9 @@ fn main() {
         }
     });
 
-    let device = files::setting("audioDevice").and_then(|v| v.as_str().map(str::to_string));
     // Load (or build) the sample/plugin index in the background for fast imports.
     locate::prewarm();
-    let mut app = App { window, engine: Engine::start_on(device.as_deref()), proxy, instances: HashMap::new(), outbox: Vec::new(), next_gen: 0, cascade: 0 };
+    let mut app = App { window, engine, bus, proxy, instances: HashMap::new(), outbox: Vec::new(), next_gen: 0, cascade: 0 };
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;

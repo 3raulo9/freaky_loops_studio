@@ -12,7 +12,8 @@
 //! processing state sits behind one mutex — the live callback only
 //! `try_lock`s it, exactly like the VST2 host.
 
-use crate::engine::AudioSource;
+use crate::engine::{AudioSource, RenderCtx};
+use crate::sched::{Due, Inbox, NOW};
 use crate::host_callback::{self, set_thread_process_level, ProcessLevel};
 use crate::log;
 use crate::plugin::{Hosted, PluginInfo, PluginState, RenderNote, BLOCK_SIZE};
@@ -20,7 +21,7 @@ use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use vst3::Steinberg::Vst::IAttributeList_::AttrID;
 use vst3::Steinberg::Vst::*;
@@ -612,8 +613,10 @@ struct Proc {
     params: ComWrapper<ParamChanges>,
     out_params: ComWrapper<ParamChanges>,
     ctx: ProcessContext,
-    /// Live notes taken from the queue for the next call (kept allocated).
-    pending: Vec<(i32, NoteEv)>,
+    /// Live notes taken from the inbox, in due order (kept allocated).
+    due: Due<NoteEv>,
+    /// This block's notes with their sample offsets.
+    block: Vec<(i32, NoteEv)>,
 }
 
 impl Proc {
@@ -629,7 +632,8 @@ impl Proc {
             params: ParamChanges::new(),
             out_params: ParamChanges::new(),
             ctx: unsafe { std::mem::zeroed() },
-            pending: Vec::with_capacity(MAX_EVENTS),
+            due: Due::with_capacity(4096),
+            block: Vec::with_capacity(MAX_EVENTS),
         }
     }
 }
@@ -643,7 +647,9 @@ pub struct Vst3Plugin {
     view: Mutex<Option<ComPtr<IPlugView>>>,
     frame: ComWrapper<Frame>,
     proc: Mutex<Proc>,
-    notes: Mutex<Vec<NoteEv>>,
+    inbox: Inbox<NoteEv>,
+    /// Set by all_notes_off: the audio thread drops queued note-ons.
+    flush: AtomicBool,
     edits: Arc<Mutex<Vec<(ParamID, ParamValue)>>>,
     peak: AtomicU32,
     // COM objects, released in this order after Drop has shut the plugin down;
@@ -837,7 +843,8 @@ impl Vst3Plugin {
             view: Mutex::new(None),
             frame: ComWrapper::new(Frame { key }),
             proc: Mutex::new(Proc::new(sample_rate, &in_ch, &out_ch)),
-            notes: Mutex::new(Vec::with_capacity(64)),
+            inbox: Inbox::new(),
+            flush: AtomicBool::new(false),
             edits,
             peak: AtomicU32::new(0),
             conn,
@@ -896,11 +903,7 @@ impl Vst3Plugin {
     }
 
     fn push_note(&self, ev: NoteEv) {
-        if let Ok(mut q) = self.notes.lock() {
-            if q.len() < MAX_EVENTS {
-                q.push(ev);
-            }
-        }
+        self.inbox.push(NOW, ev);
     }
 
     /// One `process` call of `frames` frames. `pos` = project position in
@@ -1008,30 +1011,34 @@ impl Vst3Plugin {
 }
 
 impl AudioSource for Vst3Plugin {
-    /// Runs on the callback's own frame count (chunks of at most one block),
-    /// so a note played now sounds in this callback. No allocation, no blocking.
-    fn render_add(&self, out: &mut [f32], frames: usize) {
-        let Ok(mut st) = self.proc.try_lock() else { return };
+    /// Runs on the callback's own frame count (chunks of at most one block);
+    /// each note lands on its own sample. No allocation, no blocking.
+    fn render_add(&self, out: &mut [f32], frames: usize, ctx: &RenderCtx) {
+        let Ok(mut guard) = self.proc.try_lock() else { return };
+        let st = &mut *guard;
         set_thread_process_level(ProcessLevel::Realtime);
-        let mut pending = std::mem::take(&mut st.pending);
-        if let Ok(mut q) = self.notes.try_lock() {
-            pending.extend(q.drain(..).map(|n| (0, n)));
+        st.due.take(&self.inbox);
+        if self.flush.swap(false, Ordering::Acquire) {
+            st.due.retain(|(_, n)| !n.on);
         }
         let mut peak = 0f32;
         let mut done = 0;
         while done < frames {
             let n = (frames - done).min(BLOCK_SIZE);
-            self.process_block(&mut st, n, &pending, None);
-            pending.clear();
+            let at = ctx.start + done as u64;
+            let mut block = std::mem::take(&mut st.block);
+            block.clear();
+            st.due.split(at, at + n as u64, MAX_EVENTS, |off, e| block.push((off.min(n as u32 - 1) as i32, e)));
+            self.process_block(st, n, &block, None);
+            st.block = block;
             for i in 0..n {
-                let (l, r) = Self::stereo_at(&st, i);
+                let (l, r) = Self::stereo_at(st, i);
                 out[(done + i) * 2] += l;
                 out[(done + i) * 2 + 1] += r;
                 peak = peak.max(l.abs()).max(r.abs());
             }
             done += n;
         }
-        st.pending = pending;
         if peak > f32::from_bits(self.peak.load(Ordering::Relaxed)) {
             self.peak.store(peak.to_bits(), Ordering::Relaxed);
         }
@@ -1051,13 +1058,22 @@ impl Hosted for Vst3Plugin {
     fn note_off(&self, pitch: i32) {
         self.push_note(NoteEv { on: false, channel: 0, pitch: pitch.clamp(0, 127) as i16, velocity: 0.0 });
     }
-    /// VST3 has no all-notes-off message: release every key.
+    /// Note on/off map to note events; other messages have no VST3 event.
+    fn queue_midi(&self, at: u64, d: [u8; 3]) {
+        let (kind, ch) = (d[0] & 0xF0, (d[0] & 0x0F) as i16);
+        let (pitch, vel) = ((d[1] & 0x7F) as i16, d[2] & 0x7F);
+        match kind {
+            0x90 if vel > 0 => self.inbox.push(at, NoteEv { on: true, channel: ch, pitch, velocity: vel as f32 / 127.0 }),
+            0x80 | 0x90 => self.inbox.push(at, NoteEv { on: false, channel: ch, pitch, velocity: 0.0 }),
+            _ => {}
+        }
+    }
+    /// VST3 has no all-notes-off message: drop waiting notes, release every key.
     fn all_notes_off(&self) {
-        if let Ok(mut q) = self.notes.lock() {
-            q.retain(|n| !n.on);
-            for p in 0..128 {
-                q.push(NoteEv { on: false, channel: 0, pitch: p, velocity: 0.0 });
-            }
+        self.inbox.retain(|(_, n)| !n.on);
+        self.flush.store(true, Ordering::Release);
+        for p in 0..128 {
+            self.inbox.push(NOW, NoteEv { on: false, channel: 0, pitch: p, velocity: 0.0 });
         }
     }
     fn take_peak(&self) -> f32 {
@@ -1073,9 +1089,8 @@ impl Hosted for Vst3Plugin {
         }
         let mut st = self.proc.lock().unwrap_or_else(|p| p.into_inner());
         set_thread_process_level(ProcessLevel::Offline);
-        if let Ok(mut q) = self.notes.lock() {
-            q.clear();
-        }
+        self.inbox.retain(|_| false);
+        st.due.clear();
         self.stop();
         self.start(sample_rate, ProcessModes_::kOffline);
         st.sample_rate = sample_rate;

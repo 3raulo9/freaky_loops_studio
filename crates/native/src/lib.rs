@@ -9,7 +9,10 @@ pub mod host_callback;
 pub mod log;
 pub mod pe;
 pub mod plugin;
+pub mod rt;
+pub mod sched;
 pub mod vst3;
+pub mod webbus;
 
-pub use engine::{output_devices, AudioSource, Engine};
+pub use engine::{output_devices, AudioSource, Clock, Engine, EngineStats, RenderCtx, Strip};
 pub use plugin::{load_any, Hosted, Plugin, PluginInfo, PluginState, RenderNote};

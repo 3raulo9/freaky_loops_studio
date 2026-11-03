@@ -13,7 +13,8 @@ use crate::host_callback::{host_callback, set_thread_process_level, ProcessLevel
 use crate::log;
 use std::os::raw::c_void;
 use std::path::Path;
-use std::sync::atomic::{AtomicU32, Ordering};
+use crate::sched::{Due, Inbox, NOW};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const BLOCK_SIZE: usize = 512;
@@ -24,6 +25,9 @@ pub trait Hosted: crate::engine::AudioSource {
     fn path(&self) -> &str;
     fn note_on(&self, pitch: i32, velocity: i32);
     fn note_off(&self, pitch: i32);
+    /// A MIDI message due at engine frame `at` (`sched::NOW` = right away).
+    fn queue_midi(&self, at: u64, data: [u8; 3]);
+    /// Silence: drop notes still waiting to start, release every voice.
     fn all_notes_off(&self);
     /// Peak output level since the last call (for UI meters).
     fn take_peak(&self) -> f32;
@@ -82,8 +86,10 @@ struct ProcState {
     out_ptrs: Vec<*mut f32>,
     events: Box<VstEvents>,
     event_store: Box<[VstMidiEvent; MAX_BLOCK_EVENTS]>,
-    /// Live MIDI taken from the queue for the next block (kept allocated).
-    pending: Vec<[u8; 3]>,
+    /// Live MIDI taken from the inbox, in due order (kept allocated).
+    due: Due<[u8; 3]>,
+    /// This block's events with their sample offsets.
+    block: Vec<(i32, [u8; 3])>,
 }
 
 pub struct Plugin {
@@ -93,7 +99,9 @@ pub struct Plugin {
     pub info: PluginInfo,
     pub path: String,
     proc: Mutex<ProcState>,
-    midi: Mutex<Vec<[u8; 3]>>,
+    inbox: Inbox<[u8; 3]>,
+    /// Set by all_notes_off: the audio thread drops queued note-ons.
+    flush: AtomicBool,
     peak: AtomicU32,
     _lib: libloading::Library,
 }
@@ -132,7 +140,8 @@ impl Plugin {
             info: PluginInfo::default(),
             path: path.to_string(),
             proc: Mutex::new(ProcState::new(sample_rate, 0, 2)),
-            midi: Mutex::new(Vec::with_capacity(64)),
+            inbox: Inbox::new(),
+            flush: AtomicBool::new(false),
             peak: AtomicU32::new(0),
             _lib: lib,
         };
@@ -209,6 +218,8 @@ impl Plugin {
 
     /// Release everything: all-sound-off + all-notes-off on every MIDI channel.
     pub fn all_notes_off(&self) {
+        self.inbox.retain(|(_, d)| d[0] & 0xF0 != 0x90);
+        self.flush.store(true, Ordering::Release);
         for ch in 0..16u8 {
             self.push_midi([0xB0 | ch, 120, 0]);
             self.push_midi([0xB0 | ch, 123, 0]);
@@ -216,31 +227,35 @@ impl Plugin {
     }
 
     pub fn push_midi(&self, data: [u8; 3]) {
-        if let Ok(mut q) = self.midi.lock() {
-            if q.len() < MAX_BLOCK_EVENTS {
-                q.push(data);
-            }
-        }
+        self.inbox.push(NOW, data);
+    }
+
+    pub fn queue_midi(&self, at: u64, data: [u8; 3]) {
+        self.inbox.push(at, data);
     }
 
     // ── Live audio ──────────────────────────────────────────────────────────
 
-    /// Mix `frames` frames of the plugin's output into an interleaved stereo
-    /// buffer. Called from the audio thread; never blocks or allocates.
-    /// The plugin runs on the callback's own frame count (in chunks of at most
-    /// one block), so a note played now sounds in this very callback.
-    pub fn render_add(&self, out: &mut [f32], frames: usize) {
-        let Ok(mut st) = self.proc.try_lock() else { return };
+    /// Runs on the callback's own frame count in chunks of at most one block;
+    /// each event lands on its own sample. Called from the audio thread;
+    /// never blocks or allocates.
+    pub fn render_add(&self, out: &mut [f32], frames: usize, ctx: &crate::engine::RenderCtx) {
+        let Ok(mut guard) = self.proc.try_lock() else { return };
+        let st = &mut *guard;
         set_thread_process_level(ProcessLevel::Realtime);
-        let mut pending = std::mem::take(&mut st.pending);
-        if let Ok(mut q) = self.midi.try_lock() {
-            pending.extend(q.drain(..));
+        st.due.take(&self.inbox);
+        if self.flush.swap(false, Ordering::Acquire) {
+            st.due.retain(|(_, d)| d[0] & 0xF0 != 0x90);
         }
         let mut peak = 0f32;
         let mut done = 0;
         while done < frames {
             let n = (frames - done).min(BLOCK_SIZE);
-            self.process_block(&mut st, n, pending.drain(..).map(|d| (0, d)));
+            let at = ctx.start + done as u64;
+            st.block.clear();
+            let (due, block) = (&mut st.due, &mut st.block);
+            due.split(at, at + n as u64, MAX_BLOCK_EVENTS, |off, d| block.push((off as i32, d)));
+            self.process_block(st, n);
             let (l_buf, r_buf) = (&st.outs[0], st.outs.get(1).unwrap_or(&st.outs[0]));
             for i in 0..n {
                 let (l, r) = (l_buf[i], r_buf[i]);
@@ -250,7 +265,6 @@ impl Plugin {
             }
             done += n;
         }
-        st.pending = pending;
         if peak > f32::from_bits(self.peak.load(Ordering::Relaxed)) {
             self.peak.store(peak.to_bits(), Ordering::Relaxed);
         }
@@ -261,14 +275,12 @@ impl Plugin {
         f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
     }
 
-    fn process_block(&self, st: &mut ProcState, frames: usize, events: impl Iterator<Item = (i32, [u8; 3])>) {
-        let mut n = 0;
-        for (delta, data) in events {
-            if n >= MAX_BLOCK_EVENTS {
-                break;
-            }
-            st.event_store[n] = VstMidiEvent::new(delta, data);
-            n += 1;
+    /// Process one block with the events in `st.block`.
+    fn process_block(&self, st: &mut ProcState, frames: usize) {
+        let n = st.block.len().min(MAX_BLOCK_EVENTS);
+        for i in 0..n {
+            let (delta, data) = st.block[i];
+            st.event_store[i] = VstMidiEvent::new(delta.min(frames as i32 - 1).max(0), data);
         }
         if n > 0 {
             let store = st.event_store.as_mut_ptr();
@@ -310,9 +322,8 @@ impl Plugin {
         let mut st = self.proc.lock().unwrap_or_else(|p| p.into_inner());
         set_thread_process_level(ProcessLevel::Offline);
         crate::host_callback::set_thread_sample_rate(Some(sample_rate));
-        if let Ok(mut q) = self.midi.lock() {
-            q.clear();
-        }
+        self.inbox.retain(|_| false);
+        st.due.clear();
 
         self.suspend();
         self.resume(sample_rate);
@@ -337,8 +348,9 @@ impl Plugin {
             while ev < events.len() && events[ev].0 < (frame + n) as i64 {
                 ev += 1;
             }
-            let block_events: Vec<(i32, [u8; 3])> = events[start..ev].iter().map(|(f, d)| ((*f - frame as i64).max(0) as i32, *d)).collect();
-            self.process_block(&mut st, n, block_events.into_iter());
+            st.block.clear();
+            st.block.extend(events[start..ev].iter().map(|(f, d)| ((*f - frame as i64).max(0) as i32, *d)));
+            self.process_block(&mut st, n);
             let outs = &st.outs;
             for i in 0..n {
                 pcm[(frame + i) * 2] = outs[0][i];
@@ -349,8 +361,9 @@ impl Plugin {
         // Flush note-offs that landed on the final frame so no voice keeps
         // sounding on the live instance afterwards.
         if ev < events.len() {
-            let tail: Vec<(i32, [u8; 3])> = events[ev..].iter().map(|(_, d)| (0, *d)).collect();
-            self.process_block(&mut st, BLOCK_SIZE, tail.into_iter());
+            st.block.clear();
+            st.block.extend(events[ev..].iter().map(|(_, d)| (0, *d)));
+            self.process_block(&mut st, BLOCK_SIZE);
         }
 
         self.suspend();
@@ -500,6 +513,9 @@ impl Hosted for Plugin {
     fn note_off(&self, pitch: i32) {
         Plugin::note_off(self, pitch)
     }
+    fn queue_midi(&self, at: u64, data: [u8; 3]) {
+        Plugin::queue_midi(self, at, data)
+    }
     fn all_notes_off(&self) {
         Plugin::all_notes_off(self)
     }
@@ -553,7 +569,8 @@ impl ProcState {
             out_ptrs,
             events: Box::new(VstEvents { num_events: 0, reserved: 0, events: [std::ptr::null_mut(); MAX_BLOCK_EVENTS] }),
             event_store: Box::new([VstMidiEvent::new(0, [0, 0, 0]); MAX_BLOCK_EVENTS]),
-            pending: Vec::with_capacity(MAX_BLOCK_EVENTS),
+            due: Due::with_capacity(4096),
+            block: Vec::with_capacity(MAX_BLOCK_EVENTS * 4),
         }
     }
 }

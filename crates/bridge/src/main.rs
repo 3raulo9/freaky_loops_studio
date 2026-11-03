@@ -74,7 +74,8 @@ fn main() {
         }
     };
     let source: Arc<dyn AudioSource> = plugin.clone();
-    engine.add_source(source);
+    let strip = engine.add_source(source);
+    let clock = engine.clock();
     let i = &plugin.info;
     send(json!({
         "t": "loaded", "name": i.name, "vendor": i.vendor, "inputs": i.inputs, "outputs": i.outputs,
@@ -106,6 +107,17 @@ fn main() {
                 match m.get("t").and_then(Value::as_str).unwrap_or("") {
                     "noteOn" => plugin.note_on(int("pitch", 60) as i32, int("vel", 100) as i32),
                     "noteOff" => plugin.note_off(int("pitch", 60) as i32),
+                    // A timed MIDI message, `delay` engine frames from now.
+                    "midi" => {
+                        let d: Vec<u8> = m.get("d").and_then(Value::as_array).map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0) as u8).collect()).unwrap_or_default();
+                        if d.len() == 3 {
+                            plugin.queue_midi(clock.now() + int("delay", 0).max(0) as u64, [d[0], d[1], d[2]]);
+                        }
+                    }
+                    "mix" => strip.set_mix(
+                        m.get("gain").and_then(Value::as_f64).unwrap_or(1.0) as f32,
+                        m.get("pan").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                    ),
                     "allNotesOff" => plugin.all_notes_off(),
                     "transport" => host_callback::set_transport(
                         m.get("bpm").and_then(Value::as_f64).unwrap_or(120.0),
