@@ -12,7 +12,7 @@ createApp(App)
   .mount('#app')
 
 // Desktop (native host) bridge handshake; safe no-op in a plain browser.
-pingHost()
+pingHost({ fresh: true })
 
 // Dev-only handle for poking the store from the console / automated UI checks.
 if (import.meta.env.DEV) window.__studio = useStudio()

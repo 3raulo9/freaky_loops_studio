@@ -13,6 +13,7 @@ import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport,
          saveFileNative, openFileNative, setWindowTitle, bytesToBase64,
          resolveAssetsNative, hostFileUrl, pickFolderNative } from '../desktop/ipc.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
+import { startNativeBus } from '../audio/nativeBus.js'
 import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
 import { parseMidi } from '../midi/midiParser.js'
@@ -1900,6 +1901,7 @@ export function useStudio() {
 
   // ── Audio engine ──────────────────────────────────────────────────────────────
   let audioCtx        = null
+  let nativeBus       = null   // desktop: the context's output joins the native engine
   let masterGain      = null
   let analyserNode    = null
   let outputGain      = null   // terminal Main Volume stage (global output trim)
@@ -1936,7 +1938,7 @@ export function useStudio() {
   let previewGain = null, previewSrc = null
   function _ensurePreview() {
     initAudio()
-    if (!previewGain) { previewGain = audioCtx.createGain(); previewGain.gain.value = 0.7; previewGain.connect(audioCtx.destination) }
+    if (!previewGain) { previewGain = audioCtx.createGain(); previewGain.gain.value = 0.7; previewGain.connect(_audioOut()) }
   }
   function stopPreview() {
     if (previewSrc) { try { previewSrc.stop() } catch (_) {} ; try { previewSrc.disconnect() } catch (_) {} ; previewSrc = null }
@@ -3202,7 +3204,7 @@ export function useStudio() {
     _inputAnalyser = audioCtx.createAnalyser(); _inputAnalyser.fftSize = 512
     _micSource.connect(_inputAnalyser)
     _micSource.connect(_monitorGain)
-    _monitorGain.connect(audioCtx.destination)
+    _monitorGain.connect(_audioOut())
     audioInputReady.value = true
     _pollInputLevel()
     return true
@@ -3879,9 +3881,18 @@ export function useStudio() {
     return n
   }
 
+  // Where the finished mix (and previews / input monitoring) goes: the native
+  // engine's bus in the desktop app, the context's own output otherwise.
+  function _audioOut() { return nativeBus ? nativeBus.input : audioCtx.destination }
+
   function initAudio() {
     if (!audioCtx) {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)()
+      // Desktop: render at the engine's rate in the smallest quanta — the engine
+      // owns the device, buffer size and clock (see audio/nativeBus.js).
+      const hostAudio = isDesktop ? window.__flsHost?.audio : null
+      const ctxOpts = hostAudio?.port ? { latencyHint: 0.001, sampleRate: hostAudio.rate || undefined } : undefined
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)(ctxOpts)
+      if (hostAudio?.port) nativeBus = startNativeBus(audioCtx, hostAudio)
       masterGain = audioCtx.createGain()
       masterGain.gain.value = mixerTracks[0].volume
       analyserNode = audioCtx.createAnalyser()
@@ -3904,7 +3915,7 @@ export function useStudio() {
       masterGain.connect(analyserNode)
       analyserNode.connect(masterLimiter)
       masterLimiter.connect(outputGain)
-      outputGain.connect(audioCtx.destination)
+      outputGain.connect(_audioOut())
       // Stereo scope taps: split the master into L/R analysers so the visualizer
       // can draw a true stereo waveform / spectrum, independent of fftSize tweaks.
       const split = audioCtx.createChannelSplitter(2)
@@ -6394,15 +6405,68 @@ export function useStudio() {
   //   so ctx/dest are ignored.
   function makeVstPlayFn(channelId) {
     return function playVstNote(ctx, time, { pitch = 60, velocity = 1, gate = null } = {}, _dest) {
-      const delayMs = Math.max(0, (time - ctx.currentTime) * 1000)
+      if (ctx !== audioCtx) return            // offline renders bounce plugins separately
+      const rate = ctx.sampleRate
+      const at = Math.round(Math.max(time, ctx.currentTime) * rate)
+      const key = Math.max(0, Math.min(127, Math.round(pitch)))
       const vel = Math.max(1, Math.min(127, Math.round((velocity ?? 1) * 127)))
-      const send = (offsetMs, fn) => {
-        const d = delayMs + offsetMs
-        if (d <= 4) fn(); else setTimeout(fn, d)
-      }
-      send(0, () => sendToHost('vstNoteOn', { id: channelId, pitch, velocity: vel }))
-      if (gate !== null) send(gate * 1000, () => sendToHost('vstNoteOff', { id: channelId, pitch }))
+      // A step without a length (step sequencer) lasts one step, like a rack step.
+      const len = gate ?? (60 / bpm.value / 4)
+      _queueVstEvent(channelId, at, 0x90, key, vel)
+      _queueVstEvent(channelId, at + Math.max(1, Math.round(len * rate)), 0x80, key, 0)
     }
+  }
+
+  // Sequenced plugin notes go to the host stamped with the frame they're due
+  // on the context's clock, batched per scheduler pass; the engine plays each
+  // on its exact sample, in step with the Web Audio instruments.
+  let _vstBatch = null
+  function _queueVstEvent(id, frame, status, d1, d2) {
+    if (!_vstBatch) { _vstBatch = []; queueMicrotask(_flushVstEvents) }
+    _vstBatch.push([id, frame, status, d1, d2])
+  }
+  function _flushVstEvents() {
+    const ev = _vstBatch
+    _vstBatch = null
+    if (!ev?.length || !audioCtx) return
+    const rate = audioCtx.sampleRate
+    sendToHost('vstEvents', {
+      now: Math.round(audioCtx.currentTime * rate), rate,
+      lat: (audioCtx.baseLatency || 0) + (audioCtx.outputLatency || 0), ev,
+    })
+  }
+
+  // A plugin channel's level in the native engine: channel volume, mute/solo,
+  // its mixer insert and the master, as the Web Audio channels get them.
+  function _vstMixOf(ch) {
+    const soloOn = channels.some(c => c._soloed)
+    const master = mixerTracks[0]
+    const mt = mixerTracks[ch.mixerTrack || 0]
+    let g = (ch.muted || (soloOn && !ch._soloed)) ? 0 : (ch.volume ?? 0.78)
+    if (mt && mt !== master) g *= mt.muted ? 0 : (mt.volume ?? 1)
+    g *= master?.volume ?? 1
+    g *= volToGain(masterVolume.value)
+    return { gain: +g.toFixed(4), pan: +(ch.pan ?? 0).toFixed(3) }
+  }
+  if (isDesktop) {
+    watch(() => channels.filter(c => c.type === 'vst').map(c => [c.id, _vstMixOf(c)]), (list, prev) => {
+      const old = new Map(prev ?? [])
+      for (const [id, m] of list) {
+        const o = old.get(id)
+        if (!o || o.gain !== m.gain || o.pan !== m.pan) sendToHost('vstMix', { id, ...m })
+      }
+    })
+  }
+
+  // The native engine's load / dropout / latency figures (desktop), ~3×/s.
+  const engineStats = reactive({ live: false, load: 0, loadPeak: 0, late: 0, busUnderruns: 0, busLatency: 0, outputLatency: 0, rate: 0, period: 0, device: '' })
+  if (isDesktop) {
+    onHostMessage(msg => {
+      if (msg.type !== 'audioStats') return
+      const p = msg.payload
+      Object.assign(engineStats, { live: !!p.bus, load: p.load, loadPeak: p.loadPeak, late: p.late, busUnderruns: p.busUnderruns,
+        busLatency: p.busLatency, busMaxGap: Math.max(engineStats.busMaxGap ?? 0, p.busMaxGap ?? 0), outputLatency: p.outputLatency, rate: p.rate, period: p.period, device: p.device })
+    })
   }
 
   function addVstChannel(name = 'VST', path = '', id = undefined) {
@@ -6448,6 +6512,7 @@ export function useStudio() {
           ch.name = (msg.payload.name || ch.name || 'VST').toUpperCase().slice(0, 14)
           ch.vstPath = msg.payload.path || ch.vstPath
           ch._vstLoading = false
+          sendToHost('vstMix', { id: ch.id, ..._vstMixOf(ch) })
         } else {
           addVstChannel(msg.payload?.name, msg.payload?.path, id)   // console-driven load
         }
@@ -8092,7 +8157,7 @@ export function useStudio() {
     captureSessionScene, launchSessionSlot, launchSessionScene, stopSessionTrack, stopAllSessionClips,
     sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist, sessionFollow, cycleSceneLoops,
     // Project save / load / autosave / MIDI export
-    savePatternProject, patternProjectBytes, flpSourceName,
+    savePatternProject, patternProjectBytes, flpSourceName, engineStats,
     saveProject, loadProjectFile, newProject, importPatternProject, importProjectFiles, importState, locateMissingSamples, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
     projectPath, openProjectNative,
     // Render / export: faithful offline render (+ real-time capture for plugins,

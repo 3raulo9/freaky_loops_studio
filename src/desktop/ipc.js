@@ -31,8 +31,12 @@ export function onHostMessage(handler) {
   return () => handlers.delete(handler)
 }
 
-/** Startup handshake: ping the host and log the reply. */
-export function pingHost() {
+/**
+ * Startup handshake: ping the host and log the reply. `fresh` (page load)
+ * tells the host this is a new UI, so plugins a previous page left loaded
+ * are released.
+ */
+export function pingHost({ fresh = false } = {}) {
   if (!host) {
     console.info('[ipc] running in browser — no native host')
     return
@@ -42,7 +46,7 @@ export function pingHost() {
       console.info('[ipc] host round-trip OK:', msg.payload)
     }
   })
-  sendToHost('ping', { from: 'vue', time: Date.now() })
+  sendToHost('ping', { from: 'vue', time: Date.now(), fresh })
 }
 
 /** Ask the native engine to start/stop a diagnostic sine tone. */
