@@ -41,6 +41,9 @@ pub struct Plugin {
     pub paths: Vec<String>,
     /// Program number for sound-font players (heuristic, see parser).
     pub program: Option<u32>,
+    /// A plugin-framework state blob found inside a native plugin's state —
+    /// what the same plugin's VST build saves and restores as-is.
+    pub portable_state: Vec<u8>,
     pub state_len: usize,
 }
 

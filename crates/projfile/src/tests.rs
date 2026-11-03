@@ -291,6 +291,31 @@ fn reads_vst3_states() {
 }
 
 #[test]
+fn lifts_framework_state_out_of_native_plugins() {
+    let xml = b"<?xml version=\"1.0\"?><State gain=\"0.5\"/>";
+    let mut blob = b"VC2!".to_vec();
+    blob.extend_from_slice(&(xml.len() as u32).to_le_bytes());
+    blob.extend_from_slice(xml);
+    blob.push(0);
+    // A native build's own header around it.
+    let mut native = b"1GFF".to_vec();
+    native.extend_from_slice(&(blob.len() as u32).to_le_bytes());
+    native.extend_from_slice(&blob);
+    assert_eq!(portable_state(&native), &blob[..]);
+    // Truncated, or not XML: nothing.
+    assert!(portable_state(&native[..native.len() - 1]).is_empty());
+    let mut not_xml = native.clone();
+    not_xml[16] = b'x';
+    assert!(portable_state(&not_xml).is_empty());
+    assert!(portable_state(b"plain old state").is_empty());
+
+    let mut pl = Plugin::default();
+    read_plugin_state(&mut pl, &native);
+    assert!(pl.vst.is_none());
+    assert_eq!(pl.portable_state, blob);
+}
+
+#[test]
 fn rejects_and_survives_garbage() {
     assert!(parse(b"RIFF....").is_err());
     let mut w = W::new("25.0.0");

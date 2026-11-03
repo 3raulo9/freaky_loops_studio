@@ -96,6 +96,20 @@ const clamp = (v, a, b) => Math.max(a, Math.min(b, v))
  * }
  * @returns { project, jobs: { samples: [{ kind, id, key, ... }] }, report }
  */
+/**
+ * A framework state blob (base64) in the tagged form the desktop host loads:
+ * VST3 → '3' + u32 component length + component (no controller state),
+ * VST2 → 'C' + chunk.
+ */
+function portableVstState(b64, format) {
+  const blob = atob(b64)
+  if (format === 'vst3') {
+    const n = blob.length
+    return btoa('3' + String.fromCharCode(n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255) + blob)
+  }
+  return btoa('C' + blob)
+}
+
 export function mapPatternProject(P, env) {
   const { lib } = env
   const report = {
@@ -244,15 +258,18 @@ export function mapPatternProject(P, env) {
       continue
     }
 
-    // A built-in generator of the original app: use a VST build of the same
-    // plugin when one is installed (its patch format differs, so it starts
-    // from the plugin's defaults).
+    // A native-format generator: use a VST build of the same plugin when one
+    // is installed. Plugins made with the common plugin framework keep their
+    // settings in a blob both builds read, so those come back as saved;
+    // anything else starts from the plugin's defaults.
     const native = env.desktop && pl.internal ? env.resolveNative?.(pl.internal) : null
     if (native) {
+      const state = pl.portableState ? portableVstState(pl.portableState, native.format) : undefined
       channels.push({
-        ...base, type: 'vst', vstPath: native.path, instrumentType: 'vst', params: { pitch: 60 }, knobs: [], fnKey: 'melodic', sustains: true,
+        ...base, type: 'vst', vstPath: native.path, vstState: state,
+        instrumentType: 'vst', params: { pitch: 60 }, knobs: [], fnKey: 'melodic', sustains: true,
       })
-      report.plugins.push({ name: pl.internal, status: 'loaded (VST build, default sound)', path: native.path })
+      report.plugins.push({ name: pl.internal, status: state ? 'loaded (VST build, with its settings)' : 'loaded (VST build, default sound)', path: native.path })
       continue
     }
 

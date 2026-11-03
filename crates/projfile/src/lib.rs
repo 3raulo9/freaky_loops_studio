@@ -544,12 +544,28 @@ fn read_plugin_state(pl: &mut Plugin, d: &[u8]) {
         return;
     }
     pl.paths = embedded_paths(d);
+    pl.portable_state = portable_state(d).to_vec();
     // Sound-font players: the program number sits just before a fixed 7-byte tail.
     if pl.paths.iter().any(|p| p.to_ascii_lowercase().ends_with(".sf2")) && d.len() > 11 {
         if let Some(prog) = u32_at(d, d.len() - 11).filter(|&v| v < 128) {
             pl.program = Some(prog);
         }
     }
+}
+
+/// Plugins built on the common C++ plugin framework save their settings as
+/// "VC2!", a u32 length, then that many bytes of XML and a NUL. A native build
+/// wraps the blob in its own header; the VST builds of the same plugin take
+/// the bare blob as their state.
+fn portable_state(d: &[u8]) -> &[u8] {
+    const MAGIC: &[u8; 4] = b"VC2!";
+    let Some(at) = d.windows(4).take(64).position(|w| w == MAGIC) else { return &[] };
+    let Some(len) = u32_at(d, at + 4).map(|n| n as usize) else { return &[] };
+    let end = at + 8 + len + 1;
+    if end > d.len() || d.get(at + 8) != Some(&b'<') {
+        return &[];
+    }
+    &d[at..end]
 }
 
 const VST_IDS: [u32; 13] = [1, 2, 30, 31, 32, 50, 51, 52, 53, 54, 55, 56, 57];
@@ -700,6 +716,11 @@ fn plugin_json(j: &mut Json, k: &str, pl: &Plugin) {
     match pl.program {
         Some(v) => j.num("program", v as f64),
         None => j.null("program"),
+    }
+    if pl.portable_state.is_empty() {
+        j.null("portableState");
+    } else {
+        j.str("portableState", &base64(&pl.portable_state));
     }
     match &pl.vst {
         None => j.null("vst"),

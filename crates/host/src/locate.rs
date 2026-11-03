@@ -91,6 +91,19 @@ fn skip_dir(name: &str) -> bool {
         )
 }
 
+/// Per-user plugin install folders (variable, sub-folder).
+const USER_PLUGIN_DIRS: [(&str, &str); 3] = [
+    ("LOCALAPPDATA", "Programs\\Common\\VST3"),
+    ("LOCALAPPDATA", "Programs\\Common\\VST2"),
+    ("LOCALAPPDATA", "Programs\\Common\\CLAP"),
+];
+
+/// Folders plugins are installed to, as opposed to copies in build or download folders.
+fn in_install_folder(p: &Path) -> bool {
+    let s = p.to_string_lossy().to_lowercase();
+    ["\\common files\\vst", "\\vstplugins\\", "\\programs\\common\\vst", "\\steinberg\\vst"].iter().any(|k| s.contains(k))
+}
+
 /// Places worth indexing: the user's folders, program folders, other drives.
 fn roots() -> Vec<PathBuf> {
     let mut r: Vec<PathBuf> = Vec::new();
@@ -102,6 +115,12 @@ fn roots() -> Vec<PathBuf> {
     for v in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
         if let Some(p) = std::env::var_os(v).map(PathBuf::from) {
             r.push(p);
+        }
+    }
+    // Per-user plugin folders live under AppData, which the walk otherwise skips.
+    for (var, sub) in USER_PLUGIN_DIRS {
+        if let Some(p) = std::env::var_os(var).map(PathBuf::from) {
+            r.push(p.join(sub));
         }
     }
     for extra in crate::files::setting("searchFolders").and_then(|v| v.as_array().cloned()).unwrap_or_default() {
@@ -193,8 +212,12 @@ fn walk(roots: Vec<PathBuf>) -> FileIndex {
     idx
 }
 
+/// First line of the cache; bumped when the set of searched folders changes.
+const CACHE_HEADER: &str = "#fls-index 2";
+
 fn save_cache(idx: &FileIndex) {
-    let mut s = String::new();
+    let mut s = String::from(CACHE_HEADER);
+    s.push('\n');
     for paths in idx.by_name.values() {
         for p in paths {
             s.push_str(&p.to_string_lossy());
@@ -208,8 +231,12 @@ fn load_cache() -> Option<(FileIndex, bool)> {
     let path = cache_path();
     let age = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok())?;
     let text = std::fs::read_to_string(&path).ok()?;
+    let mut lines = text.lines();
+    if lines.next() != Some(CACHE_HEADER) {
+        return None;
+    }
     let mut idx = FileIndex::default();
-    for line in text.lines().filter(|l| !l.is_empty()) {
+    for line in lines.filter(|l| !l.is_empty()) {
         idx.insert(PathBuf::from(line));
     }
     Some((idx, age > STALE_AFTER))
@@ -443,8 +470,8 @@ fn find_plugin(idx: &FileIndex, q: &Value) -> Option<(PathBuf, &'static str)> {
         if let Some(c) = idx.by_name.get(&file_name_lower(path)) {
             let comps = components(path);
             let mut v: Vec<&PathBuf> = c.iter().filter(|p| is_plugin(p)).collect();
-            // Prefer 64-bit builds, then the closest folder structure.
-            v.sort_by_key(|p| (!x64(p), std::cmp::Reverse(suffix_score(&comps, p))));
+            // Prefer 64-bit builds, then the closest folder structure, then installed copies.
+            v.sort_by_key(|p| (!x64(p), std::cmp::Reverse(suffix_score(&comps, p)), !in_install_folder(p)));
             if let Some(p) = v.first() {
                 return Some(((*p).clone(), "same file elsewhere"));
             }
@@ -452,7 +479,17 @@ fn find_plugin(idx: &FileIndex, q: &Value) -> Option<(PathBuf, &'static str)> {
     }
     // By plugin name: "<name>.dll" / "<name>.vst3", matched ignoring punctuation.
     // Same format first; a 32-bit VST3 can't load, so it never qualifies.
-    if !name.is_empty() {
+    // A built-in generator's name often carries an edition word the VST build
+    // lacks ("Name FL" → "Name"), so those also try the name without it.
+    let mut names = vec![name.to_string()];
+    if path.is_empty() {
+        if let Some((head, _)) = name.trim().rsplit_once(' ') {
+            if normalize_name(head).len() >= 5 {
+                names.push(head.to_string());
+            }
+        }
+    }
+    for name in names.iter().filter(|n| !n.is_empty()) {
         let want = normalize_name(name);
         let stem = |n: &str| n.trim_end_matches(".dll").trim_end_matches(".vst3").to_string();
         let mut v: Vec<&PathBuf> = idx
@@ -462,7 +499,7 @@ fn find_plugin(idx: &FileIndex, q: &Value) -> Option<(PathBuf, &'static str)> {
             .flat_map(|(_, ps)| ps.iter())
             .filter(|p| is_plugin(p) && !(is_vst3_name(p) && !x64(p)))
             .collect();
-        v.sort_by_key(|p| (is_vst3_name(p) != want_vst3, !x64(p)));
+        v.sort_by_key(|p| (is_vst3_name(p) != want_vst3, !x64(p), !in_install_folder(p)));
         if let Some(p) = v.first() {
             let how = if is_vst3_name(p) == want_vst3 { "matched by name" } else { "other format (default sound)" };
             return Some(((*p).clone(), how));
