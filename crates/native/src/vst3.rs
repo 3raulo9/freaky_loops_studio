@@ -612,8 +612,8 @@ struct Proc {
     params: ComWrapper<ParamChanges>,
     out_params: ComWrapper<ParamChanges>,
     ctx: ProcessContext,
-    spill: Vec<f32>,
-    spill_pos: usize,
+    /// Live notes taken from the queue for the next call (kept allocated).
+    pending: Vec<(i32, NoteEv)>,
 }
 
 impl Proc {
@@ -629,8 +629,7 @@ impl Proc {
             params: ParamChanges::new(),
             out_params: ParamChanges::new(),
             ctx: unsafe { std::mem::zeroed() },
-            spill: vec![0f32; BLOCK_SIZE * 2],
-            spill_pos: BLOCK_SIZE,
+            pending: Vec::with_capacity(MAX_EVENTS),
         }
     }
 }
@@ -1009,32 +1008,30 @@ impl Vst3Plugin {
 }
 
 impl AudioSource for Vst3Plugin {
+    /// Runs on the callback's own frame count (chunks of at most one block),
+    /// so a note played now sounds in this callback. No allocation, no blocking.
     fn render_add(&self, out: &mut [f32], frames: usize) {
         let Ok(mut st) = self.proc.try_lock() else { return };
         set_thread_process_level(ProcessLevel::Realtime);
+        let mut pending = std::mem::take(&mut st.pending);
+        if let Ok(mut q) = self.notes.try_lock() {
+            pending.extend(q.drain(..).map(|n| (0, n)));
+        }
         let mut peak = 0f32;
-        let mut written = 0;
-        while written < frames {
-            if st.spill_pos >= st.spill.len() / 2 {
-                let events: Vec<(i32, NoteEv)> = self.notes.lock().map(|mut q| q.drain(..).map(|n| (0, n)).collect()).unwrap_or_default();
-                self.process_block(&mut st, BLOCK_SIZE, &events, None);
-                for i in 0..BLOCK_SIZE {
-                    let (l, r) = Self::stereo_at(&st, i);
-                    st.spill[i * 2] = l;
-                    st.spill[i * 2 + 1] = r;
-                }
-                st.spill_pos = 0;
-            }
-            let n = (frames - written).min(st.spill.len() / 2 - st.spill_pos);
+        let mut done = 0;
+        while done < frames {
+            let n = (frames - done).min(BLOCK_SIZE);
+            self.process_block(&mut st, n, &pending, None);
+            pending.clear();
             for i in 0..n {
-                let (l, r) = (st.spill[(st.spill_pos + i) * 2], st.spill[(st.spill_pos + i) * 2 + 1]);
-                out[(written + i) * 2] += l;
-                out[(written + i) * 2 + 1] += r;
+                let (l, r) = Self::stereo_at(&st, i);
+                out[(done + i) * 2] += l;
+                out[(done + i) * 2 + 1] += r;
                 peak = peak.max(l.abs()).max(r.abs());
             }
-            st.spill_pos += n;
-            written += n;
+            done += n;
         }
+        st.pending = pending;
         if peak > f32::from_bits(self.peak.load(Ordering::Relaxed)) {
             self.peak.store(peak.to_bits(), Ordering::Relaxed);
         }
@@ -1118,7 +1115,6 @@ impl Hosted for Vst3Plugin {
         self.stop();
         self.start(live_rate, ProcessModes_::kRealtime);
         st.sample_rate = live_rate;
-        st.spill_pos = st.spill.len() / 2;
         set_thread_process_level(ProcessLevel::User);
         log::write(&format!("offline render {} (VST3): {} notes -> {} frames @ {} Hz", self.info.name, notes.len(), total_frames, sample_rate));
         pcm

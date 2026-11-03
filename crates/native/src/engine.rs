@@ -127,17 +127,44 @@ fn open_stream(shared: Arc<Shared>, wanted: Option<&str>) -> Result<(cpal::Strea
     let name = device_name(&device);
     let supported = device.default_output_config().map_err(|e| e.to_string())?;
     let rate = supported.sample_rate();
-    let mut config = supported.config();
+    let config = supported.config();
     let channels = config.channels.max(1) as usize;
-    config.buffer_size = cpal::BufferSize::Default;
+    // Ask for a short ring buffer (the driver rounds up to what it can do):
+    // the default one can add tens of milliseconds between a key press and
+    // the sound. Fall back to the default if the device refuses.
+    let low = cpal::StreamConfig { buffer_size: cpal::BufferSize::Fixed(LOW_LATENCY_FRAMES), ..config.clone() };
+    match build(&device, low, shared.clone(), rate, channels) {
+        Ok(stream) => {
+            stream.play().map_err(|e| e.to_string())?;
+            Ok((stream, rate, name))
+        }
+        Err(e) => {
+            log::write(&format!("low-latency buffer refused ({e}); using the device default"));
+            let stream = build(&device, cpal::StreamConfig { buffer_size: cpal::BufferSize::Default, ..config }, shared, rate, channels)?;
+            stream.play().map_err(|e| e.to_string())?;
+            Ok((stream, rate, name))
+        }
+    }
+}
 
-    let mut mix: Vec<f32> = Vec::new();
+/// Requested ring-buffer size in frames (~5 ms at 48 kHz).
+const LOW_LATENCY_FRAMES: u32 = 256;
+
+fn build(device: &cpal::Device, config: cpal::StreamConfig, shared: Arc<Shared>, rate: u32, channels: usize) -> Result<cpal::Stream, String> {
+
+    // Sized for any callback length up front: no allocation on the audio thread.
+    let mut mix: Vec<f32> = vec![0.0; 16384];
     let mut phase = 0f64;
-    let stream = device
+    let mut logged = 0u8;
+    device
         .build_output_stream::<f32, _, _>(
             config,
             move |data: &mut [f32], _| {
                 let frames = data.len() / channels;
+                if logged < 4 {
+                    logged += 1;
+                    log::write(&format!("audio callback: {frames} frames ({:.1} ms)", frames as f64 * 1000.0 / rate as f64));
+                }
                 if mix.len() < frames * 2 {
                     mix.resize(frames * 2, 0.0);
                 }
@@ -179,7 +206,5 @@ fn open_stream(shared: Arc<Shared>, wanted: Option<&str>) -> Result<(cpal::Strea
             |e| log::write(&format!("audio stream error: {e}")),
             None,
         )
-        .map_err(|e| e.to_string())?;
-    stream.play().map_err(|e| e.to_string())?;
-    Ok((stream, rate, name))
+        .map_err(|e| e.to_string())
 }

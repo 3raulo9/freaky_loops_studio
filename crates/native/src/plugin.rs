@@ -82,10 +82,8 @@ struct ProcState {
     out_ptrs: Vec<*mut f32>,
     events: Box<VstEvents>,
     event_store: Box<[VstMidiEvent; MAX_BLOCK_EVENTS]>,
-    /// Interleaved stereo output of the last block, consumed across callbacks
-    /// whose length doesn't line up with the block size.
-    spill: Vec<f32>,
-    spill_pos: usize,
+    /// Live MIDI taken from the queue for the next block (kept allocated).
+    pending: Vec<[u8; 3]>,
 }
 
 pub struct Plugin {
@@ -228,35 +226,31 @@ impl Plugin {
     // ── Live audio ──────────────────────────────────────────────────────────
 
     /// Mix `frames` frames of the plugin's output into an interleaved stereo
-    /// buffer. Called from the audio thread; never blocks.
+    /// buffer. Called from the audio thread; never blocks or allocates.
+    /// The plugin runs on the callback's own frame count (in chunks of at most
+    /// one block), so a note played now sounds in this very callback.
     pub fn render_add(&self, out: &mut [f32], frames: usize) {
         let Ok(mut st) = self.proc.try_lock() else { return };
         set_thread_process_level(ProcessLevel::Realtime);
+        let mut pending = std::mem::take(&mut st.pending);
+        if let Ok(mut q) = self.midi.try_lock() {
+            pending.extend(q.drain(..));
+        }
         let mut peak = 0f32;
-        let mut written = 0;
-        while written < frames {
-            if st.spill_pos >= st.spill.len() / 2 {
-                let events: Vec<[u8; 3]> = self.midi.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default();
-                self.process_block(&mut st, BLOCK_SIZE, events.iter().map(|d| (0, *d)));
-                let st = &mut *st;
-                for i in 0..BLOCK_SIZE {
-                    let l = st.outs[0][i];
-                    let r = if st.outs.len() > 1 { st.outs[1][i] } else { l };
-                    st.spill[i * 2] = l;
-                    st.spill[i * 2 + 1] = r;
-                }
-                st.spill_pos = 0;
-            }
-            let n = (frames - written).min(st.spill.len() / 2 - st.spill_pos);
+        let mut done = 0;
+        while done < frames {
+            let n = (frames - done).min(BLOCK_SIZE);
+            self.process_block(&mut st, n, pending.drain(..).map(|d| (0, d)));
+            let (l_buf, r_buf) = (&st.outs[0], st.outs.get(1).unwrap_or(&st.outs[0]));
             for i in 0..n {
-                let (l, r) = (st.spill[(st.spill_pos + i) * 2], st.spill[(st.spill_pos + i) * 2 + 1]);
-                out[(written + i) * 2] += l;
-                out[(written + i) * 2 + 1] += r;
+                let (l, r) = (l_buf[i], r_buf[i]);
+                out[(done + i) * 2] += l;
+                out[(done + i) * 2 + 1] += r;
                 peak = peak.max(l.abs()).max(r.abs());
             }
-            st.spill_pos += n;
-            written += n;
+            done += n;
         }
+        st.pending = pending;
         if peak > f32::from_bits(self.peak.load(Ordering::Relaxed)) {
             self.peak.store(peak.to_bits(), Ordering::Relaxed);
         }
@@ -362,7 +356,6 @@ impl Plugin {
         self.suspend();
         self.resume(live_rate);
         st.sample_rate = live_rate;
-        st.spill_pos = st.spill.len() / 2;
         crate::host_callback::set_thread_sample_rate(None);
         set_thread_process_level(ProcessLevel::User);
         log::write(&format!("offline render {}: {} notes -> {} frames @ {} Hz", self.info.name, notes.len(), total_frames, sample_rate));
@@ -560,8 +553,7 @@ impl ProcState {
             out_ptrs,
             events: Box::new(VstEvents { num_events: 0, reserved: 0, events: [std::ptr::null_mut(); MAX_BLOCK_EVENTS] }),
             event_store: Box::new([VstMidiEvent::new(0, [0, 0, 0]); MAX_BLOCK_EVENTS]),
-            spill: vec![0f32; BLOCK_SIZE * 2],
-            spill_pos: BLOCK_SIZE,
+            pending: Vec::with_capacity(MAX_BLOCK_EVENTS),
         }
     }
 }
