@@ -77,26 +77,7 @@
             </div>
 
             <!-- Dual stereo peak meter -->
-            <div class="mx-meter">
-              <div class="mx-meter-bars">
-                <div class="mx-meter-col" @click.stop="clearClip(i + 1)"
-                  :title="clipped[i + 1] ? 'Clipped — click to reset' : 'Peak meter'">
-                  <div class="mx-meter-clip" :class="{ on: clipped[i + 1] }" />
-                  <div class="mx-meter-fill"
-                    :style="{ height: peakPct(i + 1) + '%', background: peakColor(peakLevels[i + 1]) }"
-                  />
-                  <div class="mx-meter-peak-hold"
-                    :style="{ bottom: peakHoldPct(i + 1) + '%' }"
-                  />
-                </div>
-                <div class="mx-meter-col mx-meter-col-r" @click.stop="clearClip(i + 1)">
-                  <div class="mx-meter-fill"
-                    :style="{ height: peakPct(i + 1) + '%', background: peakColor(peakLevels[i + 1]) }"
-                  />
-                </div>
-              </div>
-              <span class="mx-meter-db">{{ peakDb(i + 1) }}</span>
-            </div>
+            <MxMeter :idx="i + 1" title="Peak meter" />
 
             <!-- 3-band EQ -->
             <div class="mx-eq">
@@ -246,26 +227,7 @@
             </div>
 
             <!-- Master peak meter -->
-            <div class="mx-meter">
-              <div class="mx-meter-bars">
-                <div class="mx-meter-col" @click.stop="clearClip(0)"
-                  :title="clipped[0] ? 'Clipped — click to reset' : 'Master peak meter'">
-                  <div class="mx-meter-clip" :class="{ on: clipped[0] }" />
-                  <div class="mx-meter-fill"
-                    :style="{ height: peakPct(0) + '%', background: peakColor(peakLevels[0]) }"
-                  />
-                  <div class="mx-meter-peak-hold"
-                    :style="{ bottom: peakHoldPct(0) + '%' }"
-                  />
-                </div>
-                <div class="mx-meter-col mx-meter-col-r" @click.stop="clearClip(0)">
-                  <div class="mx-meter-fill"
-                    :style="{ height: peakPct(0) + '%', background: peakColor(peakLevels[0]) }"
-                  />
-                </div>
-              </div>
-              <span class="mx-meter-db">{{ peakDb(0) }}</span>
-            </div>
+            <MxMeter :idx="0" title="Master peak meter" />
 
             <div class="mx-eq-spacer" />
             <div class="mx-controls-row" style="justify-content:center">
@@ -409,7 +371,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, defineComponent, h, getCurrentInstance } from 'vue'
 import { useStudio } from '../store/studio.js'
 import EqGraph from './EqGraph.vue'
 
@@ -600,6 +562,7 @@ const holdTimers = Array(NUM_TRACKS).fill(0)
 const clipTimers = Array(NUM_TRACKS).fill(0)
 
 const DECAY_DB_S = 20
+const SILENT     = 0.003     // ≈ -50 dB, under the meter's -48 dB floor
 const HOLD_MS    = 1500
 const CLIP_MS    = 1500
 
@@ -627,15 +590,48 @@ function updateMeters() {
     let peak = 0
     for (let s = 0; s < buf.length; s++) { const a = Math.abs(buf[s]); if (a > peak) peak = a }
 
-    peakLevels.value[i] = Math.max(peak, peakLevels.value[i] * decay)
-    if (peak >= peakHolds.value[i]) { peakHolds.value[i] = peak; holdTimers[i] = now }
-    else if (now - holdTimers[i] > HOLD_MS) peakHolds.value[i] = Math.max(0, peakHolds.value[i] * decay)
+    const lvl = Math.max(peak, peakLevels.value[i] * decay)
+    const nextLevel = lvl < SILENT ? 0 : lvl
+    if (nextLevel !== peakLevels.value[i]) peakLevels.value[i] = nextLevel
+    if (peak >= peakHolds.value[i] && peak >= SILENT) { peakHolds.value[i] = peak; holdTimers[i] = now }
+    else if (peakHolds.value[i] > 0 && now - holdTimers[i] > HOLD_MS) {
+      const hold = peakHolds.value[i] * decay
+      peakHolds.value[i] = hold < SILENT ? 0 : hold
+    }
     if (peak > 1.0) { clipped.value[i] = true; clipTimers[i] = now }
     else if (clipped.value[i] && now - clipTimers[i] > CLIP_MS) clipped.value[i] = false
   }
   meterRaf = requestAnimationFrame(updateMeters)
 }
 function clearClip(idx) { clipped.value[idx] = false }
+
+// One strip's meter as its own small component: the levels change every
+// frame while audio plays, and only the meters should re-render for that —
+// not every strip, knob and send of the mixer. It renders with the mixer's
+// scope id so the mixer's styles still apply.
+const MxMeter = defineComponent({
+  __scopeId: getCurrentInstance()?.type?.__scopeId,
+  props: { idx: { type: Number, required: true }, title: { type: String, default: 'Peak meter' } },
+  setup(props) {
+    return () => {
+      const i = props.idx
+      const level = peakLevels.value[i] ?? 0
+      const fill = () => h('div', { class: 'mx-meter-fill', style: { height: peakPct(i) + '%', background: peakColor(level) } })
+      const clear = e => { e.stopPropagation(); clearClip(i) }
+      return h('div', { class: 'mx-meter' }, [
+        h('div', { class: 'mx-meter-bars' }, [
+          h('div', { class: 'mx-meter-col', onClick: clear, title: clipped.value[i] ? 'Clipped — click to reset' : props.title }, [
+            h('div', { class: ['mx-meter-clip', { on: clipped.value[i] }] }),
+            fill(),
+            h('div', { class: 'mx-meter-peak-hold', style: { bottom: peakHoldPct(i) + '%' } }),
+          ]),
+          h('div', { class: 'mx-meter-col mx-meter-col-r', onClick: clear }, [fill()]),
+        ]),
+        h('span', { class: 'mx-meter-db' }, peakDb(i)),
+      ])
+    }
+  },
+})
 
 onMounted(() => {
   meterRaf = requestAnimationFrame(updateMeters)

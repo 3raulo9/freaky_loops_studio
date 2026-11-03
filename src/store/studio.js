@@ -5851,7 +5851,8 @@ export function useStudio() {
     if (!audioCtx) initAudio()
     const ci   = channels.indexOf(ch)
     const dest = (ci >= 0 && trackGains[ci]) ? trackGains[ci] : audioCtx.destination
-    const when = audioCtx.currentTime + 0.005
+    // Live notes start in the next render quantum: no extra scheduling margin.
+    const when = audioCtx.currentTime
     const p    = pitch + masterPitchSemis.value
     const key  = ch.id + ':' + pitch
 
@@ -6039,6 +6040,11 @@ export function useStudio() {
         masterGain.gain.linearRampToValueAtTime(prev, now + 0.31)
       } catch (_) {}
     }
+  }
+
+  /** True for keys the typing keyboard plays as notes (by `KeyboardEvent.code`). */
+  function isNoteKey(code) {
+    return KB_SEMITONES[code] !== undefined
   }
 
   function handleKeyDown(e) {
@@ -7933,7 +7939,7 @@ export function useStudio() {
     getUnusedPatternIds, transposePatternNotes, selectSourcePattern, muteAllClipsOnTrack,
     // UI state
     mainView, pianoRollOpen, renderModalOpen, themeModalOpen, midiRouterOpen, currentTheme, kbOctave,
-    gridSnap, keyboardInputMode,
+    gridSnap, keyboardInputMode, isNoteKey,
     // Snap / quantization engine
     ppq, altFreeform, tickDurationSec, ticksPerGridCell, snapTicks, snapBars,
     // Title bar

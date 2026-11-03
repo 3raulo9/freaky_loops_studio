@@ -111,13 +111,16 @@
   0%, 100% { transform: scale(1); }
   50%      { transform: scale(1.45); }
 }
+/* Infinite animations only move transform/opacity: those run on the GPU
+   compositor. Animating box-shadow or background-position instead restyles
+   and repaints on the main thread every frame, forever. */
 @keyframes fls-bar-breathe {
-  0%, 100% { box-shadow: 0 0 5px var(--accent); }
-  50%      { box-shadow: 0 0 16px var(--accent), 0 0 26px color-mix(in srgb, var(--accent) 45%, transparent); }
+  0%, 100% { opacity: 0.65; }
+  50%      { opacity: 1; }
 }
 @keyframes fls-sheen {
-  from { background-position: 200% 0; }
-  to   { background-position: -200% 0; }
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(200%); }
 }
 @keyframes fls-menu-in {
   from { opacity: 0; transform: translateY(-6px) scale(0.97); }
@@ -129,12 +132,13 @@
 }
 
 /* ── 4. Living chrome ─────────────────────────────────────────────────────── */
-/* A slow light sweep travelling along the top-bar's edge — keeps the shell
-   feeling alive without distracting from the work surface. */
+/* A slow light sweep travelling along the top-bar's edge — greets you when
+   the app opens without distracting from the work surface. */
 .topbar::after {
   content: '';
   position: absolute;
-  left: 0; right: 0; bottom: 0;
+  left: 0; bottom: 0;
+  width: 50%;
   height: 1px;
   pointer-events: none;
   background: linear-gradient(90deg,
@@ -142,14 +146,20 @@
     rgba(120, 170, 255, 0.45) 45%,
     rgba(170, 130, 255, 0.5) 55%,
     transparent 100%);
-  background-size: 200% 100%;
-  animation: fls-sheen 6.5s linear infinite;
+  /* Sweeps twice when the app opens, then rests: a decorative line is not
+     worth a permanent per-frame cost on the UI thread. */
+  animation: fls-sheen 6.5s linear 2 forwards;
   opacity: 0.7;
+  will-change: transform;
 }
 .topbar--bottom::after { bottom: auto; top: 0; }
 
 /* The selected channel's accent bar gently breathes. */
-.channel-row.selected::before { animation: fls-bar-breathe 2.6s ease-in-out infinite; }
+.channel-row.selected::before {
+  box-shadow: 0 0 10px var(--accent), 0 0 20px color-mix(in srgb, var(--accent) 35%, transparent);
+  animation: fls-bar-breathe 2.6s ease-in-out infinite;
+  will-change: opacity;
+}
 
 /* ── 5. Step-sequencer life ───────────────────────────────────────────────── */
 /* Each step "pops" the instant it's switched on (and on first paint). */

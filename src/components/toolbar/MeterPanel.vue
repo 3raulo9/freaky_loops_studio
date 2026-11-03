@@ -136,18 +136,50 @@ function waveColor(peak) {
   return peak > 0.8 ? '#e74c3c' : peak > 0.5 ? '#f39c12' : '#2ecc71'
 }
 
+// Theme colours, re-read at most twice a second: getComputedStyle on every
+// frame forces a style recalculation of the whole page.
+const theme = { at: -1e9, bg: '#07070f', subtle: '#1a1a28' }
+function themeColors() {
+  const now = performance.now()
+  if (now - theme.at > 500) {
+    const style = getComputedStyle(document.documentElement)
+    theme.bg = style.getPropertyValue('--bg-deeper').trim() || '#07070f'
+    theme.subtle = style.getPropertyValue('--border-subtle').trim() || '#1a1a28'
+    theme.at = now
+  }
+  return theme
+}
+
+// A silent scope looks the same every frame: draw it once, then skip frames
+// until there is sound again or a setting/theme changes.
+let quietKey = ''
+function unchangedQuiet(an, bg) {
+  if (opts.mode === 'cpu' || (opts.mode === 'spectrum' && opts.peaks)) return false
+  let key = `${opts.mode}|${opts.stereo}|${opts.fill}|${opts.long}|${opts.log}|${bg}|${!!an.L}`
+  if (an.L) {
+    if (!bufL || bufL.length !== an.L.fftSize) { bufL = new Float32Array(an.L.fftSize); bufR = new Float32Array(an.R.fftSize) }
+    an.L.getFloatTimeDomainData(bufL)
+    let peak = 0
+    for (let i = 0; i < bufL.length; i++) { const a = Math.abs(bufL[i]); if (a > peak) peak = a }
+    if (peak > 1e-4) key = ''
+  }
+  if (key && key === quietKey) return true
+  quietKey = key
+  return false
+}
+
 function draw() {
   const c = scopeCanvas.value
   if (!c) { raf = requestAnimationFrame(draw); return }
+  const { bg, subtle } = themeColors()
+  const an = getScopeAnalysers()
+  if (unchangedQuiet(an, bg)) { raf = requestAnimationFrame(draw); return }
   const ctx = c.getContext('2d')
-  const style = getComputedStyle(document.documentElement)
-  ctx.fillStyle = style.getPropertyValue('--bg-deeper').trim() || '#07070f'
+  ctx.fillStyle = bg
   ctx.fillRect(0, 0, SCOPE_W, SCOPE_H)
-  const subtle = style.getPropertyValue('--border-subtle').trim() || '#1a1a28'
 
   if (opts.mode === 'cpu') { drawCpu(ctx, subtle); raf = requestAnimationFrame(draw); return }
 
-  const an = getScopeAnalysers()
   if (!an.L) {                               // no audio engine yet → flat baseline
     ctx.beginPath(); ctx.moveTo(0, SCOPE_H / 2); ctx.lineTo(SCOPE_W, SCOPE_H / 2)
     ctx.strokeStyle = subtle; ctx.lineWidth = 1; ctx.stroke()
@@ -166,26 +198,22 @@ function drawOsc(ctx, an) {
 
   const want = opts.long ? L.fftSize : Math.min(640, L.fftSize)   // Long = wider time window
 
+  // One point per pixel column (the column's sample nearest the window
+  // position) — the canvas is far narrower than the sample window.
   const trace = (buf, yTop, yH, color) => {
     const start = buf.length - want
     let peak = 0
     for (let i = 0; i < want; i++) peak = Math.max(peak, Math.abs(buf[start + i]))
     const col = color || waveColor(peak)
+    const yAt = x => yTop + (1 - (buf[start + Math.min(want - 1, Math.floor((x / SCOPE_W) * want))] + 1) / 2) * yH
     if (opts.fill) {
       ctx.beginPath(); ctx.moveTo(0, yTop + yH)
-      for (let i = 0; i < want; i++) {
-        const x = (i / want) * SCOPE_W
-        ctx.lineTo(x, yTop + (1 - (buf[start + i] + 1) / 2) * yH)
-      }
+      for (let x = 0; x <= SCOPE_W; x++) ctx.lineTo(x, yAt(x))
       ctx.lineTo(SCOPE_W, yTop + yH); ctx.closePath()
       ctx.fillStyle = col + '22'; ctx.fill()
     }
     ctx.beginPath()
-    for (let i = 0; i < want; i++) {
-      const x = (i / want) * SCOPE_W
-      const y = yTop + (1 - (buf[start + i] + 1) / 2) * yH
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y)
-    }
+    for (let x = 0; x <= SCOPE_W; x++) x ? ctx.lineTo(x, yAt(x)) : ctx.moveTo(x, yAt(x))
     ctx.strokeStyle = col; ctx.lineWidth = 1.2; ctx.stroke()
   }
 

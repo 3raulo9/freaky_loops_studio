@@ -207,13 +207,11 @@
         <div class="pl-ruler-row">
           <div class="ruler-corner">PLAYLIST</div>
           <div class="ruler-cells-area" :style="{ width: PLAYLIST_CELLS * cellWidth + 'px' }">
+            <RulerPlayCell />
             <div
               v-for="c in PLAYLIST_CELLS" :key="c"
               class="ruler-cell"
-              :class="{
-                beat4:   (c - 1) % 4 === 0,
-                playing: isPlaying && displayCell === c - 1,
-              }"
+              :class="{ beat4: (c - 1) % 4 === 0 }"
               :style="{ width: cellWidth + 'px', minWidth: cellWidth + 'px' }"
               @mousedown.prevent="onRulerMouseDown($event, c - 1)"
               @contextmenu.prevent="onRulerRightClick($event, c - 1)"
@@ -351,11 +349,7 @@
                     <!-- Audio clip waveform type badge -->
                     <span v-if="isAudioClip(clip)" class="clip-audio-badge">♪</span>
                     <!-- Step 6: progress fill sweeps across titlebar as playhead passes through -->
-                    <div v-if="isPlaying && clipLocalHeadX(clip) >= 0"
-                      class="clip-title-progress"
-                      :style="{
-                        width: (clipLocalHeadX(clip) / ((clip.width || 1) * cellWidth - 4)) * 100 + '%'
-                      }" />
+                    <ClipPlayhead :clip="clip" part="title" />
                   </div>
 
                   <!-- Body: translucent theme color with canvas note preview -->
@@ -365,9 +359,7 @@
                       class="clip-note-canvas"
                     />
                     <!-- Step 6: real-time vertical playhead inside the clip body -->
-                    <div v-if="isPlaying && clipLocalHeadX(clip) >= 0"
-                      class="clip-local-head"
-                      :style="{ left: clipLocalHeadX(clip) + 'px' }" />
+                    <ClipPlayhead :clip="clip" part="head" />
                     <!-- Step 10: snapped slice preview line before committing the cut -->
                     <div v-if="slicePreview?.clipId === clip.id"
                       class="clip-slice-preview"
@@ -775,7 +767,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, defineComponent, h } from 'vue'
 import { useStudio, TICKS_PER_STEP } from '../store/studio.js'
 
 const {
@@ -783,6 +775,7 @@ const {
   patternData, channels,
   playlistTracks, playlistClips, automationClips, timeMarkers, usePlaylist,
   playlistTool, cellWidth, trackHeight, clipFocusMode, displayCell, displayStep, playbackStartCell, isPlaying,
+  keyboardInputMode, isNoteKey,
   bpm, totalSteps, getPlayheadTimeSeconds, gridSnap, ppq, snapBars,
   loopRegion, setLoopRegion, clearLoopRegion,
   pianoRollOpen, mainView,
@@ -901,6 +894,29 @@ function clipLocalHeadX(clip) {
   return progress * ((clip.width || 1) * cellWidth.value - 4)
 }
 
+// Step-driven indicators are tiny components of their own: a step change then
+// re-renders only them, not the whole playlist (ruler cells + every clip).
+const ClipPlayhead = defineComponent({
+  props: { clip: { type: Object, required: true }, part: { type: String, default: 'head' } },
+  setup(props) {
+    return () => {
+      if (!isPlaying.value) return null
+      const x = clipLocalHeadX(props.clip)
+      if (x < 0) return null
+      return props.part === 'title'
+        ? h('div', { class: 'clip-title-progress', style: { width: (x / ((props.clip.width || 1) * cellWidth.value - 4)) * 100 + '%' } })
+        : h('div', { class: 'clip-local-head', style: { left: x + 'px' } })
+    }
+  },
+})
+const RulerPlayCell = defineComponent({
+  setup() {
+    return () => isPlaying.value && displayCell.value >= 0
+      ? h('div', { class: 'ruler-play-cell', style: { left: displayCell.value * cellWidth.value + 'px', width: cellWidth.value + 'px' } })
+      : null
+  },
+})
+
 // Returns the width of a pattern in playlist cells (= number of bars).
 function patternWidthCells(patId) {
   const ticks = getPatternLengthTicks(patId)
@@ -981,13 +997,31 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r},${g},${b},${alpha})`
 }
 
+// Clip and picker previews are drawn once and then sit still: CPU-backed
+// canvases paint into their parent layer, where GPU canvases would each be a
+// composited layer (plus a layer for everything overlapping them), all
+// re-layerized on every repaint while the song plays.
+const STATIC_CANVAS = { willReadFrequently: true }
+
 const clipCanvases   = new Map()
 const pickerCanvases = new Map()
 
 // ── Picker mini-canvas (Section 1.2 — compressed MIDI thumbnail) ─────────────
+// Vue re-binds inline function refs on every render of this component (null,
+// then the element). Only a new element is drawn, and a canvas is forgotten
+// once it has really left the page — re-renders never redraw on their own.
+function trackCanvas(map, key, el, draw) {
+  if (el) {
+    if (map.get(key) === el) return
+    map.set(key, el)
+    requestAnimationFrame(() => draw(key, el))
+  } else {
+    queueMicrotask(() => { const cur = map.get(key); if (cur && !cur.isConnected) map.delete(key) })
+  }
+}
+
 function onPickerCanvasRef(patId, el) {
-  if (el) { pickerCanvases.set(patId, el); requestAnimationFrame(() => drawPickerCanvas(patId, el)) }
-  else      pickerCanvases.delete(patId)
+  trackCanvas(pickerCanvases, patId, el, drawPickerCanvas)
 }
 
 function drawPickerCanvas(patId, canvas) {
@@ -997,7 +1031,7 @@ function drawPickerCanvas(patId, canvas) {
   const dpr = window.devicePixelRatio || 1
   canvas.width  = Math.round(W * dpr)
   canvas.height = Math.round(H * dpr)
-  const ctx = canvas.getContext('2d')
+  const ctx = canvas.getContext('2d', STATIC_CANVAS)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, W, H)
 
@@ -1036,13 +1070,36 @@ function redrawAllPickerCanvases() {
 }
 
 function onClipCanvasRef(clipId, el) {
-  if (el) {
-    clipCanvases.set(clipId, el)
-    requestAnimationFrame(() => drawClipCanvas(clipId, el))
-  } else {
-    clipCanvases.delete(clipId)
-  }
+  trackCanvas(clipCanvases, clipId, el, drawClipCanvas)
 }
+
+// Waveform overview: min/max per bucket of samples, computed once per buffer,
+// so drawing a long clip costs its width in pixels, not its length in samples.
+const PEAK_BUCKET = 256
+const peakCache = new WeakMap()
+function bufferPeaks(buf) {
+  let p = peakCache.get(buf)
+  if (!p) {
+    const d = buf.getChannelData(0)
+    const n = Math.ceil(d.length / PEAK_BUCKET)
+    const mn = new Float32Array(n), mx = new Float32Array(n)
+    for (let i = 0; i < n; i++) {
+      let a = 1, b = -1
+      const end = Math.min(d.length, (i + 1) * PEAK_BUCKET)
+      for (let s = i * PEAK_BUCKET; s < end; s++) { const v = d[s]; if (v < a) a = v; if (v > b) b = v }
+      mn[i] = a; mx[i] = b
+    }
+    p = { mn, mx, n }
+    peakCache.set(buf, p)
+  }
+  return p
+}
+let bufSeq = 0
+const bufIds = new WeakMap()
+const bufKey = buf => { if (!buf) return 0; if (!bufIds.has(buf)) bufIds.set(buf, ++bufSeq); return bufIds.get(buf) }
+// Bumped on any pattern edit: pattern clips redraw only when it (or their own
+// size/colour/offset) changed.
+let patternDataVersion = 0
 
 function drawAudioClipCanvas(clip, canvas) {
   const clipW  = (clip.width || 1) * cellWidth.value - 4
@@ -1050,9 +1107,12 @@ function drawAudioClipCanvas(clip, canvas) {
   const tH     = getTrackH(playlistTracks.find(t => t.id === clip.trackId))
   const clipH  = Math.max(4, tH - TITLE_H - 6)
   const dpr    = window.devicePixelRatio || 1
+  const sig = `a|${clipW}|${clipH}|${dpr}|${clipColor(clip)}|${bufKey(getAudioClipBuf(clip.id))}|${!!clip.audioFileMissing}`
+  if (canvas._sig === sig) return
+  canvas._sig = sig
   canvas.width  = Math.round(clipW * dpr)
   canvas.height = Math.round(clipH * dpr)
-  const ctx = canvas.getContext('2d')
+  const ctx = canvas.getContext('2d', STATIC_CANVAS)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, clipW, clipH)
 
@@ -1074,17 +1134,20 @@ function drawAudioClipCanvas(clip, canvas) {
   const data  = buf.getChannelData(0)
   const N     = data.length
   const mid   = clipH / 2
+  // Zoomed out: read the cached peaks. Zoomed in far enough: raw samples.
+  const peaks = N / clipW >= PEAK_BUCKET ? bufferPeaks(buf) : null
+  const src   = peaks ? { lo: peaks.mn, hi: peaks.mx, n: peaks.n } : { lo: data, hi: data, n: N }
   ctx.strokeStyle = color
   ctx.lineWidth = 1
   ctx.globalAlpha = 0.75
   ctx.beginPath()
   for (let x = 0; x < clipW; x++) {
-    const s0 = Math.floor((x / clipW) * N)
-    const s1 = Math.max(s0 + 1, Math.floor(((x + 1) / clipW) * N))
+    const s0 = Math.floor((x / clipW) * src.n)
+    const s1 = Math.max(s0 + 1, Math.floor(((x + 1) / clipW) * src.n))
     let mn = 1, mx = -1
-    for (let s = s0; s < s1 && s < N; s++) {
-      if (data[s] < mn) mn = data[s]
-      if (data[s] > mx) mx = data[s]
+    for (let s = s0; s < s1 && s < src.n; s++) {
+      if (src.lo[s] < mn) mn = src.lo[s]
+      if (src.hi[s] > mx) mx = src.hi[s]
     }
     ctx.moveTo(x + 0.5, mid + mn * mid * 0.88)
     ctx.lineTo(x + 0.5, mid + mx * mid * 0.88)
@@ -1104,15 +1167,18 @@ function drawClipCanvas(clipId, canvas) {
   const clipH   = Math.max(4, tH - TITLE_H - 6)
 
   const dpr = window.devicePixelRatio || 1
+  const color    = clipColor(clip)
+  const isActive = clip.patternId === currentPatternId.value || clip.patternId === pickerPatternId.value
+  const sig = `p|${clipW}|${clipH}|${dpr}|${color}|${isActive}|${totalSteps.value}|${clip.slipOffset ?? 0}|${clip.patternId}|${patternDataVersion}|${channels.length}`
+  if (canvas._sig === sig) return
+  canvas._sig = sig
   canvas.width  = Math.round(clipW * dpr)
   canvas.height = Math.round(clipH * dpr)
 
-  const ctx = canvas.getContext('2d')
+  const ctx = canvas.getContext('2d', STATIC_CANVAS)
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, clipW, clipH)
 
-  const color    = clipColor(clip)
-  const isActive = clip.patternId === currentPatternId.value || clip.patternId === pickerPatternId.value
   const noteAlpha = isActive ? 0.85 : 0.28
   const clipBars  = clip.width || 1   // 1 playlist cell = 1 bar
   const pxPerBar  = cellWidth.value   // pixels per bar at current zoom
@@ -1234,7 +1300,7 @@ watch(audioClipVersions, (versions) => {
     })
   })
 })
-watch(patternData,    redrawAllClipCanvases,   { deep: true })
+watch(patternData,    () => { patternDataVersion++; redrawAllClipCanvases() }, { deep: true })
 watch(patternData,    redrawAllPickerCanvases,  { deep: true })
 // Redraw clip canvases when slipOffset, width, or any clip property changes (Step 12)
 watch(playlistClips,  redrawAllClipCanvases,   { deep: true })
@@ -2091,6 +2157,9 @@ function commitTrackRename() {
 // ── Playhead canvas engine (Audio-time source of truth → 60fps canvas) ───────
 const playheadCanvas = ref(null)
 let   rafId = null
+let   lastPlayheadKey = ''
+const playheadSize = { w: 0, h: 0 }
+let   _playheadRO = null
 
 const PICKER_W = 160   // .pl-picker width (matches CSS)
 const HEADER_W = 140   // track header / ruler-corner width (matches CSS)
@@ -2103,10 +2172,33 @@ function renderPlayheadLoop() {
   const tl     = timelineRef.value
   if (!canvas || !tl) return
 
+  // Sizes and scroll come from observers/events: reading clientWidth or
+  // scrollLeft here would force a layout on every frame.
   const dpr = window.devicePixelRatio || 1
-  const w   = canvas.clientWidth
-  const h   = canvas.clientHeight
+  const { w, h } = playheadSize
   if (w === 0 || h === 0) return
+
+  // Compute exact absolute pixel position from audio clock (source of truth)
+  const secPerCell = totalSteps.value * (60 / bpm.value) / 4
+  const pxPerSec   = cellWidth.value / secPerCell
+  const xAbsolute  = getPlayheadTimeSeconds() * pxPerSec
+
+  // Page-flip auto-scroll: shift one screen when playhead hits 95% of track view
+  if (isPlaying.value && autoScroll.value) {
+    const trackViewW = viewW.value
+    if (trackViewW > 0 && xAbsolute >= scrollLeft.value + trackViewW * 0.95) {
+      tl.scrollLeft += trackViewW
+      scrollLeft.value = tl.scrollLeft
+    }
+  }
+
+  // Translate absolute px → viewport canvas coordinate
+  const xCanvas = PICKER_W + HEADER_W + xAbsolute - scrollLeft.value
+
+  // Nothing moved since the last frame (stopped, not scrolling): keep the pixels.
+  const frameKey = `${w}|${h}|${dpr}|${Math.round(xCanvas * 4)}|${isPlaying.value}`
+  if (frameKey === lastPlayheadKey) return
+  lastPlayheadKey = frameKey
 
   if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
     canvas.width  = Math.round(w * dpr)
@@ -2116,22 +2208,6 @@ function renderPlayheadLoop() {
   const ctx = canvas.getContext('2d')
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
   ctx.clearRect(0, 0, w, h)
-
-  // Compute exact absolute pixel position from audio clock (source of truth)
-  const secPerCell = totalSteps.value * (60 / bpm.value) / 4
-  const pxPerSec   = cellWidth.value / secPerCell
-  const xAbsolute  = getPlayheadTimeSeconds() * pxPerSec
-
-  // Page-flip auto-scroll: shift one screen when playhead hits 95% of track view
-  if (isPlaying.value && autoScroll.value) {
-    const trackViewW = tl.clientWidth - HEADER_W
-    if (trackViewW > 0 && xAbsolute >= tl.scrollLeft + trackViewW * 0.95) {
-      tl.scrollLeft += trackViewW
-    }
-  }
-
-  // Translate absolute px → viewport canvas coordinate
-  const xCanvas = PICKER_W + HEADER_W + xAbsolute - tl.scrollLeft
 
   // Cull: don't draw outside the track-cells viewport
   if (xCanvas < PICKER_W + HEADER_W || xCanvas > w) return
@@ -2475,8 +2551,9 @@ function onKeyDown(e) {
   if (['INPUT','SELECT','TEXTAREA'].includes(e.target.tagName)) return
   if (e.key === 'Alt') altDown.value = true
 
-  // Tool shortcuts (no modifiers)
-  if (!e.ctrlKey && !e.shiftKey && !e.altKey) {
+  // Tool shortcuts (no modifiers). With "typing keyboard to piano" on, the
+  // note keys play notes only — they don't also switch tools.
+  if (!e.ctrlKey && !e.shiftKey && !e.altKey && !(keyboardInputMode.value && isNoteKey(e.code))) {
     if (e.key === 'd' || e.key === 'D') playlistTool.value = 'draw'
     if (e.key === 'p' || e.key === 'P') playlistTool.value = 'paint'
     if (e.key === 'b' || e.key === 'B') playlistTool.value = 'paint'   // B = paint (same as P)
@@ -2618,6 +2695,10 @@ onMounted(() => {
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup',   onKeyUp)
   rafId = requestAnimationFrame(renderPlayheadLoop)
+  if (playheadCanvas.value) {
+    _playheadRO = new ResizeObserver(([e]) => { playheadSize.w = e.contentRect.width; playheadSize.h = e.contentRect.height })
+    _playheadRO.observe(playheadCanvas.value)
+  }
   measureViewport()
   if (timelineRef.value) { _viewRO = new ResizeObserver(measureViewport); _viewRO.observe(timelineRef.value) }
 })
@@ -2627,6 +2708,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keyup',   onKeyUp)
   if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null }
   _viewRO?.disconnect()
+  _playheadRO?.disconnect()
 })
 </script>
 
@@ -2806,7 +2888,7 @@ onBeforeUnmount(() => {
 }
 .ruler-cell:hover   { background: #0e0e20; }
 .ruler-cell.beat4   { border-left: 2px solid var(--border-subtle); }
-.ruler-cell.playing { background: rgba(255,255,255,0.06); }
+.ruler-play-cell { position: absolute; top: 0; bottom: 0; background: rgba(255,255,255,0.06); pointer-events: none; }
 .ruler-num { font-family: 'Share Tech Mono', monospace; font-size: 9px; color: var(--text-muted); }
 .time-marker {
   position: absolute; top: 0; left: 0; right: 0;
