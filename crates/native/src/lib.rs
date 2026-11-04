@@ -4,6 +4,7 @@
 #[cfg(all(windows, target_arch = "x86_64"))]
 pub mod asio;
 pub mod bounce;
+pub mod crash;
 pub mod editor;
 pub mod engine;
 pub mod ffi;
@@ -19,5 +20,5 @@ pub mod vst3;
 pub mod wasapi;
 pub mod webbus;
 
-pub use engine::{output_devices, AudioConfig, AudioSource, Clock, DriverKind, Engine, EngineStats, Opened, RenderCtx, Strip};
+pub use engine::{output_devices, AudioConfig, AudioSource, Clock, DriverKind, Engine, EngineStats, Insert, Opened, RenderCtx, Strip};
 pub use plugin::{load_any, Hosted, Plugin, PluginInfo, PluginState, RenderNote};

@@ -57,7 +57,9 @@ enum UserEvent {
 }
 
 enum Kind {
-    InProc { plugin: Arc<dyn Hosted>, source: Arc<dyn AudioSource>, strip: Arc<Strip>, editor: Option<EditorWindow> },
+    /// In this process. Instruments have a source and strip in the engine;
+    /// insert effects have neither (the insert runs them).
+    InProc { plugin: Arc<dyn Hosted>, source: Option<Arc<dyn AudioSource>>, strip: Option<Arc<Strip>>, editor: Option<EditorWindow> },
     Bridge(BridgeClient),
 }
 
@@ -76,6 +78,8 @@ struct App {
     proxy: EventLoopProxy<UserEvent>,
     instances: HashMap<String, Instance>,
     outbox: Vec<Value>,
+    /// Effect instance ids per insert the engine runs.
+    insert_fx: HashMap<u32, Vec<String>>,
     next_gen: u64,
     cascade: i32,
 }
@@ -120,6 +124,9 @@ impl App {
                 // whatever the previous page loaded would otherwise keep running.
                 if p.get("fresh").and_then(Value::as_bool).unwrap_or(false) && !self.instances.is_empty() {
                     log::write(&format!("new UI page: releasing {} plugin(s) from the previous one", self.instances.len()));
+                    for id in self.insert_fx.keys().copied().collect::<Vec<_>>() {
+                        self.remove_insert(id);
+                    }
                     self.shutdown();
                 }
                 let rate = self.engine.sample_rate();
@@ -189,10 +196,20 @@ impl App {
                 let Some(inst) = id.as_ref().and_then(|i| self.instances.get(i)) else { return };
                 let gain = p.get("gain").and_then(Value::as_f64).unwrap_or(1.0) as f32;
                 let pan = p.get("pan").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+                let dest = p.get("dest").and_then(Value::as_u64).unwrap_or(0) as u32;
                 match &inst.kind {
-                    Kind::InProc { strip, .. } => strip.set_mix(gain, pan),
+                    Kind::InProc { strip: Some(strip), .. } => {
+                        strip.set_mix(gain, pan);
+                        strip.set_dest(dest);
+                    }
+                    Kind::InProc { .. } => {}
                     Kind::Bridge(b) => b.send(json!({ "t": "mix", "gain": gain, "pan": pan })),
                 }
+            }
+            "insertSet" => self.on_insert_set(&p),
+            "insertRemove" => {
+                let ins = int_of(&p, "insert", 0) as u32;
+                self.remove_insert(ins);
             }
             "vstAllNotesOff" => {
                 for (iid, inst) in &self.instances {
@@ -360,7 +377,7 @@ impl App {
                             "canReplacing": i.can_replacing, "isSynth": i.is_synth, "hasEditor": i.has_editor, "bits": 64,
                             "format": if is_vst3 { "vst3" } else { "vst2" } }),
                 );
-                self.instances.insert(id.into(), Instance { path: path.into(), gen, kind: Kind::InProc { plugin, source, strip, editor: None }, pending_render: None });
+                self.instances.insert(id.into(), Instance { path: path.into(), gen, kind: Kind::InProc { plugin, source: Some(source), strip: Some(strip), editor: None }, pending_render: None });
             }
             Err(e) => {
                 let msg = if arch == Arch::Unknown { format!("{e} (not a Windows DLL?)") } else { e };
@@ -373,7 +390,9 @@ impl App {
         match inst.kind {
             Kind::InProc { plugin, source, strip, editor } => {
                 drop(editor);
-                self.engine.remove_source(&source);
+                if let Some(source) = &source {
+                    self.engine.remove_source(source);
+                }
                 drop((strip, source));
                 plugin.all_notes_off();
                 drop(plugin);
@@ -560,6 +579,79 @@ impl App {
         self.send("audioDevices", reply);
     }
 
+    /// A mixer insert the engine runs: `{ insert, gain, pan, fx: [{ uid, path,
+    /// state, classId, enabled }] }`. Effects are loaded once per uid (and
+    /// again if their path changes); disabled ones stay loaded but out of the
+    /// chain; ones no longer listed are released.
+    fn on_insert_set(&mut self, p: &Value) {
+        let ins_id = int_of(p, "insert", 0) as u32;
+        if ins_id == 0 {
+            return;
+        }
+        let gain = p.get("gain").and_then(Value::as_f64).unwrap_or(1.0) as f32;
+        let pan = p.get("pan").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+        let rate = self.engine.sample_rate() as f32;
+        let mut chain: Vec<Arc<dyn Hosted>> = Vec::new();
+        let mut report = Vec::new();
+        let mut uids = Vec::new();
+        for f in p.get("fx").and_then(Value::as_array).cloned().unwrap_or_default() {
+            let (Some(uid), Some(path)) = (str_of(&f, "uid").map(str::to_string), str_of(&f, "path").map(str::to_string)) else { continue };
+            uids.push(uid.clone());
+            let loaded = matches!(self.instances.get(&uid), Some(i) if i.path == path);
+            if !loaded {
+                if let Some(old) = self.instances.remove(&uid) {
+                    self.teardown(old);
+                }
+                let binary = if fls_native::vst3::is_vst3_path(&path) { fls_native::vst3::module_path(&path).map(|m| m.to_string_lossy().into_owned()).unwrap_or_default() } else { path.clone() };
+                if fls_native::pe::detect(&binary) == Arch::X86 {
+                    report.push(json!({ "uid": uid, "error": "32-bit effects can't run on an insert yet" }));
+                    continue;
+                }
+                match fls_native::load_any(&path, rate, str_of(&f, "classId")) {
+                    Ok(plugin) => {
+                        let state = str_of(&f, "state").and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok());
+                        if let Some(st) = state.as_deref().and_then(PluginState::from_bytes) {
+                            plugin.load_state(&st);
+                        }
+                        self.next_gen += 1;
+                        log::write(&format!("insert {ins_id}: effect {} loaded", plugin.info().name));
+                        self.instances.insert(uid.clone(), Instance { path: path.clone(), gen: self.next_gen, kind: Kind::InProc { plugin, source: None, strip: None, editor: None }, pending_render: None });
+                    }
+                    Err(e) => {
+                        log::write(&format!("insert {ins_id}: effect {path} failed: {e}"));
+                        report.push(json!({ "uid": uid, "error": e }));
+                        continue;
+                    }
+                }
+            }
+            if let Some(Instance { kind: Kind::InProc { plugin, .. }, .. }) = self.instances.get(&uid) {
+                if f.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+                    chain.push(plugin.clone());
+                }
+                report.push(json!({ "uid": uid, "name": plugin.info().name, "hasEditor": plugin.info().has_editor }));
+            }
+        }
+        let ins = self.engine.insert(ins_id);
+        ins.set_mix(gain, pan);
+        self.engine.set_insert_fx(&ins, chain);
+        let before = self.insert_fx.insert(ins_id, uids.clone()).unwrap_or_default();
+        for gone in before.into_iter().filter(|u| !uids.contains(u)) {
+            if let Some(inst) = self.instances.remove(&gone) {
+                self.teardown(inst);
+            }
+        }
+        self.send("insertSet", json!({ "insert": ins_id, "fx": report }));
+    }
+
+    fn remove_insert(&mut self, ins_id: u32) {
+        self.engine.remove_insert(ins_id);
+        for uid in self.insert_fx.remove(&ins_id).unwrap_or_default() {
+            if let Some(inst) = self.instances.remove(&uid) {
+                self.teardown(inst);
+            }
+        }
+    }
+
     /// Timed MIDI from the UI's scheduler: `{ now, rate, lat, ev: [[id, frame, status, d1, d2]] }`,
     /// frames on the UI audio context's clock. While the UI's audio streams in,
     /// its frames map exactly onto the engine's; otherwise each event keeps its
@@ -600,13 +692,17 @@ impl App {
             .instances
             .iter()
             .filter_map(|(id, inst)| match &inst.kind {
-                Kind::InProc { strip, .. } => Some((id.clone(), strip.take_peak())),
+                Kind::InProc { strip: Some(strip), .. } => Some((id.clone(), strip.take_peak())),
                 _ => None,
             })
             .filter(|(_, p)| *p > 0.0001)
             .collect();
         for (id, p) in peaks {
             self.send("vstPeak", json!({ "id": id, "peak": (p * 10000.0).round() / 10000.0 }));
+        }
+        let ins: Vec<Value> = self.engine.insert_peaks().into_iter().map(|(id, p)| json!([id, (p * 10000.0).round() / 10000.0])).collect();
+        if !ins.is_empty() {
+            self.send("insertPeaks", json!({ "peaks": ins }));
         }
     }
 
@@ -674,6 +770,8 @@ fn start_url() -> String {
 
 fn main() {
     log::write(&format!("Freaky Loops Studio {VERSION} starting"));
+    fls_native::crash::install();
+    fls_native::crash::preload_system_runtimes();
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
@@ -738,7 +836,7 @@ window.__flsHost.audio = {audio_info};
 
     // Load (or build) the sample/plugin index in the background for fast imports.
     locate::prewarm();
-    let mut app = App { window, engine, bus, proxy, instances: HashMap::new(), outbox: Vec::new(), next_gen: 0, cascade: 0 };
+    let mut app = App { window, engine, bus, proxy, instances: HashMap::new(), outbox: Vec::new(), insert_fx: HashMap::new(), next_gen: 0, cascade: 0 };
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;

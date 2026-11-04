@@ -62,6 +62,8 @@ fn main() {
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     unsafe { PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE) };
 
+    fls_native::crash::install();
+    fls_native::crash::preload_system_runtimes();
     let mut engine = Engine::start_on(device.as_deref());
     // Live sample rate, shared with the control thread (it restores it after bounces).
     let live_rate = Arc::new(std::sync::atomic::AtomicU32::new(engine.sample_rate()));
