@@ -74,7 +74,7 @@ import { useStudio } from '../../store/studio.js'
 const {
   renderModalOpen, themeModalOpen, midiRouterOpen,
   browserOpen, activeArrangement,
-  windowState, activateWindow, toggleDetach, applyArrangement,
+  windowState, activateWindow, toggleDetach, applyArrangement, closeAllWindows,
 } = useStudio()
 
 const WINDOWS = [
@@ -129,7 +129,8 @@ function onKey(e) {
   else if (e.key === 'F6') id = 'rack'
   else if (e.key === 'F7') id = 'piano'
   else if (e.key === 'F9') id = 'mixer'
-  else if (e.key === 'F8' && e.altKey) id = 'browser'
+  else if (e.key === 'F8') id = 'browser'
+  else if (e.key === 'F12') { e.preventDefault(); closeAllWindows(); return }
   if (!id) return
   e.preventDefault()
   activateWindow(id)

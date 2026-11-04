@@ -801,9 +801,9 @@ const {
 
 // ── Tools ─────────────────────────────────────────────────────────────────────
 const tools = [
-  { id: 'draw',   icon: '✏',  tip: 'Draw — click to place/toggle clips (D)' },
-  { id: 'paint',  icon: '🖌',  tip: 'Paint — drag to fill cells (P)' },
-  { id: 'erase',  icon: '✕',  tip: 'Erase — click/drag to remove clips (X)' },
+  { id: 'draw',   icon: '✏',  tip: 'Draw — click to place/toggle clips (P)' },
+  { id: 'paint',  icon: '🖌',  tip: 'Paint — drag to fill cells (B)' },
+  { id: 'erase',  icon: '✕',  tip: 'Delete — click/drag to remove clips (D)' },
   { id: 'slice',  icon: '✂',  tip: 'Slice — cut clip at cursor (C)' },
   { id: 'mute',   icon: '⊘',  tip: 'Mute — toggle individual clip mute (T)' },
   { id: 'select', icon: '⬚',  tip: 'Select — drag box to select clips (E)' },
@@ -2554,10 +2554,10 @@ function onKeyDown(e) {
   // Tool shortcuts (no modifiers). With "typing keyboard to piano" on, the
   // note keys play notes only — they don't also switch tools.
   if (!e.ctrlKey && !e.shiftKey && !e.altKey && !(keyboardInputMode.value && isNoteKey(e.code))) {
-    if (e.key === 'd' || e.key === 'D') playlistTool.value = 'draw'
-    if (e.key === 'p' || e.key === 'P') playlistTool.value = 'paint'
-    if (e.key === 'b' || e.key === 'B') playlistTool.value = 'paint'   // B = paint (same as P)
-    if (e.key === 'x' || e.key === 'X') playlistTool.value = 'erase'
+    // Same letters as the piano roll: P draw, B paint, D delete (X kept as an alias).
+    if (e.key === 'p' || e.key === 'P') playlistTool.value = 'draw'
+    if (e.key === 'b' || e.key === 'B') playlistTool.value = 'paint'
+    if (e.key === 'd' || e.key === 'D' || e.key === 'x' || e.key === 'X') playlistTool.value = 'erase'
     if (e.key === 'e' || e.key === 'E') playlistTool.value = 'select'
     if (e.key === 'c' || e.key === 'C') playlistTool.value = 'slice'
     if (e.key === 't' || e.key === 'T') playlistTool.value = 'mute'

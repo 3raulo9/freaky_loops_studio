@@ -1544,7 +1544,12 @@ export function useStudio() {
   applyTheme(currentTheme.value)
   const kbOctave           = ref(4)
   const gridSnap           = ref('1/4')
-  const keyboardInputMode  = ref(false)
+  // Typing keyboard to piano: on → letter keys play notes; off → they're
+  // shortcuts (L song/pattern, R record, tool letters). Remembered.
+  const keyboardInputMode  = ref((() => {
+    try { const v = localStorage.getItem('fls.typingKeyboard'); return v === null ? true : v === '1' } catch { return true }
+  })())
+  watch(keyboardInputMode, v => { try { localStorage.setItem('fls.typingKeyboard', v ? '1' : '0') } catch (_) {} })
 
   // ── Snap-to-grid / quantization engine (PPQ time base) ────────────────────────
   //   All canvas mouse vectors quantize to internal Ticks. The tick duration and
@@ -1666,6 +1671,22 @@ export function useStudio() {
         mainView.value = target
       }
     }
+  }
+
+  // F12: close every window but the playlist.
+  function closeAllWindows() {
+    for (const id of Object.keys(detachedWindows)) delete detachedWindows[id]
+    pianoRollOpen.value = false
+    mainView.value = 'playlist'
+  }
+
+  // Undo / redo from a key press: several components listen for the same
+  // keys (the piano roll clears its selection first) — act once per event.
+  function undoFromKey(e, redo = false) {
+    if (e.__flsUndone) return
+    e.__flsUndone = true
+    e.preventDefault()
+    redo ? redoAction() : undoAction()
   }
 
   function detachWindow(id) {
@@ -6113,6 +6134,20 @@ export function useStudio() {
     if (!_slider && (_tag === 'INPUT' || _tag === 'SELECT' || _tag === 'TEXTAREA')) return
     // Space = play / stop, from anywhere (and never "clicks" a focused button).
     if (e.code === 'Space') { e.preventDefault(); togglePlay(); return }
+    // Numpad + / − : next / previous pattern.
+    if (e.code === 'NumpadAdd' || e.code === 'NumpadSubtract') {
+      const i = patterns.findIndex(p => p.id === currentPatternId.value)
+      const next = patterns[i + (e.code === 'NumpadAdd' ? 1 : -1)]
+      if (next) currentPatternId.value = next.id
+      e.preventDefault()
+      return
+    }
+    if (!keyboardInputMode.value) {
+      // Letters are shortcuts while the typing keyboard is off.
+      if (e.code === 'KeyL' && !e.shiftKey && !e.altKey) { usePlaylist.value = !usePlaylist.value; return }
+      if (e.code === 'KeyR' && !e.shiftKey && !e.altKey) { toggleRecordArm(); return }
+      return
+    }
     // Octave shift moved off [ and ] (now note keys) to - and =
     if (e.code === 'Minus')  { kbOctave.value = Math.max(0, kbOctave.value - 1); return }
     if (e.code === 'Equal')  { kbOctave.value = Math.min(8, kbOctave.value + 1); return }
@@ -8239,7 +8274,7 @@ export function useStudio() {
     getAnalyser: () => analyserNode,
     getScopeAnalysers: () => ({ L: scopeAnalyserL, R: scopeAnalyserR }),
     // Undo / Redo
-    canUndo, canRedo, undoAction, redoAction,
+    canUndo, canRedo, undoAction, redoAction, undoFromKey, closeAllWindows,
     // Keyboard
     playNote, stopNote, handleKeyDown, handleKeyUp, panicAll,
     // Sampler audition (preview keyboard)

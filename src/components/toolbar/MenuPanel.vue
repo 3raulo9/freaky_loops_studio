@@ -217,11 +217,12 @@ const MENUS = [
 ]
 
 const SHORTCUTS = [
-  { title: 'Transport', items: [['Space', 'Play / stop'], ['Ctrl+Shift+7', 'Panic (silence everything)']] },
-  { title: 'Windows', items: [['F3', 'Session (clip launcher)'], ['F5', 'Playlist'], ['F6', 'Channel rack'], ['F7', 'Piano roll'], ['Alt+F8', 'Browser'], ['F9', 'Mixer'], ['F1', 'This list']] },
-  { title: 'Project', items: [['Ctrl+N', 'New project'], ['Ctrl+O', 'Open'], ['Ctrl+S', 'Save'], ['Ctrl+Shift+S', 'Save as'], ['Ctrl+R', 'Render / export'], ['Ctrl+Z / Ctrl+Y', 'Undo / redo']] },
-  { title: 'Patterns', items: [['F4', 'New pattern'], ['F2', 'Rename pattern']] },
-  { title: 'Live keyboard', items: [['Z–M, Q–]', 'Play the selected channel'], ['- / =', 'Octave down / up']] },
+  { title: 'Transport', items: [['Space', 'Play / stop'], ['L', 'Pattern / song mode'], ['R', 'Arm recording'], ['Ctrl+Shift+7', 'Panic (silence everything)']] },
+  { title: 'Windows', items: [['F3', 'Session (clip launcher)'], ['F5', 'Playlist'], ['F6', 'Channel rack'], ['F7', 'Piano roll'], ['F8 / Alt+F8', 'Browser'], ['F9', 'Mixer'], ['F10', 'MIDI settings'], ['F11', 'Full screen'], ['F12', 'Close all windows'], ['F1', 'This list']] },
+  { title: 'Project', items: [['Ctrl+N', 'New project'], ['Ctrl+O', 'Open'], ['Ctrl+S', 'Save'], ['Ctrl+Shift+S', 'Save as'], ['Ctrl+R', 'Render / export'], ['Ctrl+Z / Ctrl+Alt+Z', 'Undo'], ['Ctrl+Y / Ctrl+Shift+Z', 'Redo']] },
+  { title: 'Patterns', items: [['F4', 'New pattern'], ['F2', 'Rename pattern'], ['Num + / Num −', 'Next / previous pattern']] },
+  { title: 'Live keyboard', items: [['Z–M, Q–]', 'Play the selected channel (typing keyboard on)'], ['- / =', 'Octave down / up'], ['L, R, tool letters', 'Shortcuts when the typing keyboard is off']] },
+  { title: 'Playlist tools', items: [['P', 'Draw'], ['B', 'Paint'], ['D', 'Delete'], ['T', 'Mute'], ['S', 'Slip'], ['C', 'Slice'], ['E', 'Select'], ['Y', 'Play from selection']] },
   { title: 'Piano roll', items: [['Ctrl+A', 'Select all'], ['Ctrl+C / Ctrl+V', 'Copy / paste'], ['Ctrl+B', 'Duplicate selection'], ['Ctrl+Q', 'Quantize'], ['Ctrl+L', 'Legato'], ['Ctrl+G', 'Glue'], ['Alt+V', 'Ghost notes']] },
   { title: 'Playlist', items: [['Ctrl+B', 'Duplicate selected clips'], ['Shift+↑ / ↓', 'Move clips between tracks'], ['Shift+1…5', 'Zoom presets'], ['Ctrl+drag ruler', 'Set loop region']] },
 ]
@@ -297,6 +298,10 @@ function onKey(e) {
   if (e.key === 'Escape') { close(); shortcutsOpen.value = false; aboutOpen.value = false; return }
   if (e.key === 'F1') { e.preventDefault(); shortcutsOpen.value = !shortcutsOpen.value; return }
   if (e.key === 'F11') { e.preventDefault(); toggleFullscreen(); return }
+  if (e.key === 'F10') { e.preventDefault(); midiRouterOpen.value = true; return }
+  // Undo everywhere: Ctrl+Z (Ctrl+Alt+Z steps back too), Ctrl+Y / Ctrl+Shift+Z redo.
+  if ((e.ctrlKey || e.metaKey) && e.code === 'KeyZ') { S.undoFromKey(e, e.shiftKey); return }
+  if ((e.ctrlKey || e.metaKey) && e.code === 'KeyY') { S.undoFromKey(e, true); return }
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return
   const k = e.key.toLowerCase()
   if (k === 's') { e.preventDefault(); if (e.shiftKey) saveAs(); else saveProject(projectName.value || 'project') }

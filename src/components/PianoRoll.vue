@@ -528,7 +528,7 @@ const props = defineProps({ ch: { type: Object, required: true } })
 
 const {
   totalSteps, displayStep, isPlaying, channels, selectedChannelId, currentPatternId,
-  getPatData, playNote, stopNote, snapScale, pushUndo, undoAction, redoAction,
+  getPatData, playNote, stopNote, snapScale, pushUndo, undoAction, redoAction, undoFromKey, keyboardInputMode, isNoteKey,
   getPatternLengthTicks, setPatternLengthOverride, clearPatternLengthOverride,
   loopRegion, setLoopRegion, clearLoopRegion,
   autoScroll,
@@ -1678,8 +1678,12 @@ function onKeyDown(e) {
   if (!prFocused.value) return
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement?.tagName)) return
 
+  // Letters play notes while the typing keyboard is on; tool letters work when it's off.
+  const noteKey = keyboardInputMode.value && isNoteKey(e.code) && !e.ctrlKey && !e.altKey && !e.metaKey
+
   // Tool selection
-  if      (!e.ctrlKey && (e.key === 'p' || e.key === 'P')) { tool.value = 'draw';   return }
+  if      (noteKey) { /* a note, not a tool */ }
+  else if (!e.ctrlKey && (e.key === 'p' || e.key === 'P')) { tool.value = 'draw';   return }
   else if (!e.ctrlKey && (e.key === 'b' || e.key === 'B')) { tool.value = 'paint';  return }
   else if (!e.ctrlKey && (e.key === 'n' || e.key === 'N')) { tool.value = 'drum';   return }
   else if (!e.ctrlKey && (e.key === 'e' || e.key === 'E')) { tool.value = 'select'; return }
@@ -1708,11 +1712,10 @@ function onKeyDown(e) {
     selectedNotes.value = new Set(currentNotes.value.map((_, i) => i)); return
   }
   else if (e.ctrlKey && e.code === 'KeyZ') {
-    e.preventDefault()
     selectedNotes.value = new Set()   // indices are about to change under us
-    e.shiftKey ? redoAction() : undoAction(); return
+    undoFromKey(e, e.shiftKey); return
   }
-  else if (e.ctrlKey && e.code === 'KeyY') { e.preventDefault(); selectedNotes.value = new Set(); redoAction(); return }
+  else if (e.ctrlKey && e.code === 'KeyY') { selectedNotes.value = new Set(); undoFromKey(e, true); return }
   else if (e.ctrlKey && e.code === 'KeyC') { e.preventDefault(); copySelected(); return }
   else if (e.ctrlKey && e.code === 'KeyV') { e.preventDefault(); pasteNotes(); return }
   else if (e.ctrlKey && e.code === 'KeyB') { e.preventDefault(); duplicateSelected(); return }
