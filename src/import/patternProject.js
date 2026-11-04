@@ -154,6 +154,22 @@ export function mapPatternProject(P, env) {
     for (const s of t.slots ?? []) {
       const pl = s.plugin
       const label = pl.vst?.name || pl.internal || pl.name
+      // A plugin effect that's installed runs as itself (in the engine, desktop).
+      const hit = pl.vst && env.desktop ? env.resolveVst(pl.vst) : null
+      if (hit) {
+        const sameFormat = (hit.format ?? 'vst2') === (pl.vst.format ?? 'vst2')
+        fxSlots.push({
+          type: 'vst', enabled: s.enabled !== false, label, importedFrom: label,
+          uid: `fx${fl}-${fxSlots.length}-${Math.random().toString(36).slice(2, 7)}`,
+          vstPath: hit.path, vstState: sameFormat ? pl.vst.state ?? undefined : undefined,
+          vstClassId: hit.format === 'vst3' && sameFormat && pl.vst.guid ? pl.vst.guid : undefined,
+        })
+        const status = hit.arch === 'x86' ? 'effect found, but 32-bit effects cannot run on an insert yet'
+          : sameFormat && pl.vst.state ? 'effect loaded with its settings' : 'effect loaded'
+        report.plugins.push({ name: label, status, path: hit.path })
+        report.effectsMapped++
+        continue
+      }
       const { type } = pickEffect(`${pl.internal} ${pl.name} ${pl.vst?.name ?? ''}`)
       if (!type || !lib.effectDefs[type]) { report.effectsSkipped.push(label); continue }
       const fx = lib.makeEffect(type)

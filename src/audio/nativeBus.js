@@ -18,8 +18,9 @@
 
 const TAP_SRC = `
 class FlsBusTap extends AudioWorkletProcessor {
-  constructor() {
+  constructor(options) {
     super()
+    this.bus = (options && options.processorOptions && options.processorOptions.bus) || 0
     this.out = null
     this.free = []
     this.port.onmessage = e => {
@@ -47,7 +48,7 @@ class FlsBusTap extends AudioWorkletProcessor {
     const frame = currentFrame
     h[0] = 0x42534c46; h[1] = 1; h[2] = sampleRate; h[3] = n
     h[4] = frame % 4294967296; h[5] = Math.floor(frame / 4294967296)
-    h[6] = silent ? 1 : 0; h[7] = 0
+    h[6] = silent ? 1 : 0; h[7] = this.bus
     out.postMessage(buf, [buf])
     return true
   }
@@ -66,9 +67,13 @@ function connect() {
 }
 onmessage = e => {
   const d = e.data
+  if (d.type === 'port') { listen(d.port); return }
   if (d.type !== 'init') return
   url = d.url
-  const port = d.port
+  listen(d.port)
+  connect()
+}
+function listen(port) {
   port.onmessage = m => {
     const buf = m.data
     // A stalled socket must not pile up memory: drop audio past ~1 MB queued.
@@ -78,7 +83,6 @@ onmessage = e => {
     }
     port.postMessage(buf, [buf])
   }
-  connect()
 }
 `
 
@@ -115,12 +119,13 @@ export function startNativeBus(ctx, { port, token, sink: initialSink = 'device' 
     for (const fn of listeners) { try { fn(live) } catch (_) {} }
   }
 
-  ;(async () => {
+  let worker = null
+  const ready = (async () => {
     try {
       await ctx.audioWorklet.addModule(blobUrl(TAP_SRC))
       tap = new AudioWorkletNode(ctx, 'fls-bus-tap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit' })
       tap.connect(ctx.destination)          // keeps it pulled; it outputs silence
-      const worker = new Worker(blobUrl(WORKER_SRC))
+      worker = new Worker(blobUrl(WORKER_SRC))
       const ch = new MessageChannel()
       tap.port.postMessage({ port: ch.port1 }, [ch.port1])
       worker.postMessage({ type: 'init', url: `ws://127.0.0.1:${port}/${token}`, port: ch.port2 }, [ch.port2])
@@ -146,9 +151,39 @@ export function startNativeBus(ctx, { port, token, sink: initialSink = 'device' 
     }
   }
 
+  // Extra buses: one mixer insert each, which the engine processes itself
+  // (plugin effects). Same tap, stamped with the bus id.
+  const taps = new Map()
+  const tapFor = busId => {
+    if (taps.has(busId)) return taps.get(busId).input
+    const g = ctx.createGain()
+    const entry = { input: g, node: null }
+    taps.set(busId, entry)
+    ready.then(() => {
+      if (!worker || taps.get(busId) !== entry) return
+      const node = new AudioWorkletNode(ctx, 'fls-bus-tap', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2], channelCount: 2, channelCountMode: 'explicit', processorOptions: { bus: busId } })
+      node.connect(ctx.destination)
+      const ch = new MessageChannel()
+      node.port.postMessage({ port: ch.port1 }, [ch.port1])
+      worker.postMessage({ type: 'port', port: ch.port2 }, [ch.port2])
+      g.connect(node)
+      entry.node = node
+    })
+    return g
+  }
+  const releaseTap = busId => {
+    const e = taps.get(busId)
+    if (!e) return
+    taps.delete(busId)
+    try { e.input.disconnect() } catch (_) {}
+    try { e.node?.disconnect() } catch (_) {}
+  }
+
   return {
     input,
     setSink,
+    tap: tapFor,
+    releaseTap,
     isLive: () => live,
     onChange: fn => { listeners.add(fn); return () => listeners.delete(fn) },
   }

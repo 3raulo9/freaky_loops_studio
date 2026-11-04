@@ -292,8 +292,11 @@
                 title="Enable/disable"
               />
               <!-- Slot name / click to expand -->
-              <div class="mx-fx-slot-name" @click.stop="expandedSlot = expandedSlot === si ? -1 : si">
-                {{ slot ? effectLabel(slot.type) : '— empty —' }}
+              <div class="mx-fx-slot-name" :class="{ 'is-plugin': slot?.type === 'vst' }"
+                :title="slot?.type === 'vst' ? (slot._error || 'Open the plugin window') : ''"
+                @click.stop="slot?.type === 'vst' ? openVstEditor(slot.uid) : (expandedSlot = expandedSlot === si ? -1 : si)">
+                {{ slot ? slotLabel(slot) : '— empty —' }}
+                <span v-if="slot?._error" class="mx-fx-err">!</span>
               </div>
               <!-- Mix % for effects with mix param -->
               <span v-if="slot && hasMixParam(slot.type)" class="mx-fx-mix-val"
@@ -383,7 +386,7 @@ const {
   addMixerTrackFx, removeMixerTrackFx, updateMixerTrackFxParam,
   toggleMixerTrackFxEnabled, moveMixerTrackFxSlot,
   setMixerSend, setMixerSidechain,
-  addMixerInsert, setMixerTrackOutput,
+  addMixerInsert, setMixerTrackOutput, openVstEditor,
 } = useStudio()
 
 function onAddInsert() {
@@ -479,6 +482,11 @@ function effectLabel(type) {
   return EFFECT_DEFS[type]?.label ?? type
 }
 
+// Plugin effects show their own name.
+function slotLabel(slot) {
+  return slot.type === 'vst' ? (slot.label || 'Plugin') : effectLabel(slot.type)
+}
+
 function activeFxCount(track) {
   return (track?.fxSlots ?? []).filter(s => s && s.enabled).length
 }
@@ -486,7 +494,7 @@ function activeFxCount(track) {
 function fxSlotSummary(track) {
   const active = activeFxCount(track)
   if (!active) return 'No active effects — click to open FX panel'
-  const names = (track?.fxSlots ?? []).filter(s => s?.enabled).map(s => effectLabel(s.type))
+  const names = (track?.fxSlots ?? []).filter(s => s?.enabled).map(slotLabel)
   return names.join(', ')
 }
 
@@ -1182,4 +1190,6 @@ function panLabel(p) {
   border: 1px solid transparent;
 }
 .mx-ctx-color:hover { transform: scale(1.2); border-color: #fff4; }
+.mx-fx-slot-name.is-plugin { color: #7fd6c2; }
+.mx-fx-err { color: #e74c3c; font-weight: 700; margin-left: 4px; }
 </style>

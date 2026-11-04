@@ -4,7 +4,10 @@
 //! master bus.
 //!
 //! Plugins render in parallel on a small pool of worker threads (pool.rs),
-//! each into its own strip buffer; the audio thread then sums the strips.
+//! each into its own strip buffer; the audio thread then sums the strips —
+//! into the master, or into a mixer insert the engine runs itself: the
+//! UI's audio for that insert (its own web bus) plus the plugin channels
+//! routed to it, through its effect plugins, then its fader and pan.
 //! The audio thread never blocks and never allocates: the strip list is
 //! swapped in whole (lock-free), every buffer is sized up front, and lists
 //! that are swapped out are released later on the UI thread, so a plugin is
@@ -48,6 +51,8 @@ pub struct Strip {
     src: Arc<dyn AudioSource>,
     target: [AtomicU32; 2],
     peak: AtomicU32,
+    /// Insert id it feeds (0 = the master).
+    dest: AtomicU32,
     state: Mutex<StripState>,
 }
 
@@ -62,6 +67,7 @@ impl Strip {
             src,
             target: [AtomicU32::new(1f32.to_bits()), AtomicU32::new(1f32.to_bits())],
             peak: AtomicU32::new(0),
+            dest: AtomicU32::new(0),
             state: Mutex::new(StripState { buf: vec![0.0; MAX_FRAMES * 2], cur: [1.0, 1.0] }),
         }
     }
@@ -76,6 +82,11 @@ impl Strip {
     /// Peak level after gain since the last call (for meters).
     pub fn take_peak(&self) -> f32 {
         f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
+    }
+
+    /// Feed a mixer insert the engine runs (`0` = straight to the master).
+    pub fn set_dest(&self, insert: u32) {
+        self.dest.store(insert, Ordering::Relaxed);
     }
 
     /// Render the source into the strip's own buffer (any thread).
@@ -116,6 +127,82 @@ impl Strip {
     }
 }
 
+/// A mixer insert run by the engine: its input is the UI's audio for it
+/// (web bus `id`) plus the plugin channels routed to it; it goes through its
+/// effect plugins in order, then its gain and pan, into the master.
+pub struct Insert {
+    pub id: u32,
+    fx: ArcSwap<Vec<Arc<dyn crate::plugin::Hosted>>>,
+    target: [AtomicU32; 2],
+    peak: AtomicU32,
+    state: Mutex<StripState>,
+}
+
+impl Insert {
+    fn new(id: u32) -> Insert {
+        Insert {
+            id,
+            fx: ArcSwap::from_pointee(Vec::new()),
+            target: [AtomicU32::new(1f32.to_bits()), AtomicU32::new(1f32.to_bits())],
+            peak: AtomicU32::new(0),
+            state: Mutex::new(StripState { buf: vec![0.0; MAX_FRAMES * 2], cur: [1.0, 1.0] }),
+        }
+    }
+
+    /// Gain (linear) and pan (-1..1, balance).
+    pub fn set_mix(&self, gain: f32, pan: f32) {
+        let (g, p) = (gain.clamp(0.0, 4.0), pan.clamp(-1.0, 1.0));
+        self.target[0].store((g * (1.0 - p).min(1.0)).to_bits(), Ordering::Relaxed);
+        self.target[1].store((g * (1.0 + p).min(1.0)).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn take_peak(&self) -> f32 {
+        f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
+    }
+
+    /// Run the effect chain over the input gathered this block.
+    fn process(&self, frames: usize, ctx: &RenderCtx) {
+        let Ok(mut st) = self.state.try_lock() else { return };
+        let buf = &mut st.buf[..frames * 2];
+        for fx in self.fx.load().iter() {
+            fx.process_effect(buf, frames, ctx);
+        }
+    }
+
+    fn mix_into(&self, out: &mut [f32], frames: usize) {
+        let Ok(mut st) = self.state.try_lock() else { return };
+        let st = &mut *st;
+        let to = [f32::from_bits(self.target[0].load(Ordering::Relaxed)), f32::from_bits(self.target[1].load(Ordering::Relaxed))];
+        let step = [(to[0] - st.cur[0]) / frames as f32, (to[1] - st.cur[1]) / frames as f32];
+        let mut g = st.cur;
+        let mut peak = 0f32;
+        for i in 0..frames {
+            g[0] += step[0];
+            g[1] += step[1];
+            let (l, r) = (st.buf[i * 2] * g[0], st.buf[i * 2 + 1] * g[1]);
+            out[i * 2] += l;
+            out[i * 2 + 1] += r;
+            peak = peak.max(l.abs()).max(r.abs());
+        }
+        st.cur = to;
+        if peak > f32::from_bits(self.peak.load(Ordering::Relaxed)) {
+            self.peak.store(peak.to_bits(), Ordering::Relaxed);
+        }
+    }
+}
+
+struct InsertJob<'a> {
+    inserts: &'a [Arc<Insert>],
+    frames: usize,
+    ctx: &'a RenderCtx,
+}
+
+impl crate::pool::Job for InsertJob<'_> {
+    fn run(&self, i: usize) {
+        self.inserts[i].process(self.frames, self.ctx);
+    }
+}
+
 /// One block's worth of strips for the worker pool.
 struct StripJob<'a> {
     strips: &'a [Arc<Strip>],
@@ -130,6 +217,8 @@ impl crate::pool::Job for StripJob<'_> {
 }
 
 type Strips = Vec<Arc<Strip>>;
+type Inserts = Vec<Arc<Insert>>;
+type FxChain = Vec<Arc<dyn crate::plugin::Hosted>>;
 
 #[derive(Default)]
 struct Stats {
@@ -151,6 +240,7 @@ struct Capture {
 
 struct Shared {
     strips: ArcSwap<Strips>,
+    inserts: ArcSwap<Inserts>,
     capture: ArcSwapOption<Capture>,
     /// Send silence to the device (the capture still records the real mix).
     mute_output: AtomicBool,
@@ -252,6 +342,8 @@ pub struct Engine {
     /// Why the chosen driver didn't open (the engine fell back to shared mode).
     last_error: Option<String>,
     retired: Vec<(Instant, Arc<Strips>)>,
+    retired_inserts: Vec<(Instant, Arc<Inserts>)>,
+    retired_fx: Vec<(Instant, Arc<FxChain>)>,
     last_try: Instant,
 }
 
@@ -289,6 +381,7 @@ impl Engine {
     pub fn start_with(config: AudioConfig) -> Engine {
         let shared = Arc::new(Shared {
             strips: ArcSwap::from_pointee(Vec::new()),
+            inserts: ArcSwap::from_pointee(Vec::new()),
             capture: ArcSwapOption::empty(),
             mute_output: AtomicBool::new(false),
             bus: ArcSwapOption::empty(),
@@ -307,6 +400,8 @@ impl Engine {
             opened: Opened::default(),
             last_error: None,
             retired: Vec::new(),
+            retired_inserts: Vec::new(),
+            retired_fx: Vec::new(),
             last_try: Instant::now(),
         };
         e.open();
@@ -444,6 +539,8 @@ impl Engine {
             self.open();
         }
         self.retired.retain(|(t, _)| t.elapsed() < Duration::from_secs(2));
+        self.retired_inserts.retain(|(t, _)| t.elapsed() < Duration::from_secs(2));
+        self.retired_fx.retain(|(t, _)| t.elapsed() < Duration::from_secs(2));
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -508,6 +605,42 @@ impl Engine {
         let cap = self.shared.capture.swap(None)?;
         let pcm = std::mem::take(&mut *cap.pcm.lock().ok()?);
         Some((pcm, cap.dropped.load(Ordering::SeqCst)))
+    }
+
+    /// The insert the engine runs for mixer insert `id` (created on first use).
+    pub fn insert(&mut self, id: u32) -> Arc<Insert> {
+        if let Some(i) = self.shared.inserts.load().iter().find(|i| i.id == id) {
+            return i.clone();
+        }
+        let ins = Arc::new(Insert::new(id));
+        let mut next: Inserts = (**self.shared.inserts.load()).clone();
+        next.push(ins.clone());
+        let old = self.shared.inserts.swap(Arc::new(next));
+        self.retired_inserts.push((Instant::now(), old));
+        ins
+    }
+
+    /// Replace an insert's effect chain. Plugins taken out are released once
+    /// the audio thread has let go of them.
+    pub fn set_insert_fx(&mut self, ins: &Insert, fx: Vec<Arc<dyn crate::plugin::Hosted>>) {
+        let old = ins.fx.swap(Arc::new(fx));
+        self.retired_fx.push((Instant::now(), old));
+    }
+
+    /// Stop running an insert (its UI audio goes back to the UI's own mix).
+    pub fn remove_insert(&mut self, id: u32) {
+        let mut next: Inserts = (**self.shared.inserts.load()).clone();
+        let Some(k) = next.iter().position(|i| i.id == id) else { return };
+        let gone = next.remove(k);
+        let old_fx = gone.fx.swap(Arc::new(Vec::new()));
+        let old = self.shared.inserts.swap(Arc::new(next));
+        self.retired_inserts.push((Instant::now(), old));
+        self.retired_fx.push((Instant::now(), old_fx));
+    }
+
+    /// Meters of the inserts the engine runs: (id, peak since last call).
+    pub fn insert_peaks(&self) -> Vec<(u32, f32)> {
+        self.shared.inserts.load().iter().map(|i| (i.id, i.take_peak())).collect()
     }
 
     /// A handle to the engine's clock that other threads can keep.
@@ -611,9 +744,8 @@ impl Renderer {
         let mix = &mut self.mix[..frames * 2];
         mix.fill(0.0);
 
-        if let Some(bus) = self.shared.bus.load().as_ref() {
-            bus.read_add(&mut self.reader, mix, frames, self.rate as f32, start);
-        }
+        let bus = self.shared.bus.load();
+        let at = bus.as_ref().and_then(|b| b.read_add(&mut self.reader, mix, frames, self.rate as f32, start));
 
         let tone = f32::from_bits(self.shared.tone_hz.load(Ordering::Relaxed));
         if tone > 0.0 {
@@ -628,8 +760,30 @@ impl Renderer {
 
         let strips = self.shared.strips.load();
         self.pool.run(&StripJob { strips: &strips, frames, ctx: &ctx }, strips.len());
+        let inserts = self.shared.inserts.load();
+        for ins in inserts.iter() {
+            if let Ok(mut st) = ins.state.try_lock() {
+                let buf = &mut st.buf[..frames * 2];
+                buf.fill(0.0);
+                if let (Some(b), Some(at)) = (bus.as_ref(), at) {
+                    b.read_bus_at(ins.id as usize, at, buf, frames);
+                }
+            }
+        }
         for s in strips.iter() {
-            s.mix_into(mix, frames);
+            let dest = s.dest.load(Ordering::Relaxed);
+            match (dest != 0).then(|| inserts.iter().find(|i| i.id == dest)).flatten() {
+                Some(ins) => {
+                    if let Ok(mut st) = ins.state.try_lock() {
+                        s.mix_into(&mut st.buf[..frames * 2], frames);
+                    }
+                }
+                None => s.mix_into(mix, frames),
+            }
+        }
+        self.pool.run(&InsertJob { inserts: &inserts, frames, ctx: &ctx }, inserts.len());
+        for ins in inserts.iter() {
+            ins.mix_into(mix, frames);
         }
         host_callback::advance_transport(frames);
         self.shared.frame.store(start + frames as u64, Ordering::Relaxed);

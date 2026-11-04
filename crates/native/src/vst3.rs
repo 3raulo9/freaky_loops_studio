@@ -909,6 +909,11 @@ impl Vst3Plugin {
     /// One `process` call of `frames` frames. `pos` = project position in
     /// samples for offline renders (live renders follow the host transport).
     fn process_block(&self, st: &mut Proc, frames: usize, events: &[(i32, NoteEv)], pos: Option<u64>) {
+        self.process_block_io(st, frames, events, pos, None)
+    }
+
+    /// One `process` call; `input` (interleaved stereo) feeds the first input bus.
+    fn process_block_io(&self, st: &mut Proc, frames: usize, events: &[(i32, NoteEv)], pos: Option<u64>, input: Option<&[f32]>) {
         unsafe {
             let list = st.events.list();
             list.clear();
@@ -938,6 +943,22 @@ impl Vst3Plugin {
         for bus in st.outs.iter_mut().chain(st.ins.iter_mut()) {
             for b in bus.bufs.iter_mut() {
                 b[..frames].fill(0.0);
+            }
+        }
+        if let (Some(inp), Some(bus)) = (input, st.ins.first_mut()) {
+            match bus.bufs.len() {
+                0 => {}
+                1 => {
+                    for i in 0..frames {
+                        bus.bufs[0][i] = (inp[i * 2] + inp[i * 2 + 1]) * 0.5;
+                    }
+                }
+                _ => {
+                    for i in 0..frames {
+                        bus.bufs[0][i] = inp[i * 2];
+                        bus.bufs[1][i] = inp[i * 2 + 1];
+                    }
+                }
             }
         }
         st.in_bufs.clear();
@@ -1066,6 +1087,29 @@ impl Hosted for Vst3Plugin {
             0x90 if vel > 0 => self.inbox.push(at, NoteEv { on: true, channel: ch, pitch, velocity: vel as f32 / 127.0 }),
             0x80 | 0x90 => self.inbox.push(at, NoteEv { on: false, channel: ch, pitch, velocity: 0.0 }),
             _ => {}
+        }
+    }
+    fn process_effect(&self, io: &mut [f32], frames: usize, ctx: &RenderCtx) {
+        let Ok(mut guard) = self.proc.try_lock() else { return };
+        let st = &mut *guard;
+        set_thread_process_level(ProcessLevel::Realtime);
+        st.due.take(&self.inbox);
+        let mut done = 0;
+        while done < frames {
+            let n = (frames - done).min(BLOCK_SIZE);
+            let at = ctx.start + done as u64;
+            let mut block = std::mem::take(&mut st.block);
+            block.clear();
+            st.due.split(at, at + n as u64, MAX_EVENTS, |off, e| block.push((off.min(n as u32 - 1) as i32, e)));
+            let chunk = &mut io[done * 2..(done + n) * 2];
+            self.process_block_io(st, n, &block, None, Some(chunk));
+            st.block = block;
+            for i in 0..n {
+                let (l, r) = Self::stereo_at(st, i);
+                chunk[i * 2] = l;
+                chunk[i * 2 + 1] = r;
+            }
+            done += n;
         }
     }
     /// VST3 has no all-notes-off message: drop waiting notes, release every key.

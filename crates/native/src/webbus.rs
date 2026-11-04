@@ -6,7 +6,11 @@
 //! Wire format (little endian), one binary message per chunk:
 //!   u32 magic "FLSB", u32 kind (1 = audio), u32 sample rate, u32 frames,
 //!   u64 first frame (the audio context's frame counter), u32 flags
-//!   (1 = silent: no samples follow), u32 reserved, then frames × 2 f32.
+//!   (1 = silent: no samples follow), u32 bus, then frames × 2 f32.
+//!
+//! Bus 0 is the UI's master mix. Other buses carry single mixer inserts the
+//! engine processes itself (plugin effects); they are read in lockstep with
+//! bus 0 — same frames, same resampling — so they can't drift apart.
 //!
 //! The context's clock isn't the engine's, so the reader resamples by a ratio
 //! steered to hold the buffer at its target fill (a few hundred ppm at most —
@@ -33,10 +37,11 @@ const JITTER_MARGIN: f64 = 0.003;
 const START_JITTER: f64 = 0.015;
 /// One-second windows of arrival gaps remembered.
 const GAP_WINDOWS: usize = 8;
+/// Bus ids 0..MAX_BUSES (0 = master).
+pub const MAX_BUSES: usize = 128;
 
-pub struct WebBus {
-    pub port: u16,
-    pub token: String,
+/// One stream's samples, indexed by the context's frame number.
+struct Ring {
     ring: Box<[AtomicU32]>,
     /// Web frame after the last one written.
     write: AtomicU64,
@@ -45,6 +50,73 @@ pub struct WebBus {
     /// Bumped whenever the stream restarts, so the reader re-primes.
     epoch: AtomicU32,
     reset_pending: AtomicBool,
+}
+
+impl Ring {
+    fn new() -> Ring {
+        Ring {
+            ring: (0..CAP * 2).map(|_| AtomicU32::new(0)).collect(),
+            write: AtomicU64::new(0),
+            origin: AtomicU64::new(0),
+            epoch: AtomicU32::new(0),
+            reset_pending: AtomicBool::new(true),
+        }
+    }
+
+    #[inline]
+    fn sample(&self, frame: u64, ch: usize) -> f32 {
+        f32::from_bits(self.ring[(frame as usize % CAP) * 2 + ch].load(Relaxed))
+    }
+
+    fn write_frames(&self, start: u64, frames: usize, data: Option<&[u8]>) {
+        let mut w = self.write.load(Relaxed);
+        let gap_ok = start > w && start - w < (CAP / 4) as u64;
+        if self.reset_pending.swap(false, SeqCst) || (start != w && !gap_ok) {
+            // A new stream (or the context restarted / jumped): start over here.
+            self.origin.store(start, SeqCst);
+            w = start;
+            self.write.store(w, SeqCst);
+            self.epoch.fetch_add(1, SeqCst);
+        }
+        // A small gap (a dropped message): keep time with silence.
+        while w < start {
+            let i = (w as usize % CAP) * 2;
+            self.ring[i].store(0, Relaxed);
+            self.ring[i + 1].store(0, Relaxed);
+            w += 1;
+        }
+        for f in 0..frames {
+            let i = ((start as usize + f) % CAP) * 2;
+            let (l, r) = match data {
+                Some(d) => (u32::from_le_bytes(d[f * 8..f * 8 + 4].try_into().unwrap()), u32::from_le_bytes(d[f * 8 + 4..f * 8 + 8].try_into().unwrap())),
+                None => (0, 0),
+            };
+            self.ring[i].store(l, Relaxed);
+            self.ring[i + 1].store(r, Relaxed);
+        }
+        self.write.store(start + frames as u64, Release);
+    }
+
+    /// Add `frames` read from `pos`, advancing by `ratio` per output frame.
+    fn read_into(&self, out: &mut [f32], frames: usize, pos: f64, ratio: f64) {
+        let mut p = pos;
+        for i in 0..frames {
+            let ip = p.floor();
+            let t = (p - ip) as f32;
+            let i0 = ip as u64;
+            for c in 0..2 {
+                let (y0, y1, y2, y3) = (self.sample(i0.wrapping_sub(1), c), self.sample(i0, c), self.sample(i0 + 1, c), self.sample(i0 + 2, c));
+                out[i * 2 + c] += hermite(y0, y1, y2, y3, t);
+            }
+            p += ratio;
+        }
+    }
+}
+
+pub struct WebBus {
+    pub port: u16,
+    pub token: String,
+    rings: Vec<arc_swap::ArcSwapOption<Ring>>,
     rate: AtomicU32,
     connected: AtomicBool,
     conn: AtomicU64,
@@ -102,11 +174,7 @@ impl WebBus {
         let bus = Arc::new(WebBus {
             port: listener.local_addr()?.port(),
             token: random_token(),
-            ring: (0..CAP * 2).map(|_| AtomicU32::new(0)).collect(),
-            write: AtomicU64::new(0),
-            origin: AtomicU64::new(0),
-            epoch: AtomicU32::new(0),
-            reset_pending: AtomicBool::new(true),
+            rings: (0..MAX_BUSES).map(|i| arc_swap::ArcSwapOption::new((i == 0).then(|| Arc::new(Ring::new())))).collect(),
             rate: AtomicU32::new(0),
             connected: AtomicBool::new(false),
             conn: AtomicU64::new(0),
@@ -153,7 +221,11 @@ impl WebBus {
         self.jitter_us.store(0, SeqCst);
         // The newest connection wins (a reloaded UI reconnects before the old socket times out).
         let me = self.conn.fetch_add(1, SeqCst) + 1;
-        self.reset_pending.store(true, SeqCst);
+        for r in self.rings.iter() {
+            if let Some(r) = r.load().as_ref() {
+                r.reset_pending.store(true, SeqCst);
+            }
+        }
         self.connected.store(true, SeqCst);
         crate::log::write("web bus: UI audio connected");
         while self.conn.load(SeqCst) == me {
@@ -199,58 +271,41 @@ impl WebBus {
         let frames = u32_at(12) as usize;
         let start = u64::from_le_bytes(b[16..24].try_into().unwrap());
         let silent = u32_at(24) & FLAG_SILENT != 0;
-        if frames == 0 || frames > CAP / 4 || (!silent && b.len() < HEADER + frames * 8) {
+        let bus = u32_at(28) as usize;
+        if frames == 0 || frames > CAP / 4 || bus >= MAX_BUSES || (!silent && b.len() < HEADER + frames * 8) {
             return;
         }
-        self.write_frames(rate, start, frames, if silent { None } else { Some(&b[HEADER..HEADER + frames * 8]) });
-    }
-
-    fn write_frames(&self, rate: u32, start: u64, frames: usize, data: Option<&[u8]>) {
         self.rate.store(rate, Relaxed);
-        let mut w = self.write.load(Relaxed);
-        let gap_ok = start > w && start - w < (CAP / 4) as u64;
-        if self.reset_pending.swap(false, SeqCst) || (start != w && !gap_ok) {
-            // A new stream (or the context restarted / jumped): start over here.
-            self.origin.store(start, SeqCst);
-            w = start;
-            self.write.store(w, SeqCst);
-            self.epoch.fetch_add(1, SeqCst);
+        let slot = &self.rings[bus];
+        if slot.load().is_none() {
+            slot.store(Some(Arc::new(Ring::new())));
+            crate::log::write(&format!("web bus: bus {bus} started"));
         }
-        // A small gap (a dropped message): keep time with silence.
-        while w < start {
-            let i = (w as usize % CAP) * 2;
-            self.ring[i].store(0, Relaxed);
-            self.ring[i + 1].store(0, Relaxed);
-            w += 1;
+        if let Some(ring) = slot.load().as_ref() {
+            ring.write_frames(start, frames, if silent { None } else { Some(&b[HEADER..HEADER + frames * 8]) });
         }
-        for f in 0..frames {
-            let i = ((start as usize + f) % CAP) * 2;
-            let (l, r) = match data {
-                Some(d) => (u32::from_le_bytes(d[f * 8..f * 8 + 4].try_into().unwrap()), u32::from_le_bytes(d[f * 8 + 4..f * 8 + 8].try_into().unwrap())),
-                None => (0, 0),
-            };
-            self.ring[i].store(l, Relaxed);
-            self.ring[i + 1].store(r, Relaxed);
-        }
-        self.write.store(start + frames as u64, Release);
     }
 
-    #[inline]
-    fn sample(&self, frame: u64, ch: usize) -> f32 {
-        f32::from_bits(self.ring[(frame as usize % CAP) * 2 + ch].load(Relaxed))
+    /// Whether a bus has ever carried audio.
+    pub fn has_bus(&self, bus: usize) -> bool {
+        bus < MAX_BUSES && self.rings[bus].load().is_some()
     }
 
-    /// Add the next `frames` (at the engine's rate) into `out`. Runs on the
-    /// audio thread: no locks held, no allocation.
-    pub fn read_add(&self, r: &mut BusReader, out: &mut [f32], frames: usize, engine_rate: f32, engine_start: u64) {
+    /// Add the next `frames` of the master bus (at the engine's rate) into
+    /// `out`. Returns where it read (start position and step, in web frames)
+    /// so the insert buses can be read at the same places. Audio thread: no
+    /// locks held, no allocation.
+    pub fn read_add(&self, r: &mut BusReader, out: &mut [f32], frames: usize, engine_rate: f32, engine_start: u64) -> Option<(f64, f64)> {
         let web_rate = self.rate.load(Relaxed) as f64;
+        let ring_guard = self.rings[0].load();
+        let Some(ring) = ring_guard.as_ref() else { return None };
         if !self.connected.load(Relaxed) || web_rate <= 0.0 || frames == 0 {
             r.primed = false;
-            return;
+            return None;
         }
         let nominal = web_rate / engine_rate as f64;
-        let w = self.write.load(Acquire) as f64;
-        let epoch = self.epoch.load(Acquire);
+        let w = ring.write.load(Acquire) as f64;
+        let epoch = ring.epoch.load(Acquire);
         if epoch != r.epoch {
             r.epoch = epoch;
             r.primed = false;
@@ -262,8 +317,8 @@ impl WebBus {
         let target = need + (jitter + r.extra).clamp(MIN_JITTER, MAX_JITTER) * web_rate;
         self.target_frames.store(target as u32, Relaxed);
         if !r.primed {
-            if w - (self.origin.load(Acquire) as f64) < target {
-                return; // still filling
+            if w - (ring.origin.load(Acquire) as f64) < target {
+                return None; // still filling
             }
             r.pos = w - target;
             r.fill_avg = target;
@@ -286,7 +341,7 @@ impl WebBus {
             }
             r.last_underrun = Some(engine_start);
             r.calm_frames = 0;
-            return;
+            return None;
         }
         // Steer: a buffer 1 ms over target plays ~250 ppm faster until it's back.
         let alpha = (frames as f64 / engine_rate as f64 / 0.5).min(1.0);
@@ -296,23 +351,32 @@ impl WebBus {
         if let Ok(mut m) = self.map.try_lock() {
             *m = Map { engine: engine_start, web: r.pos, ratio, valid: true };
         }
-        let mut p = r.pos;
-        for i in 0..frames {
-            let ip = p.floor();
-            let t = (p - ip) as f32;
-            let i0 = ip as u64;
-            for c in 0..2 {
-                let (y0, y1, y2, y3) = (self.sample(i0.wrapping_sub(1), c), self.sample(i0, c), self.sample(i0 + 1, c), self.sample(i0 + 2, c));
-                out[i * 2 + c] += hermite(y0, y1, y2, y3, t);
-            }
-            p += ratio;
-        }
-        r.pos = p;
+        let start = r.pos;
+        ring.read_into(out, frames, start, ratio);
+        r.pos = start + frames as f64 * ratio;
         r.calm_frames += frames;
         if r.calm_frames > engine_rate as usize * 15 {
             r.calm_frames = 0;
             r.extra = (r.extra - 0.001).max(0.0);
         }
+        Some((start, ratio))
+    }
+
+    /// Add `frames` of an insert bus read at the master's position (from
+    /// `read_add`). Silence if that bus has nothing there (yet). Audio thread.
+    pub fn read_bus_at(&self, bus: usize, at: (f64, f64), out: &mut [f32], frames: usize) {
+        if bus == 0 || bus >= MAX_BUSES {
+            return;
+        }
+        let guard = self.rings[bus].load();
+        let Some(ring) = guard.as_ref() else { return };
+        let (pos, ratio) = at;
+        let w = ring.write.load(Acquire) as f64;
+        let end = pos + frames as f64 * ratio + 3.0;
+        if w < end || w - pos > CAP as f64 * 0.5 || pos < ring.origin.load(Acquire) as f64 {
+            return;
+        }
+        ring.read_into(out, frames, pos, ratio);
     }
 
     /// The engine frame at which the UI's frame `web` is heard (`None` until

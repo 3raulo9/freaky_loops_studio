@@ -29,6 +29,9 @@ pub trait Hosted: crate::engine::AudioSource {
     fn queue_midi(&self, at: u64, data: [u8; 3]);
     /// Silence: drop notes still waiting to start, release every voice.
     fn all_notes_off(&self);
+    /// Run as an effect: `io` (interleaved stereo) goes in, the plugin's
+    /// output replaces it. Audio thread; passes audio through if busy.
+    fn process_effect(&self, io: &mut [f32], frames: usize, ctx: &crate::engine::RenderCtx);
     /// Peak output level since the last call (for UI meters).
     fn take_peak(&self) -> f32;
     fn render_offline(&self, notes: &[RenderNote], sample_rate: f32, total_frames: usize, live_rate: f32) -> Vec<f32>;
@@ -275,8 +278,37 @@ impl Plugin {
         f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
     }
 
+    /// As an effect: process `io` in place (see `Hosted::process_effect`).
+    pub fn process_effect(&self, io: &mut [f32], frames: usize, ctx: &crate::engine::RenderCtx) {
+        let Ok(mut guard) = self.proc.try_lock() else { return };
+        let st = &mut *guard;
+        set_thread_process_level(ProcessLevel::Realtime);
+        st.due.take(&self.inbox);
+        let mut done = 0;
+        while done < frames {
+            let n = (frames - done).min(BLOCK_SIZE);
+            let at = ctx.start + done as u64;
+            st.block.clear();
+            let (due, block) = (&mut st.due, &mut st.block);
+            due.split(at, at + n as u64, MAX_BLOCK_EVENTS, |off, d| block.push((off as i32, d)));
+            let chunk = &mut io[done * 2..(done + n) * 2];
+            self.process_block_io(st, n, Some(chunk));
+            let (l_buf, r_buf) = (&st.outs[0], st.outs.get(1).unwrap_or(&st.outs[0]));
+            for i in 0..n {
+                chunk[i * 2] = l_buf[i];
+                chunk[i * 2 + 1] = r_buf[i];
+            }
+            done += n;
+        }
+    }
+
     /// Process one block with the events in `st.block`.
     fn process_block(&self, st: &mut ProcState, frames: usize) {
+        self.process_block_io(st, frames, None)
+    }
+
+    /// One block; `input` (interleaved stereo) feeds the plugin's inputs.
+    fn process_block_io(&self, st: &mut ProcState, frames: usize, input: Option<&[f32]>) {
         let n = st.block.len().min(MAX_BLOCK_EVENTS);
         for i in 0..n {
             let (delta, data) = st.block[i];
@@ -297,6 +329,22 @@ impl Plugin {
         }
         for buf in st.ins.iter_mut() {
             buf[..frames].fill(0.0);
+        }
+        if let Some(inp) = input {
+            match st.ins.len() {
+                0 => {}
+                1 => {
+                    for i in 0..frames {
+                        st.ins[0][i] = (inp[i * 2] + inp[i * 2 + 1]) * 0.5;
+                    }
+                }
+                _ => {
+                    for i in 0..frames {
+                        st.ins[0][i] = inp[i * 2];
+                        st.ins[1][i] = inp[i * 2 + 1];
+                    }
+                }
+            }
         }
         unsafe {
             let e = &*self.effect;
@@ -515,6 +563,9 @@ impl Hosted for Plugin {
     }
     fn queue_midi(&self, at: u64, data: [u8; 3]) {
         Plugin::queue_midi(self, at, data)
+    }
+    fn process_effect(&self, io: &mut [f32], frames: usize, ctx: &crate::engine::RenderCtx) {
+        Plugin::process_effect(self, io, frames, ctx)
     }
     fn all_notes_off(&self) {
         Plugin::all_notes_off(self)

@@ -1903,6 +1903,7 @@ export function useStudio() {
   let audioCtx        = null
   let nativeBus       = null   // desktop: the context's output joins the native engine
   let _hostAudioNow   = null   // the engine's current { rate, sink } (it can change after startup)
+  const nativeBusLive = ref(false)
   let masterGain      = null
   let analyserNode    = null
   let outputGain      = null   // terminal Main Volume stage (global output trim)
@@ -3898,7 +3899,14 @@ export function useStudio() {
         ? { latencyHint: 0.001, sampleRate: hostAudio.rate || undefined, ...(hostAudio.sink === 'none' ? { sinkId: { type: 'none' } } : {}) }
         : undefined
       audioCtx = new (window.AudioContext || window.webkitAudioContext)(ctxOpts)
-      if (hostAudio?.port) nativeBus = startNativeBus(audioCtx, hostAudio)
+      if (hostAudio?.port) {
+        nativeBus = startNativeBus(audioCtx, hostAudio)
+        nativeBus.onChange(live => {
+          nativeBusLive.value = live
+          // Inserts with plugin effects run in the engine only while the bus is up.
+          mixerTracks.slice(1).forEach((mt, i) => _connectInsertOutput(mixerInsertNodes[i], mt))
+        })
+      }
       masterGain = audioCtx.createGain()
       masterGain.gain.value = mixerTracks[0].volume
       analyserNode = audioCtx.createAnalyser()
@@ -3987,9 +3995,29 @@ export function useStudio() {
   }
 
   // A track feeds the master, or another insert ("route to"), e.g. a drum bus.
+  // A mixer insert holding plugin effects runs in the native engine (desktop,
+  // while the bus is up): its audio leaves here after the built-in effects,
+  // before the fader, on its own bus; the engine adds the plugin channels
+  // routed to it, runs the plugins, then the fader and pan. Bus id = index.
+  function _nativeInsertBus(mt) {
+    if (!nativeBusLive.value || !mt || mt.kind !== 'insert') return 0
+    const i = mixerTracks.indexOf(mt)
+    return i >= 1 && i < 128 && (mt.fxSlots ?? []).some(f => f?.type === 'vst' && f.vstPath) ? i : 0
+  }
+
   function _connectInsertOutput(node, mt) {
     if (!node) return
+    const busId = _nativeInsertBus(mt)
+    if (node._tapBus && node._tapBus !== busId) {
+      try { node.duckGain.disconnect(node._tap) } catch (_) {}
+      node._tap = null; node._tapBus = 0
+    }
     try { node.analyser.disconnect() } catch (_) {}
+    if (busId) {
+      // The built-in fader / pan path only drives this insert's meter now.
+      if (!node._tap) { node._tap = nativeBus.tap(busId); node._tapBus = busId; node.duckGain.connect(node._tap) }
+      return
+    }
     const tIdx = mt.output ? mixerTracks.findIndex(t => t.id === mt.output) : -1
     const target = tIdx >= 1 ? mixerInsertNodes[tIdx - 1] : null
     node.analyser.connect(target && target !== node ? target.eqLow : masterGain)
@@ -6449,17 +6477,77 @@ export function useStudio() {
     const master = mixerTracks[0]
     const mt = mixerTracks[ch.mixerTrack || 0]
     let g = (ch.muted || (soloOn && !ch._soloed)) ? 0 : (ch.volume ?? 0.78)
-    if (mt && mt !== master) g *= mt.muted ? 0 : (mt.volume ?? 1)
-    g *= master?.volume ?? 1
-    g *= volToGain(masterVolume.value)
-    return { gain: +g.toFixed(4), pan: +(ch.pan ?? 0).toFixed(3) }
+    // Routed to an insert the engine runs: that insert applies its own fader and the master.
+    const dest = _nativeInsertBus(mt)
+    if (!dest) {
+      if (mt && mt !== master) g *= mt.muted ? 0 : (mt.volume ?? 1)
+      g *= master?.volume ?? 1
+      g *= volToGain(masterVolume.value)
+    }
+    return { gain: +g.toFixed(4), pan: +(ch.pan ?? 0).toFixed(3), dest }
   }
   if (isDesktop) {
     watch(() => channels.filter(c => c.type === 'vst').map(c => [c.id, _vstMixOf(c)]), (list, prev) => {
       const old = new Map(prev ?? [])
       for (const [id, m] of list) {
         const o = old.get(id)
-        if (!o || o.gain !== m.gain || o.pan !== m.pan) sendToHost('vstMix', { id, ...m })
+        if (!o || o.gain !== m.gain || o.pan !== m.pan || o.dest !== m.dest) sendToHost('vstMix', { id, ...m })
+      }
+    })
+  }
+
+  // Inserts the engine runs: effect chain (uid, plugin, state, on/off), and
+  // the insert's fader × master × main volume and pan. A plugin's state goes
+  // with its first appearance only (the host keeps the loaded instance).
+  const _sentInserts = new Map()     // bus id → { fxKey, mixKey }
+  const _sentFx = new Set()          // effect uids the host has loaded
+  function _syncNativeInserts() {
+    // An insert that gained or lost its plugin effects changes where its audio goes.
+    if (audioCtx) mixerTracks.slice(1).forEach((mt, i) => {
+      const node = mixerInsertNodes[i]
+      if (node && (node._tapBus || 0) !== _nativeInsertBus(mt)) _connectInsertOutput(node, mt)
+    })
+    const now = new Map()
+    const master = mixerTracks[0]
+    for (const mt of mixerTracks) {
+      const busId = _nativeInsertBus(mt)
+      if (!busId) continue
+      const fx = (mt.fxSlots ?? []).filter(f => f?.type === 'vst' && f.vstPath)
+      for (const f of fx) if (!f.uid) f.uid = 'fx' + Math.random().toString(36).slice(2, 10)
+      const gain = (mt.muted ? 0 : (mt.volume ?? 1)) * (master?.volume ?? 1) * volToGain(masterVolume.value)
+      const fxKey = JSON.stringify(fx.map(f => [f.uid, f.vstPath, f.enabled !== false, f.vstClassId ?? null]))
+      const mixKey = `${gain.toFixed(4)}|${(mt.pan ?? 0).toFixed(3)}`
+      now.set(busId, { fxKey, mixKey })
+      const was = _sentInserts.get(busId)
+      if (was && was.fxKey === fxKey && was.mixKey === mixKey) continue
+      sendToHost('insertSet', {
+        insert: busId, gain: +gain.toFixed(4), pan: +(mt.pan ?? 0).toFixed(3),
+        fx: fx.map(f => ({
+          uid: f.uid, path: f.vstPath, classId: f.vstClassId, enabled: f.enabled !== false,
+          state: _sentFx.has(f.uid) ? undefined : f.vstState,
+        })),
+      })
+      for (const f of fx) _sentFx.add(f.uid)
+    }
+    for (const busId of _sentInserts.keys()) {
+      if (!now.has(busId)) {
+        sendToHost('insertRemove', { insert: busId })
+        nativeBus?.releaseTap(busId)
+      }
+    }
+    _sentInserts.clear()
+    for (const [k, v] of now) _sentInserts.set(k, v)
+  }
+  if (isDesktop) {
+    watch(() => [nativeBusLive.value, masterVolume.value, ...mixerTracks.map(mt => [mt.volume, mt.pan, mt.muted, mt.kind,
+      (mt.fxSlots ?? []).map(f => f && [f.type, f.vstPath, f.enabled, f.uid])])], _syncNativeInserts, { deep: true })
+    onHostMessage(msg => {
+      if (msg.type !== 'insertSet') return
+      const mt = mixerTracks[msg.payload?.insert]
+      for (const r of msg.payload?.fx ?? []) {
+        const slot = mt?.fxSlots?.find(f => f?.uid === r.uid)
+        if (slot) { slot._error = r.error ?? null; if (r.name) slot.label = slot.label || r.name }
+        if (r.error) _sentFx.delete(r.uid)
       }
     })
   }
@@ -7218,6 +7306,12 @@ export function useStudio() {
       for (const ch of channels) {
         if (ch.type === 'vst' && ch.vstPath) vstStates[ch.id] = (await getVstState(ch.id)) ?? ch.vstState
       }
+      // Plugin effects on inserts keep their state on the slot.
+      for (const mt of mixerTracks) {
+        for (const f of mt.fxSlots ?? []) {
+          if (f?.type === 'vst' && f.uid && _sentFx.has(f.uid)) f.vstState = (await getVstState(f.uid)) ?? f.vstState
+        }
+      }
     }
     return vstStates
   }
@@ -7523,7 +7617,11 @@ export function useStudio() {
         if (c.sample) samples.add(c.sample)
         for (const sp of c.plugin?.paths ?? []) if (AUDIO_EXT.test(sp)) samples.add(sp)
       }
-      const vsts = P.channels.filter(c => c.plugin?.vst).map(c => c.plugin.vst)
+      const vsts = [
+        ...P.channels.filter(c => c.plugin?.vst).map(c => c.plugin.vst),
+        // Plugin effects on mixer inserts.
+        ...(P.inserts ?? []).flatMap(t => (t.slots ?? []).map(sl => sl.plugin?.vst).filter(Boolean)),
+      ]
       // Built-in generators of the original app, by name (a VST build may be installed).
       const natives = [...new Set(P.channels
         .filter(c => c.kind === 'generator' && !c.plugin?.vst && c.plugin?.internal && !(c.plugin.paths ?? []).length)
@@ -8168,7 +8266,8 @@ export function useStudio() {
     captureSessionScene, launchSessionSlot, launchSessionScene, stopSessionTrack, stopAllSessionClips,
     sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist, sessionFollow, cycleSceneLoops,
     // Project save / load / autosave / MIDI export
-    savePatternProject, patternProjectBytes, flpSourceName, engineStats,
+    savePatternProject, patternProjectBytes, flpSourceName, engineStats, nativeBusLive,
+    _debugInserts: () => mixerInsertNodes.map((n, i) => ({ i: i + 1, tapBus: n?._tapBus ?? 0, want: _nativeInsertBus(mixerTracks[i + 1]) })).filter(x => x.tapBus || x.want),
     saveProject, loadProjectFile, newProject, importPatternProject, importProjectFiles, importState, locateMissingSamples, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
     projectPath, openProjectNative,
     // Render / export: faithful offline render (+ real-time capture for plugins,
