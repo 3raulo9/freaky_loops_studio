@@ -190,6 +190,21 @@ export function loadSf2PresetNative(path, bank = 0, program = 0) {
   return request('sf2Preset', 'sf2Preset', { path, bank, program }, 120000)
 }
 
+/** Browser: start folders `{ roots: [{ name, path }] }`. */
+export function browseRootsNative() {
+  return request('browseRoots', 'browseRoots', {})
+}
+
+/** Browser: one folder's sub-folders and audio files `{ dirs, files: [{ name, path, size }] }`. */
+export function listDirNative(path) {
+  return request('listDir', 'listDir', { path }, 30000)
+}
+
+/** Browser: installed plugins `{ plugins: [{ name, path, format, bits }] }`. */
+export function listPluginsNative() {
+  return request('listPlugins', 'listPlugins', {}, 120000)
+}
+
 /** The ASIO driver's own settings window. */
 export function openAsioPanel() {
   sendToHost('asioPanel', {})

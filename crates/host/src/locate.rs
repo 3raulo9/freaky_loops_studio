@@ -548,3 +548,83 @@ mod machine_tests {
         println!("total {:.2}s", t.elapsed().as_secs_f32());
     }
 }
+
+// ── Browser ──────────────────────────────────────────────────────────────────
+
+/// Folders the browser starts from: the user's own, the ones they pointed at,
+/// and other drives.
+pub fn browse_roots() -> Value {
+    let mut out = Vec::new();
+    if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+        for sub in ["Desktop", "Documents", "Downloads", "Music"] {
+            let p = home.join(sub);
+            if p.is_dir() {
+                out.push(json!({ "name": sub, "path": p.to_string_lossy() }));
+            }
+        }
+    }
+    for extra in crate::files::setting("searchFolders").and_then(|v| v.as_array().cloned()).unwrap_or_default() {
+        if let Some(s) = extra.as_str().filter(|s| Path::new(s).is_dir()) {
+            let name = Path::new(s).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| s.to_string());
+            out.push(json!({ "name": name, "path": s }));
+        }
+    }
+    for letter in b'C'..=b'Z' {
+        let d = format!("{}:\\", letter as char);
+        if Path::new(&d).is_dir() {
+            out.push(json!({ "name": format!("{}:", letter as char), "path": d }));
+        }
+    }
+    json!({ "roots": out })
+}
+
+/// One folder for the browser: sub-folders and the audio files in it. The
+/// files become readable by the UI (preview, drag onto a channel).
+pub fn list_dir(path: &str) -> Value {
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(path) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') || name.starts_with('$') {
+                continue;
+            }
+            match e.file_type() {
+                Ok(t) if t.is_dir() => dirs.push(name),
+                Ok(t) if t.is_file() && wanted(&e.path()) && !PLUGIN.iter().any(|x| name.to_lowercase().ends_with(x)) => {
+                    allow(&e.path());
+                    files.push(json!({ "name": name, "path": e.path().to_string_lossy(), "size": e.metadata().map(|m| m.len()).unwrap_or(0) }));
+                }
+                _ => {}
+            }
+        }
+    }
+    dirs.sort_by_key(|d| d.to_lowercase());
+    files.sort_by_key(|f| f["name"].as_str().unwrap_or("").to_lowercase());
+    json!({ "path": path, "dirs": dirs, "files": files })
+}
+
+/// Installed plugins (from the file index, plugin install folders only).
+pub fn list_plugins() -> Value {
+    let (idx, _) = index(false);
+    let mut seen = HashSet::new();
+    let mut out: Vec<Value> = idx
+        .by_name
+        .iter()
+        .filter(|(n, _)| n.ends_with(".dll") || n.ends_with(".vst3"))
+        .flat_map(|(_, ps)| ps.iter())
+        .filter(|p| in_install_folder(p) && seen.insert(norm(p)) && is_plugin(p))
+        .map(|p| {
+            let arch = plugin_arch(p);
+            let name = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            json!({
+                "name": name, "path": p.to_string_lossy(),
+                "format": if is_vst3_name(p) { "VST3" } else { "VST" },
+                "bits": if arch == fls_native::pe::Arch::X86 { 32 } else { 64 },
+            })
+        })
+        .filter(|v| !(v["format"] == "VST3" && v["bits"] == 32))
+        .collect();
+    out.sort_by_key(|v| v["name"].as_str().unwrap_or("").to_lowercase());
+    json!({ "plugins": out })
+}

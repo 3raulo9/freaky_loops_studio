@@ -315,6 +315,28 @@ impl App {
                     let _ = proxy.send_event(UserEvent::Reply { kind: "sf2Preset", payload });
                 });
             }
+            // Browser: start folders, one folder's contents, installed plugins.
+            "browseRoots" => {
+                let mut reply = locate::browse_roots();
+                reply["reqId"] = p.get("reqId").cloned().unwrap_or(Value::Null);
+                self.send("browseRoots", reply);
+            }
+            "listDir" => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let mut reply = locate::list_dir(str_of(&p, "path").unwrap_or(""));
+                    reply["reqId"] = p.get("reqId").cloned().unwrap_or(Value::Null);
+                    let _ = proxy.send_event(UserEvent::Reply { kind: "listDir", payload: reply });
+                });
+            }
+            "listPlugins" => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let mut reply = locate::list_plugins();
+                    reply["reqId"] = p.get("reqId").cloned().unwrap_or(Value::Null);
+                    let _ = proxy.send_event(UserEvent::Reply { kind: "listPlugins", payload: reply });
+                });
+            }
             "pickFolder" => {
                 let reply = files::pick_folder(&self.window, &p);
                 self.send("folderPicked", reply);

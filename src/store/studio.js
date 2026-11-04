@@ -1992,6 +1992,40 @@ export function useStudio() {
     previewingId.value = asset.id
   }
 
+  // ── Browser files (desktop) ──────────────────────────────────────────────────
+  // A click previews a file from disk; dragging it onto the rack makes (or
+  // reloads) a sampler channel. `browserFile` reads the file when needed.
+  async function previewFile(path) {
+    _ensurePreview()
+    stopPreview()
+    const id = 'file:' + path
+    previewingId.value = id
+    try {
+      const buf = await decodeSampleFile(audioCtx, await (await fetch(hostFileUrl(path))).arrayBuffer())
+      if (previewingId.value !== id) return
+      const src = audioCtx.createBufferSource()
+      src.buffer = buf
+      src.connect(previewGain)
+      src.onended = () => { if (previewSrc === src) { previewSrc = null; previewingId.value = null } }
+      src.start()
+      previewSrc = src
+    } catch (e) {
+      console.warn('[browser] could not preview', path, e)
+      if (previewingId.value === id) previewingId.value = null
+    }
+  }
+  function browserFile(path) {
+    return { name: path.split(/[\\/]/).pop(), arrayBuffer: async () => (await fetch(hostFileUrl(path))).arrayBuffer() }
+  }
+  // An installed plugin from the browser, as a new channel.
+  function addVstFromPath(path, name) {
+    if (!isDesktop || !path) return null
+    const ch = addVstChannel(name || 'VST', path)
+    ch._vstLoading = true
+    sendToHost('loadVst', { id: ch.id, path })
+    return ch
+  }
+
   // Play function for a dropped-sample channel: schedules the rendered buffer.
   function makeSampleFn(spec) {
     const key = 'spec:' + JSON.stringify(spec)
@@ -7006,6 +7040,7 @@ export function useStudio() {
   function replaceChannelInstrument(channelId, spec) {
     const ch = channels.find(c => c.id === channelId)
     if (!ch) return
+    if (spec.t === 'audiofile' && spec.file) { loadAudioFileForChannel(channelId, spec.file); return }
     initAudio()
     configureChannelInstrument(ch, spec)
     rebuildGains()
@@ -8366,6 +8401,7 @@ export function useStudio() {
     sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist, sessionFollow, cycleSceneLoops,
     // Project save / load / autosave / MIDI export
     savePatternProject, patternProjectBytes, flpSourceName, engineStats, nativeBusLive, nativeMeterPeak,
+    previewFile, browserFile, addVstFromPath,
     _debugInserts: () => mixerInsertNodes.map((n, i) => ({ i: i + 1, tapBus: n?._tapBus ?? 0, want: _nativeInsertBus(mixerTracks[i + 1]) })).filter(x => x.tapBus || x.want),
     saveProject, loadProjectFile, newProject, importPatternProject, importProjectFiles, importState, locateMissingSamples, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
     projectPath, openProjectNative,

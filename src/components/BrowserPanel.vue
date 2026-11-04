@@ -30,12 +30,30 @@
             :class="{ on: row.active, folder: row.kind === 'folder', draggable: row.kind === 'asset' }"
             :style="{ height: ROW_H + 'px', paddingLeft: (7 + row.depth * 13) + 'px' }"
             @click="onRowClick(row)"
-            @mousedown="row.kind === 'asset' && startAssetDrag(row.asset, $event)"
+            @mousedown="row.kind === 'asset' ? startAssetDrag(row.asset, $event) : row.kind === 'file' && startFileDrag(row, $event)"
           >
             <template v-if="row.kind === 'folder'">
               <span class="browser-caret">{{ expanded.has(row.id) ? '▾' : '▸' }}</span>
               <span class="browser-name">{{ row.name }}</span>
               <span class="browser-fcount">{{ row.count }}</span>
+            </template>
+
+            <template v-else-if="row.kind === 'dir'">
+              <span class="browser-caret">{{ expanded.has(row.id) ? '▾' : '▸' }}</span>
+              <span class="browser-name">{{ row.name }}</span>
+              <span v-if="dirs.get(row.path)?.loading" class="browser-fcount">…</span>
+            </template>
+
+            <template v-else-if="row.kind === 'file'">
+              <span class="browser-aico cat-file">♪</span>
+              <span class="browser-name" :title="row.path">{{ row.name }}</span>
+              <span class="browser-type">{{ previewingId === 'file:' + row.path ? '▶' : row.ext }}</span>
+            </template>
+
+            <template v-else-if="row.kind === 'plugin'">
+              <span class="browser-aico cat-plugin">◆</span>
+              <span class="browser-name" :title="row.item.path">{{ row.item.name }}</span>
+              <span class="browser-type">{{ row.item.format }}{{ row.item.bits === 32 ? ' 32' : '' }}</span>
             </template>
 
             <template v-else-if="row.kind === 'pattern' || row.kind === 'channel'">
@@ -62,9 +80,33 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../store/studio.js'
+import { isDesktop, browseRootsNative, listDirNative, listPluginsNative } from '../desktop/ipc.js'
 import { browserFolders, assetAt, getAsset, searchAssets, browserAssetCount } from '../browserLibrary.js'
 
-const { patterns, currentPatternId, channels, selectedChannelId, mainView, previewingId, previewAsset, browserOpen, startInstrumentDrag } = useStudio()
+const { patterns, currentPatternId, channels, selectedChannelId, mainView, previewingId, previewAsset, browserOpen, startInstrumentDrag,
+  previewFile, browserFile, addVstFromPath } = useStudio()
+
+// Desktop: installed plugins and the folders on disk, loaded when opened.
+const plugins = ref(null)            // null = not loaded yet
+const roots = ref(null)
+const dirs = reactive(new Map())     // path → { dirs, files, loading }
+async function loadPlugins() {
+  if (plugins.value) return
+  plugins.value = []
+  plugins.value = (await listPluginsNative())?.plugins ?? []
+}
+async function loadRoots() {
+  if (roots.value) return
+  roots.value = []
+  roots.value = (await browseRootsNative())?.roots ?? []
+}
+async function loadDir(path) {
+  if (dirs.has(path)) return
+  dirs.set(path, { dirs: [], files: [], loading: true })
+  const r = await listDirNative(path)
+  dirs.set(path, { dirs: r?.dirs ?? [], files: r?.files ?? [], loading: false })
+}
+const joinPath = (dir, name) => (dir.endsWith('\\') ? dir : dir + '\\') + name
 
 const ROW_H = 22
 const query = ref('')
@@ -74,8 +116,25 @@ const expanded = reactive(new Set())
 const topNodes = computed(() => ([
   { id: 'prj-patterns', name: 'Patterns', dyn: 'patterns', count: patterns.length },
   { id: 'prj-channels', name: 'Channels', dyn: 'channels', count: channels.length },
+  ...(isDesktop ? [
+    { id: 'sys-plugins', name: 'Plugins', dyn: 'plugins', count: plugins.value?.length ?? '' },
+    { id: 'sys-files', name: 'Files', dyn: 'files', count: '' },
+  ] : []),
   ...browserFolders.map(f => ({ id: f.id, name: f.name, count: f.count, folderRef: f })),
 ]))
+
+// A folder on disk and, when open, its contents.
+function pushDir(out, path, name, depth) {
+  const id = 'd:' + path
+  out.push({ key: id, kind: 'dir', depth, id, name, path })
+  if (!expanded.has(id)) return
+  const d = dirs.get(path)
+  if (!d) return
+  for (const sub of d.dirs) pushDir(out, joinPath(path, sub), sub, depth + 1)
+  for (const f of d.files) {
+    out.push({ key: 'f:' + f.path, kind: 'file', depth: depth + 1, name: f.name, path: f.path, ext: f.name.split('.').pop().toUpperCase(), active: previewingId.value === 'file:' + f.path })
+  }
+}
 
 const rows = computed(() => {
   const q = query.value.trim()
@@ -89,7 +148,11 @@ const rows = computed(() => {
   for (const node of topNodes.value) {
     out.push({ key: node.id, kind: 'folder', depth: 0, id: node.id, name: node.name, count: node.count, node })
     if (!expanded.has(node.id)) continue
-    if (node.dyn === 'patterns') {
+    if (node.dyn === 'plugins') {
+      for (const p of plugins.value ?? []) out.push({ key: 'pl:' + p.path, kind: 'plugin', depth: 1, item: p })
+    } else if (node.dyn === 'files') {
+      for (const r of roots.value ?? []) pushDir(out, r.path, r.name, 1)
+    } else if (node.dyn === 'patterns') {
       patterns.forEach((p, i) => out.push({ key: 'p' + p.id, kind: 'pattern', depth: 1, name: (i + 1) + '. ' + p.name, color: p.color, item: p, active: p.id === currentPatternId.value }))
     } else if (node.dyn === 'channels') {
       channels.forEach(ch => out.push({ key: 'c' + ch.id, kind: 'channel', depth: 1, name: ch.name, color: ch.color, item: ch, active: ch.id === selectedChannelId.value }))
@@ -127,6 +190,15 @@ onBeforeUnmount(() => { ro?.disconnect() })
 function onRowClick(row) {
   if (row.kind === 'folder') {
     expanded.has(row.id) ? expanded.delete(row.id) : expanded.add(row.id)
+    if (row.id === 'sys-plugins' && expanded.has(row.id)) loadPlugins()
+    if (row.id === 'sys-files' && expanded.has(row.id)) loadRoots()
+  } else if (row.kind === 'dir') {
+    expanded.has(row.id) ? expanded.delete(row.id) : expanded.add(row.id)
+    if (expanded.has(row.id)) loadDir(row.path)
+  } else if (row.kind === 'file') {
+    previewFile(row.path)
+  } else if (row.kind === 'plugin') {
+    addVstFromPath(row.item.path, row.item.name)
   } else if (row.kind === 'pattern') {
     currentPatternId.value = row.item.id
   } else if (row.kind === 'channel') {
@@ -142,6 +214,11 @@ function onRowClick(row) {
 // rack space). A plain click without dragging still previews the sample.
 function startAssetDrag(asset, e) {
   startInstrumentDrag({ t: 'sample', asset }, asset.name, asset.color || '#4ecdc4', e)
+}
+
+// A file from disk dragged onto the rack: a sampler channel (or that channel's new sample).
+function startFileDrag(row, e) {
+  startInstrumentDrag({ t: 'audiofile', file: browserFile(row.path) }, row.name, '#4ecdc4', e)
 }
 
 function wavePath(wave) {
