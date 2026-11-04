@@ -182,6 +182,14 @@ export function setAudioConfig(cfg) {
   return request('setAudioConfig', 'audioDevices', cfg, 30000)
 }
 
+/**
+ * A sound-font preset read by the host: { info: { name, bank, program, zones,
+ * samples }, url } (samples as one f32 file), or { error }.
+ */
+export function loadSf2PresetNative(path, bank = 0, program = 0) {
+  return request('sf2Preset', 'sf2Preset', { path, bank, program }, 120000)
+}
+
 /** The ASIO driver's own settings window. */
 export function openAsioPanel() {
   sendToHost('asioPanel', {})

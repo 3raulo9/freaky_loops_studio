@@ -264,6 +264,18 @@ export function mapPatternProject(P, env) {
       continue
     }
 
+    // Sound-font player: the font itself when it's on this machine (desktop).
+    const sf2Here = sf2 && env.desktop ? env.resolvePath?.(sf2) : null
+    if (sf2Here) {
+      const prog = clamp(pl.program ?? 0, 0, 127)
+      channels.push({
+        ...base, type: 'sf2', instrumentType: 'sf2',
+        params: { pitch: 60, sf2Path: sf2Here, sf2Bank: 0, sf2Program: prog },
+        knobs: [], fnKey: 'melodic', sustains: true,
+      })
+      report.plugins.push({ name: `${name} (${baseName(sf2)})`, status: 'sound font loaded', path: sf2Here })
+      continue
+    }
     if (sf2) {
       const prog = clamp(pl.program ?? 0, 0, 127)
       channels.push({

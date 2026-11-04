@@ -14,6 +14,7 @@ import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport,
          resolveAssetsNative, hostFileUrl, pickFolderNative } from '../desktop/ipc.js'
 import { createCustomSynthNode, makeCustomSynthPlayFn } from '../audio/customSynthPlugin.js'
 import { startNativeBus } from '../audio/nativeBus.js'
+import { makeSf2PlayFn } from '../audio/sf2Synth.js'
 import { createSubterraNode, makeSubterraPlayFn } from '../audio/subterraPlugin.js'
 import { playKick, playSnare, playHiHat, playClash } from '../audio/synths.js'
 import { parseMidi } from '../midi/midiParser.js'
@@ -5963,7 +5964,7 @@ export function useStudio() {
 
     // Continuous GM voices: loop-sustain the sample until note-off (node.stop runs
     // the ADSR release).
-    if (sustain && ch.sustains && ch.type === 'gm') {
+    if (sustain && ch.sustains && (ch.type === 'gm' || ch.type === 'sf2')) {
       const node = ch.fn(audioCtx, when, { ...ch.params, pitch: p, velocity, hold: true }, dest)
       if (node) {
         liveVoices.set(key, {
@@ -7678,7 +7679,7 @@ export function useStudio() {
       const samples = new Set()
       for (const c of P.channels) {
         if (c.sample) samples.add(c.sample)
-        for (const sp of c.plugin?.paths ?? []) if (AUDIO_EXT.test(sp)) samples.add(sp)
+        for (const sp of c.plugin?.paths ?? []) if (AUDIO_EXT.test(sp) || /\.sf2$/i.test(sp)) samples.add(sp)
       }
       const vsts = [
         ...P.channels.filter(c => c.plugin?.vst).map(c => c.plugin.vst),
@@ -7726,6 +7727,7 @@ export function useStudio() {
         desktop: isDesktop,
         resolveVst: v => vstHit.get(v),
         resolveNative: n => nativeHit.get(n),
+        resolvePath: stored => resolved.get(stored)?.path ?? null,
         lib: {
           fmPresets: FM_PRESETS, drumPresets: _DRUM_IMPORT, gmParams: makeGMParams, gmKnobs, gmColor: gmChannelColor, gmSustains,
           makeEffect, effectDefs: EFFECT_DEFS,
@@ -8036,6 +8038,8 @@ export function useStudio() {
       // it from the saved program number instead of the (meaningless) fnKey.
       fn:             ch.params?.gmProgram != null
                         ? makeGMPlayFn(ch.params.gmProgram)
+                        : ch.type === 'sf2'
+                          ? makeSf2PlayFn(ch.params)
                         : ch.type === 'vst'
                           ? makeVstPlayFn(ch.id)
                           : ch.type === 'sample' && ch.sampleSpec

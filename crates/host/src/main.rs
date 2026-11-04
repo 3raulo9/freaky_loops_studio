@@ -12,6 +12,7 @@ mod assets;
 mod bridge_client;
 mod files;
 mod locate;
+mod sf2;
 
 use base64::Engine as _;
 use bridge_client::BridgeClient;
@@ -286,6 +287,25 @@ impl App {
                     let mut reply = locate::resolve(&p);
                     reply["reqId"] = p.get("reqId").cloned().unwrap_or(Value::Null);
                     let _ = proxy.send_event(UserEvent::Reply { kind: "assetsResolved", payload: reply });
+                });
+            }
+            // A sound-font preset for the sound-font channel: zones as JSON, samples as
+            // a one-shot file. Read off the UI thread (a big font takes a moment).
+            "sf2Preset" => {
+                let proxy = self.proxy.clone();
+                let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
+                let path = str_of(&p, "path").unwrap_or("").to_string();
+                let bank = int_of(&p, "bank", 0).clamp(0, 16383) as u16;
+                let program = int_of(&p, "program", 0).clamp(0, 127) as u16;
+                std::thread::spawn(move || {
+                    let payload = match sf2::preset(&path, bank, program) {
+                        Ok((info, data)) => match bounce::write_pcm("sf2", &data) {
+                            Ok(file) => json!({ "reqId": req_id, "info": info, "url": render_url(&file) }),
+                            Err(e) => json!({ "reqId": req_id, "error": e.to_string() }),
+                        },
+                        Err(e) => json!({ "reqId": req_id, "error": e }),
+                    };
+                    let _ = proxy.send_event(UserEvent::Reply { kind: "sf2Preset", payload });
                 });
             }
             "pickFolder" => {
