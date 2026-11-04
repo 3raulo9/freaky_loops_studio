@@ -56,27 +56,7 @@
       </div>
 
       <!-- Options → audio settings (desktop) -->
-      <div v-if="audio.open" class="mb-modal-back" @mousedown.self="audio.open = false">
-        <div class="mb-modal mb-modal--about">
-          <div class="mb-modal-hdr">
-            <span>AUDIO SETTINGS</span>
-            <button class="mb-modal-x" @click="audio.open = false">×</button>
-          </div>
-          <div class="mb-about">
-            <div class="mb-audio-lbl">OUTPUT DEVICE <span class="mb-audio-note">native engine · VST plugins</span></div>
-            <label v-for="d in audio.devices" :key="d" class="mb-audio-dev" :class="{ on: d === audio.current }">
-              <input type="radio" name="fls-dev" :checked="d === audio.current" :disabled="audio.busy" @change="pickDevice(d)" />
-              {{ d }}
-            </label>
-            <div class="mb-about-meta">
-              {{ audio.busy ? 'Switching…' : (audio.current ? `${audio.sampleRate} Hz · ${audio.current}` : 'No output device') }}
-            </div>
-            <button class="mb-audio-test" :class="{ on: audio.tone }" @click="toggleTone">
-              {{ audio.tone ? '■ STOP TEST TONE' : '▶ TEST TONE' }}
-            </button>
-          </div>
-        </div>
-      </div>
+      <AudioSettings v-if="audio.open" @close="audio.open = false" />
 
       <!-- Help → about -->
       <div v-if="aboutOpen" class="mb-modal-back" @mousedown.self="aboutOpen = false">
@@ -99,7 +79,8 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useStudio } from '../../store/studio.js'
-import { isDesktop, sendToHost, recentFilesNative, listAudioDevices, setAudioDevice, testTone } from '../../desktop/ipc.js'
+import { isDesktop, sendToHost, recentFilesNative } from '../../desktop/ipc.js'
+import AudioSettings from '../AudioSettings.vue'
 
 const S = useStudio()
 const {
@@ -276,22 +257,8 @@ function saveAs() {
   const name = prompt('Save project as:', projectName.value || 'project')
   if (name) saveProject(name.trim() || 'project')
 }
-const audio = reactive({ open: false, devices: [], current: null, sampleRate: 0, busy: false, tone: false })
-async function openAudioSettings() {
-  audio.open = true
-  const res = await listAudioDevices()
-  if (res) Object.assign(audio, { devices: res.devices ?? [], current: res.current, sampleRate: res.sampleRate })
-}
-async function pickDevice(name) {
-  audio.busy = true
-  const res = await setAudioDevice(name)
-  audio.busy = false
-  if (res) Object.assign(audio, { devices: res.devices ?? [], current: res.current, sampleRate: res.sampleRate })
-}
-function toggleTone() {
-  audio.tone = !audio.tone
-  testTone(audio.tone, 440)
-}
+const audio = reactive({ open: false })
+function openAudioSettings() { audio.open = true }
 
 function openProject() {
   if (isDesktop) openProjectNative()
@@ -408,15 +375,4 @@ onBeforeUnmount(() => {
 .mb-about-logo { font-size: 20px; font-weight: 700; letter-spacing: 0.1em; }
 .mb-about-logo em { font-style: normal; color: #e74c3c; }
 .mb-about-meta { color: var(--text-muted); font-size: 12px; }
-.mb-audio-lbl { font-size: 10px; font-weight: 700; letter-spacing: 0.18em; color: var(--text-muted); }
-.mb-audio-note { letter-spacing: 0.04em; font-weight: 400; margin-left: 6px; }
-.mb-audio-dev { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 3px; cursor: pointer; font-size: 13px; }
-.mb-audio-dev:hover { background: var(--bg-hover); }
-.mb-audio-dev.on { color: #f0a030; }
-.mb-audio-test {
-  align-self: flex-start; margin-top: 4px; padding: 4px 12px; border-radius: 3px; cursor: pointer;
-  background: var(--bg-control); color: var(--text-primary); border: 1px solid var(--border-subtle);
-  font-family: inherit; font-size: 11px; font-weight: 700; letter-spacing: 0.1em;
-}
-.mb-audio-test.on { border-color: #e74c3c; color: #e74c3c; }
 </style>

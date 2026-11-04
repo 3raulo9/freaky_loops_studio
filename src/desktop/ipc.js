@@ -169,6 +169,24 @@ export function setAudioDevice(name) {
   return request('setAudioDevice', 'audioDevices', { name }, 20000)
 }
 
+/**
+ * Drivers, their devices and what's running:
+ * { drivers: [{ id, name, devices }], config, running: { driver, device, rate, buffer, latency, format, bufferSizes }, error }
+ */
+export function getAudioConfig() {
+  return request('audioDevices', 'audioDevices', {})
+}
+
+/** Reopen the engine: { driver: 'shared'|'exclusive'|'asio', device, buffer, rate } (empty = default). */
+export function setAudioConfig(cfg) {
+  return request('setAudioConfig', 'audioDevices', cfg, 30000)
+}
+
+/** The ASIO driver's own settings window. */
+export function openAsioPanel() {
+  sendToHost('asioPanel', {})
+}
+
 export function setWindowTitle(title) {
   sendToHost('setTitle', { title })
 }

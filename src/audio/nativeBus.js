@@ -89,7 +89,8 @@ const blobUrl = src => URL.createObjectURL(new Blob([src], { type: 'text/javascr
  * @returns {{ input: AudioNode, isLive: () => boolean, onChange: (fn) => void }}
  *   Connect the app's final output to `input`.
  */
-export function startNativeBus(ctx, { port, token, sink = 'device' }) {
+export function startNativeBus(ctx, { port, token, sink: initialSink = 'device' }) {
+  let sink = initialSink
   const input = ctx.createGain()
   input.connect(ctx.destination)          // until the bus is up
   let live = false
@@ -132,8 +133,22 @@ export function startNativeBus(ctx, { port, token, sink = 'device' }) {
     }
   })()
 
+  // The engine switched drivers: follow it ('none' while it holds the device).
+  const setSink = async next => {
+    if (next === sink) return
+    sink = next
+    if (!live) return
+    try {
+      await ctx.setSinkId?.(next === 'none' ? { type: 'none' } : '')
+      if (ctx.state !== 'running') await ctx.resume()
+    } catch (e) {
+      console.warn('[native bus] could not change sink', e)
+    }
+  }
+
   return {
     input,
+    setSink,
     isLive: () => live,
     onChange: fn => { listeners.add(fn); return () => listeners.delete(fn) },
   }

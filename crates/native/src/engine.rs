@@ -151,12 +151,78 @@ pub struct EngineStats {
     pub output_latency: f64,
 }
 
+/// Which driver the engine plays through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DriverKind {
+    /// Windows audio, shared with other apps (the system mixer adds a buffer).
+    #[default]
+    Shared,
+    /// Windows audio, the device held exclusively: short buffers.
+    Exclusive,
+    /// An ASIO driver.
+    Asio,
+}
+
+impl DriverKind {
+    pub fn id(self) -> &'static str {
+        match self {
+            DriverKind::Shared => "shared",
+            DriverKind::Exclusive => "exclusive",
+            DriverKind::Asio => "asio",
+        }
+    }
+    pub fn from_id(s: &str) -> DriverKind {
+        match s {
+            "exclusive" => DriverKind::Exclusive,
+            "asio" => DriverKind::Asio,
+            _ => DriverKind::Shared,
+        }
+    }
+    /// True when the device isn't available to other apps (including the
+    /// UI's own audio context) while the engine runs.
+    pub fn holds_device(self) -> bool {
+        self != DriverKind::Shared
+    }
+}
+
+/// What the user picked; `None` fields mean "the device's default".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AudioConfig {
+    pub driver: DriverKind,
+    pub device: Option<String>,
+    pub buffer: Option<u32>,
+    pub rate: Option<u32>,
+}
+
+/// What actually opened.
+#[derive(Debug, Clone, Default)]
+pub struct Opened {
+    pub driver: DriverKind,
+    pub device: String,
+    pub rate: u32,
+    pub buffer: u32,
+    pub latency: f64,
+    pub format: String,
+    pub buffer_sizes: Vec<u32>,
+}
+
+enum Output {
+    Cpal(#[allow(dead_code)] cpal::Stream),
+    #[cfg(windows)]
+    Exclusive(#[allow(dead_code)] crate::wasapi::Stream),
+    #[cfg(all(windows, target_arch = "x86_64"))]
+    Asio(crate::asio::Stream),
+}
+
 pub struct Engine {
-    _stream: Option<cpal::Stream>,
+    _stream: Option<Output>,
     shared: Arc<Shared>,
     sample_rate: u32,
     device: Option<String>,
-    wanted: Option<String>,
+    config: AudioConfig,
+    opened: Opened,
+    /// Why the chosen driver didn't open (the engine fell back to shared mode).
+    last_error: Option<String>,
     retired: Vec<(Instant, Arc<Strips>)>,
     last_try: Instant,
 }
@@ -188,6 +254,11 @@ impl Engine {
     /// Start on the named output device (`None` = system default; an unknown
     /// name also falls back to the default).
     pub fn start_on(device: Option<&str>) -> Engine {
+        Self::start_with(AudioConfig { device: device.map(str::to_string), ..Default::default() })
+    }
+
+    /// Start with a full driver choice.
+    pub fn start_with(config: AudioConfig) -> Engine {
         let shared = Arc::new(Shared {
             strips: ArcSwap::from_pointee(Vec::new()),
             capture: ArcSwapOption::empty(),
@@ -204,7 +275,9 @@ impl Engine {
             shared,
             sample_rate: 44100,
             device: None,
-            wanted: device.map(str::to_string),
+            config,
+            opened: Opened::default(),
+            last_error: None,
             retired: Vec::new(),
             last_try: Instant::now(),
         };
@@ -216,34 +289,128 @@ impl Engine {
         self._stream = None; // release the old device first
         self.shared.failed.store(false, Ordering::SeqCst);
         self.last_try = Instant::now();
-        match open_stream(self.shared.clone(), self.wanted.as_deref()) {
-            Ok((stream, rate, name)) => {
-                host_callback::set_sample_rate(rate as f32);
-                log::write(&format!("audio engine started on '{name}' @ {rate} Hz"));
+        let cfg = self.config.clone();
+        let mut r = self.open_driver(&cfg);
+        if let (Err(e), true) = (&r, cfg.driver != DriverKind::Shared) {
+            // The chosen driver can't run now: keep sound going in shared mode.
+            log::write(&format!("{} driver failed ({e}); falling back to shared mode", cfg.driver.id()));
+            self.last_error = Some(e.clone());
+            r = self.open_driver(&AudioConfig::default());
+        } else if r.is_ok() {
+            self.last_error = None;
+        }
+        match r {
+            Ok((stream, opened)) => {
+                host_callback::set_sample_rate(opened.rate as f32);
+                log::write(&format!("audio engine started on '{}' ({}) @ {} Hz, {} frames", opened.device, opened.driver.id(), opened.rate, opened.buffer));
                 self._stream = Some(stream);
-                self.sample_rate = rate;
-                self.device = Some(name);
+                self.sample_rate = opened.rate;
+                self.device = Some(opened.device.clone());
+                self.opened = opened;
             }
             Err(e) => {
                 log::write(&format!("audio engine failed to start: {e}"));
                 host_callback::set_sample_rate(self.sample_rate as f32);
                 self.device = None;
+                self.last_error = Some(e);
                 self.shared.failed.store(true, Ordering::SeqCst);
             }
         }
     }
 
+    fn open_driver(&self, cfg: &AudioConfig) -> Result<(Output, Opened), String> {
+        match cfg.driver {
+            DriverKind::Shared => {
+                let (stream, rate, name) = open_stream(self.shared.clone(), cfg.device.as_deref())?;
+                Ok((Output::Cpal(stream), Opened { driver: DriverKind::Shared, device: name, rate, format: "shared".into(), ..Default::default() }))
+            }
+            #[cfg(windows)]
+            DriverKind::Exclusive => {
+                let (render, rate) = self.native_render();
+                let (stream, o) = crate::wasapi::open(cfg.device.as_deref(), cfg.rate, cfg.buffer, render, self.on_error())?;
+                rate.store(o.rate, Ordering::Relaxed);
+                let sizes = [64u32, 96, 128, 144, 192, 256, 288, 384, 480, 512, 768, 1024].into_iter().filter(|&f| f >= o.frames.min(144)).collect();
+                Ok((Output::Exclusive(stream), Opened { driver: DriverKind::Exclusive, device: o.device, rate: o.rate, buffer: o.frames, latency: o.latency, format: o.format, buffer_sizes: sizes }))
+            }
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            DriverKind::Asio => {
+                let (render, rate) = self.native_render();
+                let (stream, o) = crate::asio::open(cfg.device.as_deref(), cfg.rate, cfg.buffer, render, self.on_error())?;
+                rate.store(o.rate, Ordering::Relaxed);
+                Ok((Output::Asio(stream), Opened { driver: DriverKind::Asio, device: o.device, rate: o.rate, buffer: o.frames, latency: o.latency, format: o.format, buffer_sizes: o.buffer_sizes }))
+            }
+            #[allow(unreachable_patterns)]
+            _ => Err("this driver isn't available here".into()),
+        }
+    }
+
+    /// A render callback for the engine's own drivers, plus the cell its
+    /// sample rate is set through once the device has said what it runs at.
+    #[allow(dead_code)]
+    fn native_render(&self) -> (Box<dyn FnMut(&mut [f32], usize) + Send>, Arc<AtomicU32>) {
+        let mut r = Renderer::new(self.shared.clone(), 48000);
+        let rate = Arc::new(AtomicU32::new(0));
+        let rc = rate.clone();
+        let f = Box::new(move |out: &mut [f32], n: usize| {
+            let v = rc.load(Ordering::Relaxed);
+            if v != 0 {
+                r.rate = v;
+            }
+            r.render(&mut out[..n * 2], n)
+        });
+        (f, rate)
+    }
+
+    #[allow(dead_code)]
+    fn on_error(&self) -> Box<dyn Fn(String) + Send + Sync> {
+        let shared = self.shared.clone();
+        Box::new(move |e: String| {
+            log::write(&format!("audio driver error: {e}"));
+            shared.failed.store(true, Ordering::SeqCst);
+        })
+    }
+
     /// Move the engine (and every live source) to another output device.
     /// Returns the new sample rate.
     pub fn switch_device(&mut self, device: Option<&str>) -> u32 {
-        self.wanted = device.map(str::to_string);
+        self.config.device = device.map(str::to_string);
         self.open();
         self.sample_rate
+    }
+
+    /// Switch driver / device / buffer / rate. Returns the new sample rate.
+    pub fn configure(&mut self, config: AudioConfig) -> u32 {
+        self.config = config;
+        self.open();
+        self.sample_rate
+    }
+
+    pub fn config(&self) -> &AudioConfig {
+        &self.config
+    }
+
+    /// What's running now, and why the chosen driver didn't open (if so).
+    pub fn opened(&self) -> (&Opened, Option<&str>) {
+        (&self.opened, self.last_error.as_deref())
+    }
+
+    /// Open the ASIO driver's own settings window.
+    pub fn asio_control_panel(&self) {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if let Some(Output::Asio(s)) = &self._stream {
+            crate::asio::control_panel(s);
+        }
     }
 
     /// Housekeeping, called a few times a second from the UI thread: reopen a
     /// failed stream and free swapped-out strip lists.
     pub fn poll(&mut self) {
+        #[cfg(all(windows, target_arch = "x86_64"))]
+        if crate::asio::take_reset_request() && matches!(self._stream, Some(Output::Asio(_))) {
+            log::write("ASIO driver asked for a restart: reopening");
+            self.open();
+            return;
+        }
         if self.shared.failed.load(Ordering::SeqCst) && self.last_try.elapsed() > Duration::from_secs(2) {
             log::write("audio stream failed: reopening");
             self.open();
@@ -346,7 +513,7 @@ impl Engine {
             bus_latency: bus.as_ref().map_or(0.0, |b| b.latency()),
             bus_max_gap: bus.as_ref().map_or(0.0, |b| b.take_max_gap()),
             // Shared mode keeps about two periods queued in the device.
-            output_latency: 2.2 * period as f64 / self.sample_rate.max(1) as f64,
+            output_latency: if self.opened.latency > 0.0 { self.opened.latency } else { 2.2 * period as f64 / self.sample_rate.max(1) as f64 },
         }
     }
 }

@@ -18,7 +18,7 @@ use bridge_client::BridgeClient;
 use fls_native::editor::EditorWindow;
 use fls_native::pe::Arch;
 use fls_native::webbus::WebBus;
-use fls_native::{bounce, host_callback, log, AudioSource, Engine, Hosted, PluginState, Strip};
+use fls_native::{bounce, host_callback, log, AudioConfig, AudioSource, DriverKind, Engine, Hosted, PluginState, Strip};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -50,6 +50,8 @@ enum UserEvent {
     EditorClosed(String),
     MeterTick,
     RenderDone { req_id: String, result: Result<(String, usize), String> },
+    /// Second half of a driver switch (after the UI released the device).
+    ApplyAudio { cfg: AudioConfig, req_id: Option<Value> },
     /// A reply computed off the UI thread (e.g. asset resolution).
     Reply { kind: &'static str, payload: Value },
 }
@@ -122,6 +124,10 @@ impl App {
                 }
                 let rate = self.engine.sample_rate();
                 self.send("pong", json!({ "version": VERSION, "engine": "rust", "sampleRate": rate, "time": now_ms() }));
+                // The injected startup info is from when the window opened; the
+                // driver may have changed since (a reloaded page needs the truth).
+                let sink = if self.engine.opened().0.driver.holds_device() { "none" } else { "device" };
+                self.send("audioConfig", json!({ "rate": rate, "sink": sink }));
             }
             "testTone" => {
                 let on = p.get("on").and_then(Value::as_bool).unwrap_or(true);
@@ -274,27 +280,26 @@ impl App {
             }
             "audioDevices" => {
                 let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
-                self.send("audioDevices", json!({
-                    "reqId": req_id, "devices": fls_native::output_devices(),
-                    "current": self.engine.device_name(), "sampleRate": self.engine.sample_rate(),
-                }));
+                let mut reply = self.audio_info();
+                reply["reqId"] = req_id;
+                self.send("audioDevices", reply);
             }
+            // Old form: switch the shared-mode output device only.
             "setAudioDevice" => {
-                let name = str_of(&p, "name").map(str::to_string);
-                let rate = self.engine.switch_device(name.as_deref()) as f32;
-                for inst in self.instances.values() {
-                    match &inst.kind {
-                        Kind::InProc { plugin, .. } => plugin.set_live_sample_rate(rate),
-                        Kind::Bridge(b) => b.send(json!({ "t": "device", "name": name })),
-                    }
-                }
-                files::set_setting("audioDevice", json!(name));
-                let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
-                self.send("audioDevices", json!({
-                    "reqId": req_id, "devices": fls_native::output_devices(),
-                    "current": self.engine.device_name(), "sampleRate": self.engine.sample_rate(),
-                }));
+                let mut cfg = self.engine.config().clone();
+                cfg.device = str_of(&p, "name").map(str::to_string);
+                self.apply_audio_config(cfg, p.get("reqId").cloned());
             }
+            "setAudioConfig" => {
+                let cfg = AudioConfig {
+                    driver: DriverKind::from_id(str_of(&p, "driver").unwrap_or("shared")),
+                    device: str_of(&p, "device").filter(|s| !s.is_empty()).map(str::to_string),
+                    buffer: p.get("buffer").and_then(Value::as_u64).map(|v| v as u32).filter(|&v| v > 0),
+                    rate: p.get("rate").and_then(Value::as_u64).map(|v| v as u32).filter(|&v| v > 0),
+                };
+                self.apply_audio_config(cfg, p.get("reqId").cloned());
+            }
+            "asioPanel" => self.engine.asio_control_panel(),
             "setTitle" => {
                 if let Some(t) = str_of(&p, "title") {
                     self.window.set_title(t);
@@ -493,6 +498,68 @@ impl App {
         }
     }
 
+    /// Drivers, devices and what's running, for the audio settings window.
+    fn audio_info(&self) -> Value {
+        let (o, err) = self.engine.opened();
+        let cfg = self.engine.config();
+        json!({
+            "drivers": [
+                { "id": "shared", "name": "Windows audio", "devices": fls_native::output_devices() },
+                { "id": "exclusive", "name": "Windows audio (exclusive, low latency)", "devices": fls_native::wasapi::devices() },
+                { "id": "asio", "name": "ASIO", "devices": asio_drivers() },
+            ],
+            "config": { "driver": cfg.driver.id(), "device": cfg.device, "buffer": cfg.buffer, "rate": cfg.rate },
+            "running": { "driver": o.driver.id(), "device": o.device, "rate": o.rate, "buffer": o.buffer,
+                         "latency": o.latency, "format": o.format, "bufferSizes": o.buffer_sizes },
+            "error": err,
+            // Old fields, still read by older UI code.
+            "devices": fls_native::output_devices(), "current": self.engine.device_name(), "sampleRate": self.engine.sample_rate(),
+        })
+    }
+
+    /// Reopen the engine with `cfg`, remember it, and bring plugins and the
+    /// UI's audio context along (rate, and whether the device is still theirs).
+    fn apply_audio_config(&mut self, cfg: AudioConfig, req_id: Option<Value>) {
+        // The UI's audio context must let go of the device before the engine
+        // takes it exclusively: tell it now, switch a moment later.
+        if cfg.driver.holds_device() && !self.engine.opened().0.driver.holds_device() {
+            self.send("audioConfig", json!({ "rate": self.engine.sample_rate(), "sink": "none" }));
+            let proxy = self.proxy.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let _ = proxy.send_event(UserEvent::ApplyAudio { cfg, req_id });
+            });
+            return;
+        }
+        self.configure_audio(cfg, req_id);
+    }
+
+    fn configure_audio(&mut self, cfg: AudioConfig, req_id: Option<Value>) {
+        let old_rate = self.engine.sample_rate();
+        let rate = self.engine.configure(cfg.clone());
+        files::set_setting("audioDriver", json!(cfg.driver.id()));
+        files::set_setting("audioDevice", json!(cfg.device));
+        files::set_setting("audioBuffer", json!(cfg.buffer));
+        files::set_setting("audioRate", json!(cfg.rate));
+        if rate != old_rate {
+            for inst in self.instances.values() {
+                if let Kind::InProc { plugin, .. } = &inst.kind {
+                    plugin.set_live_sample_rate(rate as f32);
+                }
+            }
+        }
+        let running = self.engine.opened().0.driver;
+        for inst in self.instances.values() {
+            if let Kind::Bridge(b) = &inst.kind {
+                b.send(json!({ "t": "device", "name": if running.holds_device() { None } else { self.engine.device_name() } }));
+            }
+        }
+        self.send("audioConfig", json!({ "rate": rate, "sink": if running.holds_device() { "none" } else { "device" } }));
+        let mut reply = self.audio_info();
+        reply["reqId"] = req_id.unwrap_or(Value::Null);
+        self.send("audioDevices", reply);
+    }
+
     /// Timed MIDI from the UI's scheduler: `{ now, rate, lat, ev: [[id, frame, status, d1, d2]] }`,
     /// frames on the UI audio context's clock. While the UI's audio streams in,
     /// its frames map exactly onto the engine's; otherwise each event keeps its
@@ -564,6 +631,18 @@ fn vst3_bundle_of(picked: &str) -> String {
         .unwrap_or_else(|| picked.to_string())
 }
 
+/// Installed ASIO drivers (64-bit only).
+fn asio_drivers() -> Vec<String> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        fls_native::asio::drivers().into_iter().map(|d| d.name).collect()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        Vec::new()
+    }
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -608,8 +687,14 @@ fn main() {
 
     // The engine and the web bus come first: the UI needs the bus address and
     // the engine's rate before its first line runs.
-    let device = files::setting("audioDevice").and_then(|v| v.as_str().map(str::to_string));
-    let engine = Engine::start_on(device.as_deref());
+    let setting_str = |k: &str| files::setting(k).and_then(|v| v.as_str().map(str::to_string));
+    let setting_u32 = |k: &str| files::setting(k).and_then(|v| v.as_u64()).map(|v| v as u32);
+    let engine = Engine::start_with(AudioConfig {
+        driver: DriverKind::from_id(setting_str("audioDriver").as_deref().unwrap_or("shared")),
+        device: setting_str("audioDevice"),
+        buffer: setting_u32("audioBuffer"),
+        rate: setting_u32("audioRate"),
+    });
     let bus = match WebBus::start() {
         Ok(b) => {
             engine.attach_bus(b.clone());
@@ -621,7 +706,8 @@ fn main() {
         }
     };
     let audio_info = match &bus {
-        Some(b) => json!({ "port": b.port, "token": b.token, "rate": engine.sample_rate() }),
+        Some(b) => json!({ "port": b.port, "token": b.token, "rate": engine.sample_rate(),
+                           "sink": if engine.opened().0.driver.holds_device() { "none" } else { "device" } }),
         None => json!({ "rate": engine.sample_rate() }),
     };
     let init_script = format!("{INIT_SCRIPT}
@@ -667,6 +753,7 @@ window.__flsHost.audio = {audio_info};
             }
             Event::UserEvent(UserEvent::MeterTick) => app.on_meter_tick(),
             Event::UserEvent(UserEvent::Reply { kind, payload }) => app.send(kind, payload),
+            Event::UserEvent(UserEvent::ApplyAudio { cfg, req_id }) => app.configure_audio(cfg, req_id),
             Event::UserEvent(UserEvent::RenderDone { req_id, result }) => match result {
                 Ok((file, frames)) => app.send("vstRenderResult", json!({ "reqId": req_id, "url": render_url(&file), "frames": frames })),
                 Err(e) => app.send("vstRenderError", json!({ "reqId": req_id, "message": e })),

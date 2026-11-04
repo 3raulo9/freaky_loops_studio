@@ -1902,6 +1902,7 @@ export function useStudio() {
   // ── Audio engine ──────────────────────────────────────────────────────────────
   let audioCtx        = null
   let nativeBus       = null   // desktop: the context's output joins the native engine
+  let _hostAudioNow   = null   // the engine's current { rate, sink } (it can change after startup)
   let masterGain      = null
   let analyserNode    = null
   let outputGain      = null   // terminal Main Volume stage (global output trim)
@@ -3889,8 +3890,13 @@ export function useStudio() {
     if (!audioCtx) {
       // Desktop: render at the engine's rate in the smallest quanta — the engine
       // owns the device, buffer size and clock (see audio/nativeBus.js).
-      const hostAudio = isDesktop ? window.__flsHost?.audio : null
-      const ctxOpts = hostAudio?.port ? { latencyHint: 0.001, sampleRate: hostAudio.rate || undefined } : undefined
+      const hostAudio = isDesktop && window.__flsHost?.audio ? { ...window.__flsHost.audio, ..._hostAudioNow } : null
+      // When the engine holds the device (exclusive / ASIO) the context must be
+      // born without one: opened on a busy device, the browser falls back to
+      // a slow output that renders in ~50 ms bursts.
+      const ctxOpts = hostAudio?.port
+        ? { latencyHint: 0.001, sampleRate: hostAudio.rate || undefined, ...(hostAudio.sink === 'none' ? { sinkId: { type: 'none' } } : {}) }
+        : undefined
       audioCtx = new (window.AudioContext || window.webkitAudioContext)(ctxOpts)
       if (hostAudio?.port) nativeBus = startNativeBus(audioCtx, hostAudio)
       masterGain = audioCtx.createGain()
@@ -6462,6 +6468,11 @@ export function useStudio() {
   const engineStats = reactive({ live: false, load: 0, loadPeak: 0, late: 0, busUnderruns: 0, busLatency: 0, outputLatency: 0, rate: 0, period: 0, device: '' })
   if (isDesktop) {
     onHostMessage(msg => {
+      if (msg.type === 'audioConfig') {
+        _hostAudioNow = { rate: msg.payload?.rate, sink: msg.payload?.sink ?? 'device' }
+        nativeBus?.setSink(_hostAudioNow.sink)
+        return
+      }
       if (msg.type !== 'audioStats') return
       const p = msg.payload
       Object.assign(engineStats, { live: !!p.bus, load: p.load, loadPeak: p.loadPeak, late: p.late, busUnderruns: p.busUnderruns,

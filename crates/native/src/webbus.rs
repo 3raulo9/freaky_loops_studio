@@ -8,10 +8,11 @@
 //!   u64 first frame (the audio context's frame counter), u32 flags
 //!   (1 = silent: no samples follow), u32 reserved, then frames × 2 f32.
 //!
-//! The context renders on a timer rather than the device clock, so the reader
-//! resamples by a ratio steered to hold the buffer at its target fill (a few
-//! hundred ppm at most — inaudible). The target grows after an underrun and
-//! creeps back down while the stream stays steady.
+//! The context's clock isn't the engine's, so the reader resamples by a ratio
+//! steered to hold the buffer at its target fill (a few hundred ppm at most —
+//! inaudible). The target follows how unevenly chunks actually arrive (the
+//! worst gap of recent seconds, ignoring a one-off), plus an extra margin
+//! that grows after an underrun and creeps back down while steady.
 
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::*};
@@ -23,11 +24,15 @@ const KIND_AUDIO: u32 = 1;
 const FLAG_SILENT: u32 = 1;
 /// Frames the ring holds (~1.4 s at 48 kHz).
 const CAP: usize = 1 << 16;
-/// Jitter allowance bounds, in seconds: chunks normally arrive every few ms,
-/// but the hop through the browser's worker now and then lags ~15 ms.
-const MIN_JITTER: f64 = 0.013;
+/// Jitter allowance bounds, in seconds.
+const MIN_JITTER: f64 = 0.004;
+const MAX_JITTER: f64 = 0.080;
+/// Margin over the measured arrival jitter.
+const JITTER_MARGIN: f64 = 0.003;
+/// Until a few seconds of arrivals are measured.
 const START_JITTER: f64 = 0.015;
-const MAX_JITTER: f64 = 0.060;
+/// One-second windows of arrival gaps remembered.
+const GAP_WINDOWS: usize = 8;
 
 pub struct WebBus {
     pub port: u16,
@@ -50,6 +55,8 @@ pub struct WebBus {
     /// Longest wait between two chunks since the last read, in µs — a stall
     /// upstream (the UI's audio thread or its worker) shows up here.
     max_gap_us: AtomicU32,
+    /// Arrival jitter to plan for, in µs (0 = not measured yet).
+    jitter_us: AtomicU32,
 }
 
 /// Where the reader is: web frame `web` is heard at engine frame `engine`.
@@ -67,7 +74,8 @@ pub struct BusReader {
     primed: bool,
     pos: f64,
     fill_avg: f64,
-    jitter: f64,
+    /// Extra allowance on top of the measured jitter, grown by underruns.
+    extra: f64,
     calm_frames: usize,
     /// Engine frame of the last underrun (a burst of them is one stall).
     last_underrun: Option<u64>,
@@ -75,7 +83,7 @@ pub struct BusReader {
 
 impl Default for BusReader {
     fn default() -> Self {
-        BusReader { epoch: u32::MAX, primed: false, pos: 0.0, fill_avg: 0.0, jitter: START_JITTER, calm_frames: 0, last_underrun: None }
+        BusReader { epoch: u32::MAX, primed: false, pos: 0.0, fill_avg: 0.0, extra: 0.0, calm_frames: 0, last_underrun: None }
     }
 }
 
@@ -106,6 +114,7 @@ impl WebBus {
             underruns: AtomicU32::new(0),
             target_frames: AtomicU32::new(0),
             max_gap_us: AtomicU32::new(0),
+            jitter_us: AtomicU32::new(0),
         });
         let b = bus.clone();
         std::thread::Builder::new()
@@ -138,6 +147,10 @@ impl WebBus {
         // This thread feeds the audio callback: keep it ahead of ordinary work.
         crate::rt::pro_audio_priority();
         let mut last = std::time::Instant::now();
+        let mut window_start = last;
+        let mut window_max = 0u32;
+        let mut windows: Vec<u32> = Vec::with_capacity(GAP_WINDOWS);
+        self.jitter_us.store(0, SeqCst);
         // The newest connection wins (a reloaded UI reconnects before the old socket times out).
         let me = self.conn.fetch_add(1, SeqCst) + 1;
         self.reset_pending.store(true, SeqCst);
@@ -149,6 +162,22 @@ impl WebBus {
                     let gap = last.elapsed().as_micros().min(u32::MAX as u128) as u32;
                     last = std::time::Instant::now();
                     self.max_gap_us.fetch_max(gap, Relaxed);
+                    window_max = window_max.max(gap);
+                    if last.duration_since(window_start).as_secs_f64() >= 1.0 {
+                        // Plan for the second-worst second of the last few: one
+                        // hiccup (a page load) shouldn't keep latency up.
+                        if windows.len() == GAP_WINDOWS {
+                            windows.remove(0);
+                        }
+                        windows.push(window_max);
+                        window_max = 0;
+                        window_start = last;
+                        if windows.len() >= 3 {
+                            let mut w = windows.clone();
+                            w.sort_unstable();
+                            self.jitter_us.store(w[w.len() - 2], Relaxed);
+                        }
+                    }
                     self.on_message(&b)
                 }
                 Ok(tungstenite::Message::Close(_)) | Err(_) => break,
@@ -228,7 +257,9 @@ impl WebBus {
         }
         // What one callback consumes (with interpolation taps), plus the jitter allowance.
         let need = frames as f64 * nominal * 1.005 + 3.0;
-        let target = need + r.jitter * web_rate;
+        let measured = self.jitter_us.load(Relaxed);
+        let jitter = if measured == 0 { START_JITTER } else { measured as f64 / 1e6 + JITTER_MARGIN };
+        let target = need + (jitter + r.extra).clamp(MIN_JITTER, MAX_JITTER) * web_rate;
         self.target_frames.store(target as u32, Relaxed);
         if !r.primed {
             if w - (self.origin.load(Acquire) as f64) < target {
@@ -251,7 +282,7 @@ impl WebBus {
             // One stall (e.g. while a project loads) shows up as several underruns
             // in a row: widen the allowance once per stall, not once per callback.
             if r.last_underrun.map_or(true, |t| engine_start.saturating_sub(t) > 2 * engine_rate as u64) {
-                r.jitter = (r.jitter + 0.003).min(MAX_JITTER);
+                r.extra = (r.extra + 0.003).min(MAX_JITTER);
             }
             r.last_underrun = Some(engine_start);
             r.calm_frames = 0;
@@ -280,7 +311,7 @@ impl WebBus {
         r.calm_frames += frames;
         if r.calm_frames > engine_rate as usize * 15 {
             r.calm_frames = 0;
-            r.jitter = (r.jitter - 0.001).max(MIN_JITTER);
+            r.extra = (r.extra - 0.001).max(0.0);
         }
     }
 
