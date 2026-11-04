@@ -315,6 +315,16 @@ impl App {
                     let _ = proxy.send_event(UserEvent::Reply { kind: "sf2Preset", payload });
                 });
             }
+            "autosaveWrite" => {
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = proxy.send_event(UserEvent::Reply { kind: "autosaveWritten", payload: files::autosave_write(&p) });
+                });
+            }
+            "autosaveRead" => {
+                let reply = files::autosave_read(&p);
+                self.send("autosaveRead", reply);
+            }
             // Browser: start folders, one folder's contents, installed plugins.
             "browseRoots" => {
                 let mut reply = locate::browse_roots();

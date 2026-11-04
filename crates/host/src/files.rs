@@ -152,3 +152,26 @@ pub fn set_setting(key: &str, value: Value) {
     all[key] = value;
     let _ = std::fs::write(settings_path(), serde_json::to_string_pretty(&all).unwrap_or_default());
 }
+
+/// Autosave (desktop): a file in the app's data folder — browser storage holds
+/// a few megabytes, and a project with plugin states easily needs more. Not
+/// put on the recent list.
+fn autosave_path() -> PathBuf {
+    config_dir().join("autosave.freak")
+}
+
+pub fn autosave_write(p: &Value) -> Value {
+    let data = p.get("data").and_then(Value::as_str).unwrap_or("");
+    let tmp = autosave_path().with_extension("tmp");
+    // Write aside, then swap in: a crash mid-write never leaves half an autosave.
+    let r = std::fs::write(&tmp, data).and_then(|_| std::fs::rename(&tmp, autosave_path()));
+    json!({ "reqId": p.get("reqId").cloned().unwrap_or(Value::Null), "ok": r.is_ok(), "error": r.err().map(|e| e.to_string()) })
+}
+
+pub fn autosave_read(p: &Value) -> Value {
+    let req_id = p.get("reqId").cloned().unwrap_or(Value::Null);
+    match std::fs::read_to_string(autosave_path()) {
+        Ok(data) => json!({ "reqId": req_id, "data": data }),
+        Err(_) => json!({ "reqId": req_id, "data": null }),
+    }
+}

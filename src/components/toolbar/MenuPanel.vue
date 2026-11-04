@@ -121,7 +121,7 @@ const MENUS = [
       { label: 'Save as…', key: 'Ctrl+Shift+S', action: saveAs },
       ...(recent.value.length ? [{ heading: 'RECENT' }, ...recent.value.slice(0, 6).map(p => ({ label: fileOf(p), action: () => openProjectNative(p) }))] : []),
       { label: autosaveInfo.value ? `Recover autosave (${fmtTime(autosaveInfo.value.time)})` : 'Recover autosave',
-        action: () => { if (!recoverAutosave()) alert('No autosave found.') }, disabled: () => !autosaveInfo.value },
+        action: async () => { if (!(await recoverAutosave())) alert('No autosave found.') }, disabled: () => !autosaveInfo.value },
       { sep: true },
       { heading: 'IMPORT' },
       { label: 'Pattern project (.flp / .zip)…', action: openProject },

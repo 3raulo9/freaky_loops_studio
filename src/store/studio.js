@@ -9,6 +9,7 @@ import { readZip } from '../import/zip.js'
 import { decodeSampleFile } from '../audio/sampleDecode.js'
 import { fillSample, sampleDuration } from '../browserLibrary.js'
 import { createPluginNode, makeWasmPlayFn } from '../audio/wasmPlugin.js'
+import { autosaveWriteNative, autosaveReadNative } from '../desktop/ipc.js'
 import { sendToHost, onHostMessage, isDesktop, getVstState, sendTransport,
          saveFileNative, openFileNative, setWindowTitle, bytesToBase64,
          resolveAssetsNative, hostFileUrl, pickFolderNative } from '../desktop/ipc.js'
@@ -7933,8 +7934,13 @@ export function useStudio() {
   const autosaveInfo = ref(_readAutosaveMeta())
   function autosaveNow() {
     try {
-      // Browser storage is small: a big original file isn't worth losing the autosave over.
-      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(_serializeProject({}, { withSource: (flpSource?.bytes.length ?? 0) < 1_500_000 })))
+      if (isDesktop) {
+        // Desktop: a file (projects with plugin states outgrow browser storage).
+        autosaveWriteNative(JSON.stringify(_serializeProject({})))
+      } else {
+        // Browser storage is small: a big original file isn't worth losing the autosave over.
+        localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(_serializeProject({}, { withSource: (flpSource?.bytes.length ?? 0) < 1_500_000 })))
+      }
       const meta = { time: Date.now(), name: projectName.value }
       localStorage.setItem(AUTOSAVE_KEY + '-meta', JSON.stringify(meta))
       autosaveInfo.value = meta
@@ -7943,9 +7949,10 @@ export function useStudio() {
   setInterval(() => { if (projectDirty.value) autosaveNow() }, 60_000)
   window.addEventListener('beforeunload', () => { if (projectDirty.value) autosaveNow() })
 
-  function recoverAutosave() {
+  async function recoverAutosave() {
     let raw = null
-    try { raw = localStorage.getItem(AUTOSAVE_KEY) } catch (_) {}
+    if (isDesktop) raw = await autosaveReadNative()
+    if (!raw) try { raw = localStorage.getItem(AUTOSAVE_KEY) } catch (_) {}
     if (!raw) return false
     try {
       _applyProject(JSON.parse(raw))

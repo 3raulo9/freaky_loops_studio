@@ -190,6 +190,14 @@ export function loadSf2PresetNative(path, bank = 0, program = 0) {
   return request('sf2Preset', 'sf2Preset', { path, bank, program }, 120000)
 }
 
+/** Desktop autosave (a file in the app's data folder, not size-limited). */
+export function autosaveWriteNative(data) {
+  return request('autosaveWrite', 'autosaveWritten', { data }, 60000)
+}
+export async function autosaveReadNative() {
+  return (await request('autosaveRead', 'autosaveRead', {}, 60000))?.data ?? null
+}
+
 /** Browser: start folders `{ roots: [{ name, path }] }`. */
 export function browseRootsNative() {
   return request('browseRoots', 'browseRoots', {})
