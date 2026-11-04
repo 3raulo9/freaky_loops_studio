@@ -6587,6 +6587,34 @@ export function useStudio() {
     })
   }
 
+  // Meters for audio the Web Audio graph never sees: plugin channels (they
+  // light their insert, or the master) and inserts the engine runs. Peaks
+  // arrive ~16×/s; a level counts for a moment after it arrives.
+  const _nativePeaks = []          // mixer index → { peak, t }
+  function nativeMeterPeak(i) {
+    const e = _nativePeaks[i]
+    return e && performance.now() - e.t < 150 ? e.peak : 0
+  }
+  if (isDesktop) {
+    onHostMessage(msg => {
+      if (msg.type !== 'meters') return
+      const now = performance.now()
+      const bump = (i, p) => {
+        const e = _nativePeaks[i]
+        if (e && now - e.t < 50) e.peak = Math.max(e.peak, p)
+        else _nativePeaks[i] = { peak: p, t: now }
+      }
+      for (const [id, p] of msg.payload.strips ?? []) {
+        const ch = channels.find(c => c.id === id)
+        if (!ch) continue
+        const mt = mixerTracks[ch.mixerTrack || 0]
+        if (mt && mt !== mixerTracks[0]) bump(mixerTracks.indexOf(mt), p)
+        bump(0, p)
+      }
+      for (const [busId, p] of msg.payload.inserts ?? []) { bump(busId, p); bump(0, p) }
+    })
+  }
+
   // The native engine's load / dropout / latency figures (desktop), ~3×/s.
   const engineStats = reactive({ live: false, load: 0, loadPeak: 0, late: 0, busUnderruns: 0, busLatency: 0, outputLatency: 0, rate: 0, period: 0, device: '' })
   if (isDesktop) {
@@ -8301,7 +8329,7 @@ export function useStudio() {
     captureSessionScene, launchSessionSlot, launchSessionScene, stopSessionTrack, stopAllSessionClips,
     sessionSlotProgress, toggleSessionRecording, sessionScenesToPlaylist, sessionFollow, cycleSceneLoops,
     // Project save / load / autosave / MIDI export
-    savePatternProject, patternProjectBytes, flpSourceName, engineStats, nativeBusLive,
+    savePatternProject, patternProjectBytes, flpSourceName, engineStats, nativeBusLive, nativeMeterPeak,
     _debugInserts: () => mixerInsertNodes.map((n, i) => ({ i: i + 1, tapBus: n?._tapBus ?? 0, want: _nativeInsertBus(mixerTracks[i + 1]) })).filter(x => x.tapBus || x.want),
     saveProject, loadProjectFile, newProject, importPatternProject, importProjectFiles, importState, locateMissingSamples, autosaveInfo, autosaveNow, recoverAutosave, exportMidi,
     projectPath, openProjectNative,

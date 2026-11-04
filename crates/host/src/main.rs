@@ -80,6 +80,7 @@ struct App {
     outbox: Vec<Value>,
     /// Effect instance ids per insert the engine runs.
     insert_fx: HashMap<u32, Vec<String>>,
+    meter_ticks: u64,
     next_gen: u64,
     cascade: i32,
 }
@@ -499,7 +500,7 @@ impl App {
                 let message = str_of(&m, "message").unwrap_or("Bridge error.").to_string();
                 self.vst_error(Some(id), message);
             }
-            "peak" => self.send("vstPeak", json!({ "id": id, "peak": m.get("peak") })),
+            "peak" => self.send("meters", json!({ "strips": [[id, m.get("peak")]], "inserts": [] })),
             "renderResult" => {
                 if let Some(req_id) = inst.pending_render.take() {
                     let file = str_of(&m, "file").unwrap_or("");
@@ -679,7 +680,27 @@ impl App {
         }
     }
 
+    /// ~16× a second: plugin and insert meters; every fifth tick, engine stats.
     fn on_meter_tick(&mut self) {
+        self.meter_ticks += 1;
+        let r4 = |p: f32| (p * 10000.0).round() / 10000.0;
+        let strips: Vec<Value> = self
+            .instances
+            .iter()
+            .filter_map(|(id, inst)| match &inst.kind {
+                Kind::InProc { strip: Some(strip), .. } => Some((id.clone(), strip.take_peak())),
+                _ => None,
+            })
+            .filter(|(_, p)| *p > 0.0001)
+            .map(|(id, p)| json!([id, r4(p)]))
+            .collect();
+        let inserts: Vec<Value> = self.engine.insert_peaks().into_iter().filter(|(_, p)| *p > 0.0001).map(|(id, p)| json!([id, r4(p)])).collect();
+        if !strips.is_empty() || !inserts.is_empty() {
+            self.send("meters", json!({ "strips": strips, "inserts": inserts }));
+        }
+        if self.meter_ticks % 5 != 0 {
+            return;
+        }
         self.engine.poll();
         let st = self.engine.stats();
         self.send("audioStats", json!({
@@ -688,22 +709,6 @@ impl App {
             "late": st.late, "bus": st.bus_connected, "busUnderruns": st.bus_underruns,
             "busLatency": (st.bus_latency * 10000.0).round() / 10000.0, "busMaxGap": (st.bus_max_gap * 10000.0).round() / 10000.0, "outputLatency": (st.output_latency * 10000.0).round() / 10000.0,
         }));
-        let peaks: Vec<(String, f32)> = self
-            .instances
-            .iter()
-            .filter_map(|(id, inst)| match &inst.kind {
-                Kind::InProc { strip: Some(strip), .. } => Some((id.clone(), strip.take_peak())),
-                _ => None,
-            })
-            .filter(|(_, p)| *p > 0.0001)
-            .collect();
-        for (id, p) in peaks {
-            self.send("vstPeak", json!({ "id": id, "peak": (p * 10000.0).round() / 10000.0 }));
-        }
-        let ins: Vec<Value> = self.engine.insert_peaks().into_iter().map(|(id, p)| json!([id, (p * 10000.0).round() / 10000.0])).collect();
-        if !ins.is_empty() {
-            self.send("insertPeaks", json!({ "peaks": ins }));
-        }
     }
 
     fn shutdown(&mut self) {
@@ -828,7 +833,7 @@ window.__flsHost.audio = {audio_info};
 
     let meter_proxy = proxy.clone();
     std::thread::spawn(move || loop {
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::thread::sleep(std::time::Duration::from_millis(60));
         if meter_proxy.send_event(UserEvent::MeterTick).is_err() {
             break;
         }
@@ -836,7 +841,7 @@ window.__flsHost.audio = {audio_info};
 
     // Load (or build) the sample/plugin index in the background for fast imports.
     locate::prewarm();
-    let mut app = App { window, engine, bus, proxy, instances: HashMap::new(), outbox: Vec::new(), insert_fx: HashMap::new(), next_gen: 0, cascade: 0 };
+    let mut app = App { window, engine, bus, proxy, instances: HashMap::new(), outbox: Vec::new(), insert_fx: HashMap::new(), meter_ticks: 0, next_gen: 0, cascade: 0 };
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;

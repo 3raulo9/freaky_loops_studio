@@ -386,7 +386,7 @@ const {
   addMixerTrackFx, removeMixerTrackFx, updateMixerTrackFxParam,
   toggleMixerTrackFxEnabled, moveMixerTrackFxSlot,
   setMixerSend, setMixerSidechain,
-  addMixerInsert, setMixerTrackOutput, openVstEditor,
+  addMixerInsert, setMixerTrackOutput, openVstEditor, nativeMeterPeak,
 } = useStudio()
 
 function onAddInsert() {
@@ -595,7 +595,7 @@ function updateMeters() {
     if (!meterBufs[i] || meterBufs[i].length !== an.fftSize) meterBufs[i] = new Float32Array(an.fftSize)
     an.getFloatTimeDomainData(meterBufs[i])
     const buf = meterBufs[i]
-    let peak = 0
+    let peak = nativeMeterPeak(i)   // plugin audio, which never passes through here
     for (let s = 0; s < buf.length; s++) { const a = Math.abs(buf[s]); if (a > peak) peak = a }
 
     const lvl = Math.max(peak, peakLevels.value[i] * decay)
