@@ -15,7 +15,7 @@ mod locate;
 mod sf2;
 
 use base64::Engine as _;
-use bridge_client::BridgeClient;
+use bridge_client::{BridgeClient, BridgeSource};
 use fls_native::editor::EditorWindow;
 use fls_native::pe::Arch;
 use fls_native::webbus::WebBus;
@@ -70,6 +70,8 @@ struct Instance {
     kind: Kind,
     /// Export bounce in flight on a bridge (one at a time per plugin).
     pending_render: Option<String>,
+    /// A bridged plugin rendered by the engine: its source and strip.
+    bridge_audio: Option<(Arc<dyn AudioSource>, Arc<Strip>)>,
 }
 
 struct App {
@@ -199,6 +201,11 @@ impl App {
                 let gain = p.get("gain").and_then(Value::as_f64).unwrap_or(1.0) as f32;
                 let pan = p.get("pan").and_then(Value::as_f64).unwrap_or(0.0) as f32;
                 let dest = p.get("dest").and_then(Value::as_u64).unwrap_or(0) as u32;
+                if let Some((_, strip)) = &inst.bridge_audio {
+                    strip.set_mix(gain, pan);
+                    strip.set_dest(dest);
+                    return;
+                }
                 match &inst.kind {
                     Kind::InProc { strip: Some(strip), .. } => {
                         strip.set_mix(gain, pan);
@@ -372,12 +379,22 @@ impl App {
                 let _ = proxy.send_event(UserEvent::Bridge { id: cid.clone(), gen, line });
             };
             let device = self.engine.device_name().map(str::to_string);
-            match BridgeClient::spawn(path, self.window.hwnd(), device, on_line) {
+            // The engine renders the plugin through shared memory, so it plays in
+            // the mix (strip, routing, meters) on the engine's driver and clock.
+            let shm_name = format!("Local\\fls-bridge-{}-{gen}", std::process::id());
+            let shm = fls_native::shm::Shm::create(&shm_name).map_err(|e| log::write(&format!("[bridge] {e}; it plays on its own"))).ok();
+            let rate = self.engine.sample_rate();
+            match BridgeClient::spawn(path, self.window.hwnd(), device, shm.as_ref().map(|_| (shm_name.as_str(), rate)), on_line) {
                 Ok(b) => {
                     if let Some(bytes) = state {
                         b.send(json!({ "t": "setState", "data": base64::engine::general_purpose::STANDARD.encode(bytes) }));
                     }
-                    self.instances.insert(id.into(), Instance { path: path.into(), gen, kind: Kind::Bridge(b), pending_render: None });
+                    let bridge_audio = shm.map(|shm| {
+                        let source: Arc<dyn AudioSource> = Arc::new(BridgeSource::new(shm));
+                        let strip = self.engine.add_source(source.clone());
+                        (source, strip)
+                    });
+                    self.instances.insert(id.into(), Instance { path: path.into(), gen, kind: Kind::Bridge(b), pending_render: None, bridge_audio });
                 }
                 Err(e) => self.vst_error(Some(id), e),
             }
@@ -398,7 +415,7 @@ impl App {
                             "canReplacing": i.can_replacing, "isSynth": i.is_synth, "hasEditor": i.has_editor, "bits": 64,
                             "format": if is_vst3 { "vst3" } else { "vst2" } }),
                 );
-                self.instances.insert(id.into(), Instance { path: path.into(), gen, kind: Kind::InProc { plugin, source: Some(source), strip: Some(strip), editor: None }, pending_render: None });
+                self.instances.insert(id.into(), Instance { path: path.into(), gen, kind: Kind::InProc { plugin, source: Some(source), strip: Some(strip), editor: None }, pending_render: None, bridge_audio: None });
             }
             Err(e) => {
                 let msg = if arch == Arch::Unknown { format!("{e} (not a Windows DLL?)") } else { e };
@@ -418,7 +435,12 @@ impl App {
                 plugin.all_notes_off();
                 drop(plugin);
             }
-            Kind::Bridge(b) => drop(b),
+            Kind::Bridge(b) => {
+                if let Some((source, _)) = &inst.bridge_audio {
+                    self.engine.remove_source(source);
+                }
+                drop(b);
+            }
         }
         log::write(&format!("unloaded {}", inst.path));
     }
@@ -498,7 +520,11 @@ impl App {
             // The helper exited (crash, or the plugin failed to load).
             let path = inst.path.clone();
             let pending = inst.pending_render.take();
-            self.instances.remove(id);
+            if let Some(gone) = self.instances.remove(id) {
+                if let Some((source, _)) = &gone.bridge_audio {
+                    self.engine.remove_source(source);
+                }
+            }
             if let Some(req_id) = pending {
                 self.send("vstRenderError", json!({ "reqId": req_id, "message": "The 32-bit bridge stopped during the bounce." }));
             }
@@ -636,7 +662,7 @@ impl App {
                         }
                         self.next_gen += 1;
                         log::write(&format!("insert {ins_id}: effect {} loaded", plugin.info().name));
-                        self.instances.insert(uid.clone(), Instance { path: path.clone(), gen: self.next_gen, kind: Kind::InProc { plugin, source: None, strip: None, editor: None }, pending_render: None });
+                        self.instances.insert(uid.clone(), Instance { path: path.clone(), gen: self.next_gen, kind: Kind::InProc { plugin, source: None, strip: None, editor: None }, pending_render: None, bridge_audio: None });
                     }
                     Err(e) => {
                         log::write(&format!("insert {ins_id}: effect {path} failed: {e}"));
@@ -695,7 +721,7 @@ impl App {
             });
             match &inst.kind {
                 Kind::InProc { plugin, .. } => plugin.queue_midi(at, d),
-                Kind::Bridge(b) => b.send(json!({ "t": "midi", "d": d, "delay": at.saturating_sub(eng_now) })),
+                Kind::Bridge(b) => b.send(json!({ "t": "midi", "d": d, "at": at, "delay": at.saturating_sub(eng_now) })),
             }
         }
     }
@@ -707,8 +733,8 @@ impl App {
         let strips: Vec<Value> = self
             .instances
             .iter()
-            .filter_map(|(id, inst)| match &inst.kind {
-                Kind::InProc { strip: Some(strip), .. } => Some((id.clone(), strip.take_peak())),
+            .filter_map(|(id, inst)| match (&inst.kind, &inst.bridge_audio) {
+                (Kind::InProc { strip: Some(strip), .. }, _) | (Kind::Bridge(_), Some((_, strip))) => Some((id.clone(), strip.take_peak())),
                 _ => None,
             })
             .filter(|(_, p)| *p > 0.0001)

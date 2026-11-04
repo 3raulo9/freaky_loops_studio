@@ -6,6 +6,42 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 
+/// A 32-bit plugin as an engine source: each block is rendered by the bridge
+/// through shared memory (fls_native::shm). A block the bridge can't deliver
+/// in time plays as silence rather than holding up the whole mix.
+pub struct BridgeSource {
+    shm: fls_native::shm::Shm,
+    /// Blocks missed in a row: a bridge that stopped answering gets only a
+    /// short wait, so it can't stall the mix while it's gone.
+    misses: std::sync::atomic::AtomicU32,
+}
+
+impl BridgeSource {
+    pub fn new(shm: fls_native::shm::Shm) -> BridgeSource {
+        BridgeSource { shm, misses: std::sync::atomic::AtomicU32::new(0) }
+    }
+}
+
+impl fls_native::AudioSource for BridgeSource {
+    fn render_add(&self, out: &mut [f32], frames: usize, ctx: &fls_native::RenderCtx) {
+        use std::sync::atomic::Ordering::Relaxed;
+        // Most of the block's own duration (at least 2 ms) — 1 ms once it has
+        // missed several blocks in a row.
+        let budget = if self.misses.load(Relaxed) > 8 { 1 } else { ((frames as f32 / ctx.rate.max(1.0)) * 800.0).ceil().max(2.0) as u32 };
+        if self.shm.render_add(out, frames, ctx.start, ctx.rate as u32, budget) {
+            self.misses.store(0, Relaxed);
+        } else {
+            self.misses.fetch_add(1, Relaxed);
+        }
+    }
+}
+
+impl Drop for BridgeSource {
+    fn drop(&mut self) {
+        self.shm.quit();
+    }
+}
+
 pub struct BridgeClient {
     child: Mutex<Child>,
     stdin: Mutex<ChildStdin>,
@@ -28,10 +64,16 @@ pub fn locate_exe() -> Option<PathBuf> {
 impl BridgeClient {
     /// Spawn the helper for `plugin_path`. `on_line` receives each stdout line
     /// (on a reader thread) and `None` once the process has exited.
-    pub fn spawn(plugin_path: &str, owner_hwnd: isize, device: Option<String>, on_line: impl Fn(Option<String>) + Send + 'static) -> Result<BridgeClient, String> {
+    /// `shared`: the shared-memory name and engine rate when the app renders
+    /// the plugin itself (see `BridgeSource`).
+    pub fn spawn(plugin_path: &str, owner_hwnd: isize, device: Option<String>, shared: Option<(&str, u32)>, on_line: impl Fn(Option<String>) + Send + 'static) -> Result<BridgeClient, String> {
         let exe = locate_exe().ok_or("32-bit bridge helper not found — build it with `npm run desktop:build`.")?;
         let mut cmd = Command::new(&exe);
-        cmd.arg(plugin_path).arg(owner_hwnd.to_string()).arg(device.unwrap_or_default()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        cmd.arg(plugin_path).arg(owner_hwnd.to_string()).arg(device.unwrap_or_default());
+        if let Some((name, rate)) = shared {
+            cmd.arg(name).arg(rate.to_string());
+        }
+        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

@@ -3,17 +3,21 @@
 //!
 //! Protocol: one JSON object per line. Control comes in on stdin
 //! (`{"t":"noteOn",...}`), status goes out on stdout (`{"t":"loaded",...}`).
-//! The bridge plays the plugin's audio itself through its own engine; a crash
-//! in the plugin takes down only this process, never the app.
+//! Audio: the app's engine asks for each block through shared memory
+//! (fls_native::shm), so the plugin plays in the app's mix, on its driver and
+//! clock; without a shared-memory name (an older app) the bridge plays
+//! through an engine of its own. A crash in the plugin takes down only this
+//! process, never the app.
 //!
-//! Args: `<plugin.dll> [owner-hwnd]` — the owner is the app's main window, so
-//! the editor floats above it even though it lives in another process.
+//! Args: `<plugin.dll> [owner-hwnd] [device] [shm-name] [rate]` — the owner is
+//! the app's main window, so the editor floats above it even though it lives
+//! in another process.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use base64::Engine as _;
 use fls_native::editor::EditorWindow;
-use fls_native::{host_callback, log, AudioSource, Engine, Plugin, PluginState};
+use fls_native::{host_callback, log, AudioSource, Engine, Plugin, PluginState, RenderCtx};
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
@@ -56,6 +60,8 @@ fn main() {
     };
     let owner: isize = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let device: Option<String> = args.next().filter(|s| !s.is_empty());
+    let shm_name: Option<String> = args.next().filter(|s| !s.is_empty());
+    let host_rate: Option<u32> = args.next().and_then(|s| s.parse().ok());
     let ui_tid = unsafe { GetCurrentThreadId() };
 
     // Make sure this thread has a message queue before anyone posts to it.
@@ -64,10 +70,19 @@ fn main() {
 
     fls_native::crash::install();
     fls_native::crash::preload_system_runtimes();
-    let mut engine = Engine::start_on(device.as_deref());
+    let shm = shm_name.as_deref().and_then(|n| match fls_native::shm::Shm::open(n) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::write(&format!("[bridge] {e}; playing through its own output"));
+            None
+        }
+    });
+    // Our own engine only when the app isn't rendering us.
+    let mut engine = if shm.is_none() { Some(Engine::start_on(device.as_deref())) } else { None };
+    let rate = engine.as_ref().map(|e| e.sample_rate()).or(host_rate).unwrap_or(48000);
     // Live sample rate, shared with the control thread (it restores it after bounces).
-    let live_rate = Arc::new(std::sync::atomic::AtomicU32::new(engine.sample_rate()));
-    let plugin = match Plugin::load(&path, engine.sample_rate() as f32) {
+    let live_rate = Arc::new(std::sync::atomic::AtomicU32::new(rate));
+    let plugin = match Plugin::load(&path, rate as f32) {
         Ok(p) => p,
         Err(e) => {
             log::write(&format!("[bridge] load failed: {e}"));
@@ -76,16 +91,38 @@ fn main() {
         }
     };
     let source: Arc<dyn AudioSource> = plugin.clone();
-    let strip = engine.add_source(source);
-    let clock = engine.clock();
+    let strip = engine.as_mut().map(|e| e.add_source(source));
+    let clock = engine.as_ref().map(|e| e.clock());
+    let shared_audio = shm.is_some();
+    if let Some(shm) = shm {
+        // Render each block the app asks for, at the app's frame position.
+        let plugin = plugin.clone();
+        let live = live_rate.clone();
+        let _ = std::thread::Builder::new().name("bridge-render".into()).spawn(move || {
+            while !shm.quitting() {
+                let Some((seq, start, frames, rate)) = shm.wait_request(1000) else { continue };
+                fls_native::rt::enter_audio_thread();
+                if rate != 0 && rate != live.load(std::sync::atomic::Ordering::Relaxed) {
+                    live.store(rate, std::sync::atomic::Ordering::Relaxed);
+                    plugin.set_live_sample_rate(rate as f32);
+                }
+                let out = shm.out(frames);
+                out.fill(0.0);
+                plugin.render_add(out, frames, &RenderCtx { start, rate: rate as f32 });
+                host_callback::advance_transport(frames);
+                shm.finish(seq);
+            }
+        });
+    }
     let i = &plugin.info;
     send(json!({
         "t": "loaded", "name": i.name, "vendor": i.vendor, "inputs": i.inputs, "outputs": i.outputs,
         "canReplacing": i.can_replacing, "isSynth": i.is_synth, "hasEditor": i.has_editor,
     }));
 
-    // Peak meter for the UI, ~3x per second while there's signal.
-    {
+    // Peak meter for the UI, ~3x per second while there's signal (the app
+    // meters it itself when it renders us).
+    if !shared_audio {
         let plugin = plugin.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -109,17 +146,26 @@ fn main() {
                 match m.get("t").and_then(Value::as_str).unwrap_or("") {
                     "noteOn" => plugin.note_on(int("pitch", 60) as i32, int("vel", 100) as i32),
                     "noteOff" => plugin.note_off(int("pitch", 60) as i32),
-                    // A timed MIDI message, `delay` engine frames from now.
+                    // A timed MIDI message: at the app's engine frame `at` when it
+                    // renders us, else `delay` frames from now on our own clock.
                     "midi" => {
                         let d: Vec<u8> = m.get("d").and_then(Value::as_array).map(|a| a.iter().map(|v| v.as_u64().unwrap_or(0) as u8).collect()).unwrap_or_default();
                         if d.len() == 3 {
-                            plugin.queue_midi(clock.now() + int("delay", 0).max(0) as u64, [d[0], d[1], d[2]]);
+                            let at = match &clock {
+                                Some(c) => c.now() + int("delay", 0).max(0) as u64,
+                                None => m.get("at").and_then(Value::as_u64).unwrap_or(0),
+                            };
+                            plugin.queue_midi(at, [d[0], d[1], d[2]]);
                         }
                     }
-                    "mix" => strip.set_mix(
-                        m.get("gain").and_then(Value::as_f64).unwrap_or(1.0) as f32,
-                        m.get("pan").and_then(Value::as_f64).unwrap_or(0.0) as f32,
-                    ),
+                    "mix" => {
+                        if let Some(strip) = &strip {
+                            strip.set_mix(
+                                m.get("gain").and_then(Value::as_f64).unwrap_or(1.0) as f32,
+                                m.get("pan").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                            )
+                        }
+                    }
                     "allNotesOff" => plugin.all_notes_off(),
                     "transport" => host_callback::set_transport(
                         m.get("bpm").and_then(Value::as_f64).unwrap_or(120.0),
@@ -189,9 +235,11 @@ fn main() {
                     }
                 }
                 UiCmd::Device(name) => {
-                    let rate = engine.switch_device(name.as_deref());
-                    live_rate.store(rate, std::sync::atomic::Ordering::Relaxed);
-                    plugin.set_live_sample_rate(rate as f32);
+                    if let Some(engine) = engine.as_mut() {
+                        let rate = engine.switch_device(name.as_deref());
+                        live_rate.store(rate, std::sync::atomic::Ordering::Relaxed);
+                        plugin.set_live_sample_rate(rate as f32);
+                    }
                 }
                 UiCmd::Quit => break,
             }

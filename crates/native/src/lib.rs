@@ -15,6 +15,7 @@ pub mod plugin;
 pub mod pool;
 pub mod rt;
 pub mod sched;
+pub mod shm;
 pub mod vst3;
 #[cfg(windows)]
 pub mod wasapi;
