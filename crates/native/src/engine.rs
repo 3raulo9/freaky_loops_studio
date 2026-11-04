@@ -3,6 +3,8 @@
 //! through a strip with gain, pan and a meter) and the test tone — into the
 //! master bus.
 //!
+//! Plugins render in parallel on a small pool of worker threads (pool.rs),
+//! each into its own strip buffer; the audio thread then sums the strips.
 //! The audio thread never blocks and never allocates: the strip list is
 //! swapped in whole (lock-free), every buffer is sized up front, and lists
 //! that are swapped out are released later on the UI thread, so a plugin is
@@ -76,12 +78,19 @@ impl Strip {
         f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
     }
 
-    fn render_add(&self, out: &mut [f32], frames: usize, ctx: &RenderCtx) {
+    /// Render the source into the strip's own buffer (any thread).
+    fn render_own(&self, frames: usize, ctx: &RenderCtx) {
         let Ok(mut st) = self.state.try_lock() else { return };
-        let st = &mut *st;
         let buf = &mut st.buf[..frames * 2];
         buf.fill(0.0);
         self.src.render_add(buf, frames, ctx);
+    }
+
+    /// Add the rendered buffer into `out` at the strip's gain and pan.
+    fn mix_into(&self, out: &mut [f32], frames: usize) {
+        let Ok(mut st) = self.state.try_lock() else { return };
+        let st = &mut *st;
+        let buf = &st.buf[..frames * 2];
         let to = [f32::from_bits(self.target[0].load(Ordering::Relaxed)), f32::from_bits(self.target[1].load(Ordering::Relaxed))];
         let step = [(to[0] - st.cur[0]) / frames as f32, (to[1] - st.cur[1]) / frames as f32];
         let mut g = st.cur;
@@ -98,6 +107,25 @@ impl Strip {
         if peak > f32::from_bits(self.peak.load(Ordering::Relaxed)) {
             self.peak.store(peak.to_bits(), Ordering::Relaxed);
         }
+    }
+
+    #[cfg(test)]
+    fn render_add(&self, out: &mut [f32], frames: usize, ctx: &RenderCtx) {
+        self.render_own(frames, ctx);
+        self.mix_into(out, frames);
+    }
+}
+
+/// One block's worth of strips for the worker pool.
+struct StripJob<'a> {
+    strips: &'a [Arc<Strip>],
+    frames: usize,
+    ctx: &'a RenderCtx,
+}
+
+impl crate::pool::Job for StripJob<'_> {
+    fn run(&self, i: usize) {
+        self.strips[i].render_own(self.frames, self.ctx);
     }
 }
 
@@ -531,6 +559,7 @@ impl Clock {
 /// Per-stream render state, owned by the audio callback.
 struct Renderer {
     shared: Arc<Shared>,
+    pool: crate::pool::Pool,
     reader: BusReader,
     mix: Vec<f32>,
     rate: u32,
@@ -542,7 +571,7 @@ struct Renderer {
 
 impl Renderer {
     fn new(shared: Arc<Shared>, rate: u32) -> Renderer {
-        Renderer { shared, reader: BusReader::default(), mix: vec![0.0; MAX_FRAMES * 2], rate, phase: 0.0, last_start: None, callbacks: 0, load_avg: 0.0 }
+        Renderer { shared, pool: crate::pool::Pool::for_machine(), reader: BusReader::default(), mix: vec![0.0; MAX_FRAMES * 2], rate, phase: 0.0, last_start: None, callbacks: 0, load_avg: 0.0 }
     }
 
     /// Render `frames` of interleaved stereo into `out`.
@@ -597,8 +626,10 @@ impl Renderer {
             }
         }
 
-        for s in self.shared.strips.load().iter() {
-            s.render_add(mix, frames, &ctx);
+        let strips = self.shared.strips.load();
+        self.pool.run(&StripJob { strips: &strips, frames, ctx: &ctx }, strips.len());
+        for s in strips.iter() {
+            s.mix_into(mix, frames);
         }
         host_callback::advance_transport(frames);
         self.shared.frame.store(start + frames as u64, Ordering::Relaxed);

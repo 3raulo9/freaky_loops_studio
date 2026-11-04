@@ -11,6 +11,7 @@ pub mod host_callback;
 pub mod log;
 pub mod pe;
 pub mod plugin;
+pub mod pool;
 pub mod rt;
 pub mod sched;
 pub mod vst3;
