@@ -117,7 +117,7 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { PANELS, DEFAULT_LAYOUT, SPACER_ID } from './toolbar/registry.js'
 import './toolbar/toolbar.css'
 
-const LS_KEY = 'fl.toolbar.layout.v2'
+const LS_KEY = 'fl.toolbar.layout.v3'   // v3: menu + hint at the top-left
 
 // ── Layout state ──────────────────────────────────────────────────────────────
 const layout   = ref(loadLayout())

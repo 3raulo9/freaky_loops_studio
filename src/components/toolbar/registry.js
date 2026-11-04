@@ -50,29 +50,30 @@ export const PANELS = {
 }
 
 // Default layout: ordered list of { id, visible, row }. `row` 0 = primary
-// (top) row, 1 = secondary (lower) row — the toolbar stacks two rows, with the
-// wide hint/status bar living on its own lower row. The serialized user layout
-// is reconciled against this so newly-added panels still appear after upgrades.
+// (top) row, 1 = secondary (lower) row. The familiar arrangement: the main
+// menu at the top-left with the hint bar right under it, transport and time
+// along the top, window shortcuts at the right. The serialized user layout is
+// reconciled against this so newly-added panels still appear after upgrades.
 export const DEFAULT_LAYOUT = [
   // ── Primary row ────────────────────────────────────────────────────────────
-  { id: 'logo',      visible: true, row: 0 },
-  { id: 'add',       visible: true, row: 0 },
+  { id: 'menu',      visible: true, row: 0 },
+  { id: 'master',    visible: true, row: 0 },
+  { id: 'mode',      visible: true, row: 0 },
   { id: 'transport', visible: true, row: 0 },
   { id: 'timecode',  visible: true, row: 0 },
   { id: 'bpm',       visible: true, row: 0 },
-  { id: 'swing',     visible: true, row: 0 },
-  { id: 'steps',     visible: true, row: 0 },
-  { id: 'mode',      visible: true, row: 0 },
   { id: 'metro',     visible: true, row: 0 },
   { id: 'snap',      visible: true, row: 0 },
   { id: SPACER_ID,   visible: true, row: 0 },
-  { id: 'master',    visible: true, row: 0 },
   { id: 'meter',     visible: true, row: 0 },
-  { id: 'tools',     visible: true, row: 0 },
   { id: 'windows',   visible: true, row: 0 },
   // ── Secondary row ──────────────────────────────────────────────────────────
-  { id: 'menu',      visible: true, row: 1 },
   { id: 'hint',      visible: true, row: 1 },
   { id: 'pattern',   visible: true, row: 1 },
+  { id: 'swing',     visible: true, row: 1 },
+  { id: 'steps',     visible: true, row: 1 },
+  { id: 'tools',     visible: true, row: 1 },
+  { id: 'add',       visible: true, row: 1 },
   { id: 'midi',      visible: true, row: 1 },
+  { id: 'logo',      visible: true, row: 1 },
 ]
