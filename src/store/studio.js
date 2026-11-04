@@ -5929,6 +5929,18 @@ export function useStudio() {
 
     // VST instrument (native host): forward the note over IPC; audio comes from
     // the native engine, not the Web Audio graph.
+    if (ch.type === 'midiout') {
+      const target = ch.params?.midiTarget
+      if (target) {
+        const now = Math.round(audioCtx.currentTime * audioCtx.sampleRate)
+        const mc = (ch.params.midiChannel ?? 0) & 15
+        const key = Math.max(0, Math.min(127, p))
+        _queueVstEvent(target, now, 0x90 | mc, key, Math.max(1, Math.round(velocity * 127)))
+        if (!sustain) setTimeout(() => _queueVstEvent(target, Math.round(audioCtx.currentTime * audioCtx.sampleRate), 0x80 | mc, key, 0), 250)
+      }
+      registerVoice(when, 0.2)
+      return
+    }
     if (ch.type === 'vst') {
       sendToHost('vstNoteOn', { id: ch.id, pitch: p, velocity: Math.max(1, Math.round(velocity * 127)) })
       // One-shot audition (drawing a note): auto-release so it doesn't hang.
@@ -6030,6 +6042,8 @@ export function useStudio() {
     _releaseLiveVoice(ch.id + ':' + pitch, t)
     if (ch.type === 'vst') {
       sendToHost('vstNoteOff', { id: ch.id, pitch: pitch + masterPitchSemis.value })
+    } else if (ch.type === 'midiout' && ch.params?.midiTarget) {
+      _queueVstEvent(ch.params.midiTarget, Math.round(audioCtx.currentTime * audioCtx.sampleRate), 0x80 | (ch.params.midiChannel & 15), Math.max(0, Math.min(127, pitch + masterPitchSemis.value)), 0)
     } else if (ch.type === 'wasm') {
       const node = wasmNodes.get(ch.id)
       if (node) node.port.postMessage({ type: 'noteOff', pitch, time: t })
@@ -6484,6 +6498,22 @@ export function useStudio() {
       const len = gate ?? (60 / bpm.value / 4)
       _queueVstEvent(channelId, at, 0x90, key, vel)
       _queueVstEvent(channelId, at + Math.max(1, Math.round(len * rate)), 0x80, key, 0)
+    }
+  }
+
+  // A MIDI-out channel plays another (plugin) channel on its own MIDI
+  // channel — one multi-timbral plugin, several parts.
+  function makeMidiOutPlayFn(params) {
+    return function playMidiOut(ctx, time, { pitch = 60, velocity = 1, gate = null } = {}) {
+      const target = params?.midiTarget
+      if (ctx !== audioCtx || !target) return
+      const rate = ctx.sampleRate
+      const at = Math.round(Math.max(time, ctx.currentTime) * rate)
+      const key = Math.max(0, Math.min(127, Math.round(pitch)))
+      const ch = (params.midiChannel ?? 0) & 15
+      const len = gate ?? (60 / bpm.value / 4)
+      _queueVstEvent(target, at, 0x90 | ch, key, Math.max(1, Math.min(127, Math.round(velocity * 127))))
+      _queueVstEvent(target, at + Math.max(1, Math.round(len * rate)), 0x80 | ch, key, 0)
     }
   }
 
@@ -8040,6 +8070,8 @@ export function useStudio() {
                         ? makeGMPlayFn(ch.params.gmProgram)
                         : ch.type === 'sf2'
                           ? makeSf2PlayFn(ch.params)
+                        : ch.type === 'midiout'
+                          ? makeMidiOutPlayFn(ch.params)
                         : ch.type === 'vst'
                           ? makeVstPlayFn(ch.id)
                           : ch.type === 'sample' && ch.sampleSpec

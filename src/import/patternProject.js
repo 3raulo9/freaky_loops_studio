@@ -228,6 +228,28 @@ export function mapPatternProject(P, env) {
     const pluginSample = (pl.paths ?? []).find(p => AUDIO_EXT.test(p))
     const samplePath = c.sample || (c.kind === 'generator' ? pluginSample : '') || ''
 
+    // MIDI out: it plays the plugin listening on its port (multi-timbral
+    // setups), else it drove an outside General MIDI synth — play that.
+    if (pl.midiOut) {
+      const mo = pl.midiOut
+      const target = mo.port >= 0 && P.channels.find(o => o.plugin?.vst && o.plugin.vst.midiIn === mo.port)
+      if (target && env.desktop) {
+        channels.push({
+          ...base, type: 'midiout', instrumentType: 'midiout',
+          params: { pitch: 60, midiTargetIid: target.iid, midiChannel: mo.channel, gmProgramFallback: mo.program },
+          knobs: [], fnKey: 'melodic', sustains: true,
+        })
+        report.plugins.push({ name, status: `MIDI out → ${target.plugin.vst.name}, channel ${mo.channel + 1}` })
+        continue
+      }
+      channels.push({
+        ...base, type: 'gm', instrumentType: 'gm', color: c.color || lib.gmColor(mo.program),
+        params: lib.gmParams(mo.program), knobs: lib.gmKnobs(), fnKey: 'melodic', sustains: lib.gmSustains(mo.program),
+      })
+      report.substituted.push({ name, as: `General MIDI #${mo.program + 1} (its MIDI out went to an outside synth)` })
+      continue
+    }
+
     if (pl.vst) {
       const hit = env.desktop ? env.resolveVst(pl.vst) : null
       if (hit) {
@@ -322,6 +344,17 @@ export function mapPatternProject(P, env) {
       })
       report.substituted.push({ name, as: 'saw synth', plugin: pl.vst?.name || pl.internal })
     }
+  }
+  // MIDI-out channels play their target plugin's channel; if that plugin
+  // isn't here (not installed → stand-in), fall back to General MIDI.
+  for (const ch of channels) {
+    if (ch.type !== 'midiout') continue
+    const target = channels.find(t => t.id === ourId.get(ch.params.midiTargetIid))
+    if (target?.type === 'vst') { ch.params.midiTarget = target.id; continue }
+    const prog = ch.params.gmProgramFallback ?? 0
+    Object.assign(ch, {
+      type: 'gm', instrumentType: 'gm', params: lib.gmParams(prog), knobs: lib.gmKnobs(), sustains: lib.gmSustains(prog),
+    })
   }
   report.channels = channels.length
 

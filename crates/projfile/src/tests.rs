@@ -316,6 +316,32 @@ fn lifts_framework_state_out_of_native_plugins() {
 }
 
 #[test]
+fn reads_midi_out_targets_and_plugin_ports() {
+    let mut d = vec![0u8; 40];
+    d[0] = 6;
+    d[4] = 13; // MIDI channel 14
+    d[24..28].copy_from_slice(&56u32.to_le_bytes());
+    d[28] = 1;
+    d[30] = 28;
+    let mut pl = Plugin { internal: "MIDI Out".into(), ..Plugin::default() };
+    read_plugin_state(&mut pl, &d);
+    assert_eq!(pl.midi_out, Some(MidiOut { channel: 13, port: 56, program: 28 }));
+    // A wrapper listening on port 56, and one listening on nothing.
+    let rec1 = |port: i32| [port.to_le_bytes(), port.to_le_bytes(), 12i32.to_le_bytes(), [0; 4], [0; 4]].concat();
+    let blob = |port: i32| {
+        let mut b = 12u32.to_le_bytes().to_vec();
+        for (id, body) in [(1u32, rec1(port)), (54, b"Synth".to_vec()), (55, b"C:/x.dll".to_vec())] {
+            b.extend_from_slice(&id.to_le_bytes());
+            b.extend_from_slice(&(body.len() as u64).to_le_bytes());
+            b.extend_from_slice(&body);
+        }
+        b
+    };
+    assert_eq!(read_vst_records(&blob(56)).unwrap().midi_in, 56);
+    assert_eq!(read_vst_records(&blob(-1)).unwrap().midi_in, -1);
+}
+
+#[test]
 fn rejects_and_survives_garbage() {
     assert!(parse(b"RIFF....").is_err());
     let mut w = W::new("25.0.0");

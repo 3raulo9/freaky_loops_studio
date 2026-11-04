@@ -545,6 +545,9 @@ fn read_plugin_state(pl: &mut Plugin, d: &[u8]) {
     }
     pl.paths = embedded_paths(d);
     pl.portable_state = portable_state(d).to_vec();
+    if pl.internal.eq_ignore_ascii_case("MIDI Out") {
+        pl.midi_out = midi_out(d);
+    }
     // Sound-font players: the program number sits just before a fixed 7-byte tail.
     if pl.paths.iter().any(|p| p.to_ascii_lowercase().ends_with(".sf2")) && d.len() > 11 {
         if let Some(prog) = u32_at(d, d.len() - 11).filter(|&v| v < 128) {
@@ -568,6 +571,19 @@ fn portable_state(d: &[u8]) -> &[u8] {
     &d[at..end]
 }
 
+/// The MIDI-out generator's settings: version, MIDI channel at 4, the port
+/// at 24 and the program number at 30.
+fn midi_out(d: &[u8]) -> Option<MidiOut> {
+    if d.len() < 32 {
+        return None;
+    }
+    Some(MidiOut {
+        channel: (u32_at(d, 4)? & 15) as u8,
+        port: u32_at(d, 24)? as i32,
+        program: (u16::from_le_bytes([d[30], d[31]]) & 127) as u8,
+    })
+}
+
 const VST_IDS: [u32; 13] = [1, 2, 30, 31, 32, 50, 51, 52, 53, 54, 55, 56, 57];
 
 fn read_vst_records(d: &[u8]) -> Option<Vst> {
@@ -575,7 +591,7 @@ fn read_vst_records(d: &[u8]) -> Option<Vst> {
     if !(1..=64).contains(&kind) || d.len() < 16 {
         return None;
     }
-    let mut v = Vst::default();
+    let mut v = Vst { midi_in: -1, ..Vst::default() };
     let mut i = 4;
     let mut known = 0;
     while i < d.len() {
@@ -589,6 +605,8 @@ fn read_vst_records(d: &[u8]) -> Option<Vst> {
         known += VST_IDS.contains(&id) as usize;
         let s = || String::from_utf8_lossy(body).trim_end_matches('\0').to_string();
         match id {
+            // MIDI input port, then output port (-1 = none).
+            1 => v.midi_in = u32_at(body, 0).map_or(-1, |p| p as i32),
             31 => v.inputs = u32_at(body, 0).unwrap_or(0),
             32 => v.outputs = u32_at(body, 0).unwrap_or(0),
             51 => v.fourcc = s(),
@@ -717,6 +735,16 @@ fn plugin_json(j: &mut Json, k: &str, pl: &Plugin) {
         Some(v) => j.num("program", v as f64),
         None => j.null("program"),
     }
+    match pl.midi_out {
+        Some(m) => {
+            j.obj_k("midiOut");
+            j.num("channel", m.channel as f64);
+            j.num("port", m.port as f64);
+            j.num("program", m.program as f64);
+            j.end_obj();
+        }
+        None => j.null("midiOut"),
+    }
     if pl.portable_state.is_empty() {
         j.null("portableState");
     } else {
@@ -733,6 +761,7 @@ fn plugin_json(j: &mut Json, k: &str, pl: &Plugin) {
             j.str("guid", &v.guid);
             j.num("inputs", v.inputs as f64);
             j.num("outputs", v.outputs as f64);
+            j.num("midiIn", v.midi_in as f64);
             // Same tagged form the desktop host saves: 'C' + chunk / 'P' + f32s.
             match &v.state {
                 VstState::None => j.null("state"),

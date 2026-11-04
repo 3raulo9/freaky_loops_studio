@@ -44,6 +44,8 @@ pub struct Plugin {
     /// A plugin-framework state blob found inside a native plugin's state —
     /// what the same plugin's VST build saves and restores as-is.
     pub portable_state: Vec<u8>,
+    /// The MIDI-out generator's target: port, channel and program.
+    pub midi_out: Option<MidiOut>,
     pub state_len: usize,
 }
 
@@ -59,6 +61,19 @@ pub struct Vst {
     pub state: VstState,
     pub inputs: u32,
     pub outputs: u32,
+    /// MIDI port the plugin listens on (-1 = none): MIDI-out channels sending
+    /// to this port play it.
+    pub midi_in: i32,
+}
+
+/// Where a MIDI-out channel sends its notes.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct MidiOut {
+    /// 0-15.
+    pub channel: u8,
+    /// -1 = none.
+    pub port: i32,
+    pub program: u8,
 }
 
 #[derive(Debug, Default, Clone)]
